@@ -30,7 +30,8 @@ Not part of the current MVP:
 - `docs/PLUGIN_SCOPE.md`: current GrimmLink MVP scope and integration notes
 - `docs/TEST_PLAN.md`: current manual and backend/plugin integration test plan
 - `docs/RELEASE.md`: current MVP release checklist and known limitations
-- `docs/content/` and `test/`: legacy upstream BookLoreSync documentation/tests retained as reference only until a fuller cleanup pass
+- `docs/content/`: legacy upstream BookLoreSync documentation retained as reference only
+- `legacy/upstream-bookloresync-tests/`: legacy upstream test suite retained as reference only
 
 ## Installation
 
@@ -53,4 +54,4 @@ Not part of the current MVP:
 - Auto-update should remain disabled until GrimmLink has its own release channel.
 - GrimmLink sends KOReader-native EPUB progress only. It does not convert to EPUB CFI and does not bridge into Grimmory Web Reader fields.
 - This repo is now separate from the main Grimmory server repository so plugin work can evolve independently.
-- The active GrimmLink MVP source of truth is `grimmlink.koplugin/` plus the top-level docs listed above. Legacy upstream docs/tests under `docs/content/` and `test/` are not the authoritative MVP contract.
+- The active GrimmLink MVP source of truth is `grimmlink.koplugin/` plus the top-level docs listed above. Legacy upstream docs/tests under `docs/content/` and `legacy/upstream-bookloresync-tests/` are not the authoritative MVP contract.

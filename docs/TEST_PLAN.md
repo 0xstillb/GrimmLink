@@ -6,7 +6,11 @@ The active GrimmLink automated tests live under:
 
 - `grimmlink.koplugin/test/`
 
-The repository root `test/` directory still contains legacy upstream BookLoreSync tests and should be treated as reference/archive material until a later cleanup pass.
+Legacy upstream BookLoreSync tests now live under:
+
+- `legacy/upstream-bookloresync-tests/`
+
+They should be treated as reference/archive material and are not part of the active GrimmLink MVP gate.
 
 ## MVP Verification Goals
 

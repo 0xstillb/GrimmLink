@@ -27,7 +27,7 @@ jobs:
       - name: Compile gettext translations
         run: |
           sudo apt-get install -y gettext
-          find bookloresync.koplugin/locale -name "*.po" | while read po; do
+          find grimmlink.koplugin/locale -name "*.po" | while read po; do
             mo="${po%.po}.mo"
             echo "Compiling $po -> $mo"
             msgfmt "$po" -o "$mo"
@@ -35,7 +35,7 @@ jobs:
 
       - name: Create plugin archive
         run: |
-          zip -r bookloresync.koplugin.zip bookloresync.koplugin/
+          zip -r grimmlink.koplugin.zip grimmlink.koplugin/
 
       - name: Extract and prepare changelog
         id: changelog
@@ -72,7 +72,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            bookloresync.koplugin.zip
+            grimmlink.koplugin.zip
             CHANGELOG.md
           body: ${{ steps.changelog.outputs.changelog }}
           draft: false

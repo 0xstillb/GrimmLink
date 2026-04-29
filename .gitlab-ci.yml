@@ -63,23 +63,23 @@ zip-koplugin-release:
 
     - echo "Compiling gettext translations"
     - |
-      find "$CI_PROJECT_DIR/bookloresync.koplugin/locale" -name "*.po" | while read po; do
+      find "$CI_PROJECT_DIR/grimmlink.koplugin/locale" -name "*.po" | while read po; do
         mo="${po%.po}.mo"
         echo "Compiling $po -> $mo"
         msgfmt "$po" -o "$mo"
       done
 
     - echo "Creating koplugin release archive"
-    - cd "$CI_PROJECT_DIR/bookloresync.koplugin"
-    - zip -r "$CI_PROJECT_DIR/bookloresync.koplugin.zip" *.lua locale/
+    - cd "$CI_PROJECT_DIR/grimmlink.koplugin"
+    - zip -r "$CI_PROJECT_DIR/grimmlink.koplugin.zip" *.lua locale/
     - cd "$CI_PROJECT_DIR"
 
-    - ls -lah "$CI_PROJECT_DIR/bookloresync.koplugin.zip"
+    - ls -lah "$CI_PROJECT_DIR/grimmlink.koplugin.zip"
 
     # Upload the plugin ZIP
     - >
       glab release upload "$CI_COMMIT_TAG"
-      "$CI_PROJECT_DIR/bookloresync.koplugin.zip#bookloresync.koplugin.zip#package"
+      "$CI_PROJECT_DIR/grimmlink.koplugin.zip#grimmlink.koplugin.zip#package"
       --use-package-registry
       -R "$CI_PROJECT_PATH"
 
@@ -95,5 +95,5 @@ zip-koplugin-release:
 
   artifacts:
     paths:
-      - bookloresync.koplugin.zip
+      - grimmlink.koplugin.zip
       - CHANGELOG.md

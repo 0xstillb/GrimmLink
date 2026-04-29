@@ -1,8 +1,15 @@
 +++
-title = "BookLore Sync"
-description = "Official documentation for the BookLore Sync KOReader plugin."
+title = "Legacy BookLoreSync Reference"
+description = "Legacy upstream BookLoreSync documentation retained for reference while GrimmLink MVP documentation lives in the top-level docs files."
 sort_by = "weight"
 +++
+
+> Legacy upstream reference only. The active GrimmLink MVP source of truth is:
+>
+> - `grimmlink.koplugin/`
+> - `docs/PLUGIN_SCOPE.md`
+> - `docs/TEST_PLAN.md`
+> - `docs/RELEASE.md`
 
 <div class="section-cards">
 

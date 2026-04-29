@@ -1,7 +1,7 @@
 # The URL the site will be built for
-base_url = "https://docs.worldteacher.dev/wt-booklore/booklore-koreader-plugin"
-title = "Booklore Sync - KOReader Plugin"
-description = "Official documentation for the Booklore Sync KOReader plugin. Automatically track reading sessions, sync ratings, highlights, and notes to your self-hosted Booklore server."
+base_url = "https://github.com/0xstillb/grimmlink"
+title = "Legacy BookLoreSync Reference"
+description = "Legacy upstream BookLoreSync documentation retained for reference during the GrimmLink MVP transition."
 theme = "tanuki"
 # Whether to automatically compile all Sass files in the sass directory
 compile_sass = true
@@ -14,6 +14,6 @@ insert_anchor_links = "left"
 
 [extra]
 mode = "docs"
-gitlab = "https://gitlab.worldteacher.dev/wt-booklore/booklore-koreader-plugin"
+gitlab = "https://github.com/0xstillb/grimmlink"
 show_theme_toggle = true
 

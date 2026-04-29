@@ -44,7 +44,7 @@
 ## Known Limitations
 
 - raw remote jump depends on KOReader runtime methods available on the device
-- some legacy upstream docs/tests remain in the repository as reference material
+- some legacy upstream docs/tests remain in the repository as reference material under `docs/content/` and `legacy/upstream-bookloresync-tests/`
 - active GrimmLink MVP source of truth is `grimmlink.koplugin/` and the top-level docs in `docs/`
 
 ## Later Phase Roadmap

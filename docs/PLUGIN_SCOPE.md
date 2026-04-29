@@ -78,6 +78,11 @@ Auto-update is intentionally disabled for GrimmLink MVP.
 
 It must not point to the original `WorldTeacher/BookLoreSync-plugin` releases.
 
+Legacy upstream documentation and tests remain in this repository for reference only:
+
+- `docs/content/`
+- `legacy/upstream-bookloresync-tests/`
+
 ## Later Phases Only
 
 Not part of the current MVP:

@@ -24,7 +24,7 @@ fi
 
 rm -f luacov.stats.out luacov.report.out coverage.xml
 
-echo "Running GrimmLink KOReader plugin test suite"
+echo "Running GrimmLink KOReader plugin test suite (active MVP tests only)"
 busted --output utfTerminal --pattern "_spec%.lua$" grimmlink.koplugin/test
 
 echo "Generating luacov text report"
