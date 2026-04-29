@@ -4,7 +4,7 @@ local json = require("json")
 local logger = require("logger")
 
 local Database = {
-    VERSION = 1,
+    VERSION = 2,
     conn = nil,
     db_path = nil,
 }
@@ -110,6 +110,29 @@ Database.migrations = {
         ]],
         [[
             CREATE INDEX IF NOT EXISTS idx_pending_sessions_book_id ON pending_sessions(book_id)
+        ]],
+    },
+    [2] = {
+        [[
+            CREATE TABLE IF NOT EXISTS shelf_sync_map (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id INTEGER NOT NULL UNIQUE,
+                shelf_id INTEGER NOT NULL,
+                remote_filename TEXT,
+                remote_title TEXT,
+                remote_author TEXT,
+                remote_format TEXT,
+                remote_file_size_kb INTEGER,
+                local_path TEXT,
+                downloaded_at INTEGER,
+                last_seen_in_shelf_at INTEGER,
+                downloaded_by_grimmlink INTEGER DEFAULT 1,
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_shelf_id ON shelf_sync_map(shelf_id)
         ]],
     },
 }
@@ -758,6 +781,129 @@ function Database:updatePendingSessionBookId(id, book_id)
     local result = stmt:step()
     stmt:close()
     return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:getShelfSyncEntry(book_id)
+    local stmt = self.conn:prepare([[
+        SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
+               remote_format, remote_file_size_kb, local_path,
+               downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink
+        FROM shelf_sync_map
+        WHERE book_id = ?
+    ]])
+    if not stmt then return nil end
+    stmt:bind(tonumber(book_id))
+
+    return firstRow(stmt, function(row)
+        return {
+            id = tonumber(row[1]),
+            book_id = tonumber(row[2]),
+            shelf_id = tonumber(row[3]),
+            remote_filename = row[4] and tostring(row[4]) or nil,
+            remote_title = row[5] and tostring(row[5]) or nil,
+            remote_author = row[6] and tostring(row[6]) or nil,
+            remote_format = row[7] and tostring(row[7]) or nil,
+            remote_file_size_kb = row[8] and tonumber(row[8]) or nil,
+            local_path = row[9] and tostring(row[9]) or nil,
+            downloaded_at = row[10] and tonumber(row[10]) or nil,
+            last_seen_in_shelf_at = row[11] and tonumber(row[11]) or nil,
+            downloaded_by_grimmlink = row[12] and tonumber(row[12]) or 1,
+        }
+    end)
+end
+
+function Database:upsertShelfSyncEntry(entry)
+    local stmt = self.conn:prepare([[
+        INSERT INTO shelf_sync_map (
+            book_id, shelf_id, remote_filename, remote_title, remote_author,
+            remote_format, remote_file_size_kb, local_path,
+            downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
+        ON CONFLICT(book_id) DO UPDATE SET
+            shelf_id = excluded.shelf_id,
+            remote_filename = COALESCE(excluded.remote_filename, shelf_sync_map.remote_filename),
+            remote_title = COALESCE(excluded.remote_title, shelf_sync_map.remote_title),
+            remote_author = COALESCE(excluded.remote_author, shelf_sync_map.remote_author),
+            remote_format = COALESCE(excluded.remote_format, shelf_sync_map.remote_format),
+            remote_file_size_kb = COALESCE(excluded.remote_file_size_kb, shelf_sync_map.remote_file_size_kb),
+            local_path = COALESCE(excluded.local_path, shelf_sync_map.local_path),
+            downloaded_at = COALESCE(excluded.downloaded_at, shelf_sync_map.downloaded_at),
+            last_seen_in_shelf_at = excluded.last_seen_in_shelf_at,
+            updated_at = excluded.updated_at
+    ]])
+    if not stmt then return false end
+
+    stmt:bind(
+        tonumber(entry.book_id),
+        tonumber(entry.shelf_id),
+        entry.remote_filename,
+        entry.remote_title,
+        entry.remote_author,
+        entry.remote_format,
+        entry.remote_file_size_kb and tonumber(entry.remote_file_size_kb) or nil,
+        entry.local_path,
+        entry.downloaded_at and tonumber(entry.downloaded_at) or nil,
+        entry.last_seen_in_shelf_at and tonumber(entry.last_seen_in_shelf_at) or nil,
+        entry.downloaded_by_grimmlink ~= nil and tonumber(entry.downloaded_by_grimmlink) or 1
+    )
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:getAllShelfSyncEntries(shelf_id)
+    local stmt = self.conn:prepare([[
+        SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
+               remote_format, remote_file_size_kb, local_path,
+               downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink
+        FROM shelf_sync_map
+        WHERE shelf_id = ?
+        ORDER BY id ASC
+    ]])
+    if not stmt then return {} end
+    stmt:bind(tonumber(shelf_id))
+
+    local rows = {}
+    for row in stmt:rows() do
+        rows[#rows + 1] = {
+            id = tonumber(row[1]),
+            book_id = tonumber(row[2]),
+            shelf_id = tonumber(row[3]),
+            remote_filename = row[4] and tostring(row[4]) or nil,
+            remote_title = row[5] and tostring(row[5]) or nil,
+            remote_author = row[6] and tostring(row[6]) or nil,
+            remote_format = row[7] and tostring(row[7]) or nil,
+            remote_file_size_kb = row[8] and tonumber(row[8]) or nil,
+            local_path = row[9] and tostring(row[9]) or nil,
+            downloaded_at = row[10] and tonumber(row[10]) or nil,
+            last_seen_in_shelf_at = row[11] and tonumber(row[11]) or nil,
+            downloaded_by_grimmlink = row[12] and tonumber(row[12]) or 1,
+        }
+    end
+    stmt:close()
+    return rows
+end
+
+function Database:deleteShelfSyncEntry(book_id)
+    local stmt = self.conn:prepare("DELETE FROM shelf_sync_map WHERE book_id = ?")
+    if not stmt then return false end
+    stmt:bind(tonumber(book_id))
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:getShelfSyncStats()
+    local stmt = self.conn:prepare("SELECT COUNT(*) FROM shelf_sync_map")
+    if not stmt then return { total = 0 } end
+    local count = 0
+    for row in stmt:rows() do
+        count = tonumber(row[1]) or 0
+        break
+    end
+    stmt:close()
+    return { total = count }
 end
 
 return Database

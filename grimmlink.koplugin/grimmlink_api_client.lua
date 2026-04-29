@@ -236,6 +236,68 @@ function APIClient:submitSession(session_payload)
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
+function APIClient:getShelves()
+    local success, code, response = self:request("GET", "/api/koreader/shelves")
+    if success and type(response) == "table" then
+        return true, response
+    end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
+function APIClient:getShelfBooks(shelf_id)
+    local success, code, response = self:request(
+        "GET",
+        "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books"
+    )
+    if success and type(response) == "table" then
+        return true, response
+    end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
+function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec)
+    if not self.server_url or self.server_url == "" then
+        return false, "Server URL not configured"
+    end
+
+    local tmp_path = dest_path .. ".tmp"
+    local file, err = io.open(tmp_path, "wb")
+    if not file then
+        return false, "Cannot open temp file: " .. tostring(err)
+    end
+
+    local url = self.server_url .. "/api/koreader/books/" .. tostring(book_id) .. "/download"
+    self:log("info", "GrimmLink API: GET (binary)", url)
+
+    local protocol = url:match("^https://") and https or http
+    protocol.TIMEOUT = timeout_sec or 120
+
+    local ok, code = protocol.request{
+        url = url,
+        method = "GET",
+        headers = {
+            ["x-auth-user"] = self.username,
+            ["x-auth-key"] = self.auth_key,
+        },
+        sink = ltn12.sink.file(file),
+    }
+
+    if type(code) ~= "number" or code < 200 or code >= 300 then
+        os.remove(tmp_path)
+        local msg = "Download failed: HTTP " .. tostring(code or ok or "connection failed")
+        self:log("warn", "GrimmLink download error:", msg)
+        return false, msg
+    end
+
+    local rename_ok, rename_err = os.rename(tmp_path, dest_path)
+    if not rename_ok then
+        os.remove(tmp_path)
+        return false, "Failed to save file: " .. tostring(rename_err)
+    end
+
+    return true, nil
+end
+
 function APIClient:submitSessionBatch(book_id, book_hash, book_type, device, device_id, sessions)
     local payload = {
         bookId = book_id,

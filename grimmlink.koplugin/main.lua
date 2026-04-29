@@ -14,6 +14,7 @@ local ffiutil = require("ffi/util")
 local Database = require("grimmlink_database")
 local APIClient = require("grimmlink_api_client")
 local FileLogger = require("grimmlink_file_logger")
+local ShelfSync = require("grimmlink_shelf_sync")
 
 local _ = require("gettext")
 local T = ffiutil.template
@@ -39,6 +40,15 @@ local DEFAULTS = {
     threshold_minutes = 5,
     threshold_pages = 5,
     session_min_seconds = 30,
+    -- Shelf Sync settings
+    shelf_sync_enabled = false,
+    shelf_id = nil,
+    shelf_name = "",
+    download_dir = "",
+    auto_sync_shelf_on_resume = false,
+    delete_removed_shelf_books = false,
+    shelf_use_original_filename = true,
+    delete_sdr_on_book_delete = false,
 }
 
 local function safeToString(value)
@@ -227,6 +237,18 @@ function Grimmlink:init()
 
     self.api = APIClient:new()
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
+
+    -- Shelf Sync settings
+    self.shelf_sync_enabled = self:readSetting("shelf_sync_enabled", DEFAULTS.shelf_sync_enabled)
+    self.shelf_id = self:readSetting("shelf_id", DEFAULTS.shelf_id)
+    self.shelf_name = self:readSetting("shelf_name", DEFAULTS.shelf_name)
+    self.download_dir = self:readSetting("download_dir", DEFAULTS.download_dir)
+    self.auto_sync_shelf_on_resume = self:readSetting("auto_sync_shelf_on_resume", DEFAULTS.auto_sync_shelf_on_resume)
+    self.delete_removed_shelf_books = self:readSetting("delete_removed_shelf_books", DEFAULTS.delete_removed_shelf_books)
+    self.shelf_use_original_filename = self:readSetting("shelf_use_original_filename", DEFAULTS.shelf_use_original_filename)
+    self.delete_sdr_on_book_delete = self:readSetting("delete_sdr_on_book_delete", DEFAULTS.delete_sdr_on_book_delete)
+
+    self.shelf_sync = ShelfSync:new(self.db, self.api)
 
     self.current_session = nil
     self.last_auto_sync_time = 0
@@ -1440,7 +1462,147 @@ function Grimmlink:onResume()
         self:startSession()
     end
 
+    -- Auto-sync shelf on resume (optional, default OFF)
+    if self.shelf_sync_enabled and self.auto_sync_shelf_on_resume and self.shelf_id and self:isOnline() then
+        self:syncShelfNow(true)
+    end
+
     return false
+end
+
+function Grimmlink:showShelfPicker()
+    if not self.enabled then
+        self:showMessage(_("GrimmLink sync is disabled. Enable it first."), 3)
+        return
+    end
+    if self.server_url == "" or self.username == "" then
+        self:showMessage(_("Configure server URL and username first."), 3)
+        return
+    end
+
+    self:showMessage(_("Fetching shelves from server…"), 2)
+    local ok, shelves = self.api:getShelves()
+    if not ok then
+        self:showMessage(T(_("Failed to fetch shelves: %1"), tostring(shelves)), 4)
+        return
+    end
+
+    if type(shelves) ~= "table" or #shelves == 0 then
+        self:showMessage(_("No shelves available."), 3)
+        return
+    end
+
+    local buttons = {}
+    for _, shelf in ipairs(shelves) do
+        local shelf_id = shelf.id
+        local shelf_name = shelf.name or ("Shelf #" .. tostring(shelf_id))
+        local count_str = shelf.bookCount and (" (" .. shelf.bookCount .. ")") or ""
+        buttons[#buttons + 1] = {
+            {
+                text = shelf_name .. count_str,
+                callback = function()
+                    self:saveSetting("shelf_id", shelf_id)
+                    self:saveSetting("shelf_name", shelf_name)
+                    UIManager:close(self._shelf_picker_dialog)
+                    self:showMessage(T(_("Shelf selected: %1"), shelf_name), 2)
+                end,
+            }
+        }
+    end
+    buttons[#buttons + 1] = {
+        {
+            text = _("Cancel"),
+            callback = function()
+                UIManager:close(self._shelf_picker_dialog)
+            end,
+        }
+    }
+
+    self._shelf_picker_dialog = ButtonDialog:new{
+        title = _("Select Shelf to Sync"),
+        buttons = buttons,
+    }
+    UIManager:show(self._shelf_picker_dialog)
+end
+
+function Grimmlink:configureDownloadDir()
+    local current = self.download_dir or ""
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Download Directory"),
+        input = current,
+        description = _("Leave empty to auto-detect KOReader books directory."),
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local value = dialog:getInputText()
+                        if value == nil then value = "" end
+                        self:saveSetting("download_dir", value)
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function Grimmlink:syncShelfNow(silent)
+    if not self.shelf_sync_enabled then
+        if not silent then
+            self:showMessage(_("Shelf Sync is disabled. Enable it in Shelf Sync settings."), 3)
+        end
+        return
+    end
+
+    if not self.shelf_id then
+        if not silent then
+            self:showMessage(_("No shelf selected. Go to Shelf Sync → Select Shelf."), 3)
+        end
+        return
+    end
+
+    if not self:isOnline() then
+        if not silent then
+            self:showMessage(_("No network connection."), 3)
+        end
+        return
+    end
+
+    if not silent then
+        self:showMessage(T(_("Syncing shelf: %1…"), self.shelf_name or tostring(self.shelf_id)), 2)
+    end
+
+    local summary = self.shelf_sync:syncShelf({
+        shelf_id = self.shelf_id,
+        download_dir = self.download_dir,
+        use_original_filename = self.shelf_use_original_filename,
+        delete_removed = self.delete_removed_shelf_books,
+        delete_sdr = self.delete_sdr_on_book_delete,
+    })
+
+    if not silent then
+        local msg = T(_("Shelf sync complete: %1 downloaded, %2 skipped, %3 failed"),
+            summary.synced, summary.skipped, summary.failed)
+        if summary.deleted > 0 then
+            msg = msg .. "\n" .. T(_("%1 removed"), summary.deleted)
+        end
+        if #summary.errors > 0 then
+            msg = msg .. "\n" .. summary.errors[1]
+        end
+        self:showMessage(msg, 5)
+    end
 end
 
 function Grimmlink:addToMainMenu(menu_items)
@@ -1568,6 +1730,90 @@ function Grimmlink:addToMainMenu(menu_items)
                         end,
                     },
                 },
+            },
+            {
+                text = _("Shelf Sync"),
+                sub_item_table = {
+                    {
+                        text = _("Enable Shelf Sync"),
+                        checked_func = function()
+                            return self.shelf_sync_enabled
+                        end,
+                        callback = function()
+                            self:saveSetting("shelf_sync_enabled", not self.shelf_sync_enabled)
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            local name = self.shelf_name and self.shelf_name ~= "" and self.shelf_name or _("(none)")
+                            return T(_("Select Shelf: %1"), name)
+                        end,
+                        callback = function()
+                            self:showShelfPicker()
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            local dir = self.download_dir and self.download_dir ~= "" and self.download_dir or _("(auto)")
+                            return T(_("Download Directory: %1"), dir)
+                        end,
+                        callback = function()
+                            self:configureDownloadDir()
+                        end,
+                    },
+                    {
+                        text = _("Use Original Filename"),
+                        checked_func = function()
+                            return self.shelf_use_original_filename
+                        end,
+                        callback = function()
+                            self:saveSetting("shelf_use_original_filename", not self.shelf_use_original_filename)
+                        end,
+                    },
+                    {
+                        text = _("Auto-sync on Resume"),
+                        checked_func = function()
+                            return self.auto_sync_shelf_on_resume
+                        end,
+                        callback = function()
+                            self:saveSetting("auto_sync_shelf_on_resume", not self.auto_sync_shelf_on_resume)
+                        end,
+                    },
+                    {
+                        text = _("Delete Removed Books"),
+                        checked_func = function()
+                            return self.delete_removed_shelf_books
+                        end,
+                        callback = function()
+                            if not self.delete_removed_shelf_books then
+                                UIManager:show(ConfirmBox:new{
+                                    text = _("Enable deletion of books removed from the shelf?\n\nOnly books previously downloaded by GrimmLink will be affected."),
+                                    ok_text = _("Enable"),
+                                    ok_callback = function()
+                                        self:saveSetting("delete_removed_shelf_books", true)
+                                    end,
+                                })
+                            else
+                                self:saveSetting("delete_removed_shelf_books", false)
+                            end
+                        end,
+                    },
+                    {
+                        text = _("Delete .sdr When Removing"),
+                        checked_func = function()
+                            return self.delete_sdr_on_book_delete
+                        end,
+                        callback = function()
+                            self:saveSetting("delete_sdr_on_book_delete", not self.delete_sdr_on_book_delete)
+                        end,
+                    },
+                },
+            },
+            {
+                text = _("Sync Shelf Now"),
+                callback = function()
+                    self:syncShelfNow()
+                end,
             },
             {
                 text_func = function()

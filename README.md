@@ -6,7 +6,7 @@ This repository is the dedicated KOReader plugin home for GrimmLink. It started 
 
 ## Current Scope
 
-The current GrimmLink MVP focuses on:
+GrimmLink currently supports:
 
 - KOReader authentication with `x-auth-user` and `x-auth-key`
 - book matching by hash against Grimmory
@@ -14,14 +14,21 @@ The current GrimmLink MVP focuses on:
 - EPUB progress syncing as KOReader-native data
 - reading session upload and offline batch replay
 - Moon+ Reader-like local/remote progress comparison
+- **Shelf Sync** — download books from a selected Grimmory shelf to a local KOReader folder
+  - shelf selection via in-plugin picker
+  - safe local mapping (`shelf_sync_map`) — tracks GrimmLink-downloaded files
+  - skip already-downloaded books
+  - optional deletion of removed shelf books (default off; only GrimmLink-tracked files)
+  - optional `.sdr` sidecar deletion (default off)
+  - configurable download directory
 
-Not part of the current MVP:
+Not yet implemented:
 
 - Web Reader bridge
 - EPUB CFI conversion
 - rating sync
 - highlights, notes, or bookmarks sync
-- shelf or library sync
+- magic shelf (dynamic filter-based shelf) support
 
 ## Repository Layout
 
