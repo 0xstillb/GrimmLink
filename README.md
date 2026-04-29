@@ -1,138 +1,52 @@
-# Booklore Sync - KOReader Plugin
+# GrimmLink
 
-> **⚠️ Important Notice**
->
-> This GitHub repository is a **public-facing mirror** of the main development repository.
-> The main branch is currently not being updated, as the mirror is refused due to invalid login data, working on a fix. Releases are built using pushed tags and will continue to work
-> **If you encounter issues or bugs:**
-> - You are welcome to create GitHub issues
-> - **You MUST mention `@WorldTeacher` in your issue** - GitHub notifications do not reach me
-> - I do not regularly monitor this repository
-> - Without the mention, your issue may go unnoticed
->
-> **Primary Support:** [Documentation Site](https://docs.worldteacher.dev/wt-booklore/booklore-koreader-plugin/)
+KOReader Companion for Grimmory
 
----
+This repository is the dedicated KOReader plugin home for GrimmLink. It started as a fork of `WorldTeacher/BookLoreSync-plugin`, and it is now being adapted for Grimmory-specific backend support and GrimmLink branding.
 
-**Automatically track reading sessions in KOReader and sync them to your self-hosted Booklore server.**
+## Current Scope
 
-> **Docker Image Requirement**
->
-> This plugin requires the custom Booklore Docker image to function. The standard Booklore image does **not** include the necessary API endpoints used by this plugin.
->
-> You must use: **`worldteacher99/booklore:koreader-plugin`**
+The current GrimmLink MVP focuses on:
 
-## Features
+- KOReader authentication with `x-auth-user` and `x-auth-key`
+- book matching by hash against Grimmory
+- KOReader-native progress pull and push
+- EPUB progress syncing as KOReader-native data
+- reading session upload and offline batch replay
+- Moon+ Reader-like local/remote progress comparison
 
-- 📚 **Automatic Session Tracking** - Duration, progress, pages, and location tracking
-- ⭐ **Rating Sync** - Sync book ratings to Booklore (KOReader stars or custom 1-10 rating)
-- 📝 **Highlights & Notes** - Sync annotations to Booklore (in-book or web-UI notes)
-- 🔄 **Offline Support** - Queue sessions when offline, auto-sync when connected
-- 🗄️ **Smart Caching** - Local SQLite database with book hash fingerprinting
-- 🔄 **Auto-Update** - Self-updating from within KOReader
-- ⚙️ **Flexible Configuration** - Customize thresholds, sync triggers, and behavior
+Not part of the current MVP:
+
+- Web Reader bridge
+- EPUB CFI conversion
+- rating sync
+- highlights, notes, or bookmarks sync
+- shelf or library sync
+
+## Repository Layout
+
+- `grimmlink.koplugin/`: active plugin package for KOReader
+- `docs/`: legacy upstream documentation and future cleanup surface
+- `test/`: legacy upstream tests that may be trimmed or replaced later
 
 ## Installation
 
-1. **Copy plugin to KOReader:**
+1. Copy the plugin package into KOReader's `plugins` directory:
+
    ```bash
-   cp -r bookloresync.koplugin {your_koreader_installation}/plugins/
+   cp -r grimmlink.koplugin {your_koreader_installation}/plugins/
    ```
 
-2. **Restart KOReader** (complete restart, not sleep mode)
+2. Fully restart KOReader.
 
-3. **Configure:**
-   - Go to **Tools → BookLore Sync → Authentication**
-   - Enter server URL, username, and password
-   - Tap **Test Connection** to verify
+3. In KOReader, configure:
+   - Grimmory server URL
+   - username
+   - auth key
+   - device name / device ID
 
-## Quick Start
+## Notes
 
-1. Open a book → Plugin calculates hash and fetches book ID
-2. Read for 30+ seconds → Session tracked automatically  
-3. Close the book → Session validated and synced
-4. Check your Booklore server → Session appears!
-
-**First time?** See the [Getting Started Guide](https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/getting-started/quick-start/)
-
-## Documentation
-
-**📚 Full documentation:** https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/
-
-Key sections:
-- [Installation](https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/getting-started/installation/)
-- [Authentication Setup](https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/configuration/authentication/)
-- [Session Tracking & Sync](https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/configuration/session-tracking/)
-- [Troubleshooting](https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/troubleshooting/common-issues/)
-- [API Reference](https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/reference/api-endpoints/)
-
-## Updates
-
-The plugin can update itself from within KOReader:
-
-1. Go to **Tools → BookLore Sync → About & Updates**
-2. Tap **Check for Updates**
-3. Tap **Install** if update available
-4. Restart KOReader when prompted
-
-Auto-check on startup is enabled by default (checks once per day).
-
-## Troubleshooting
-
-[Troubleshooting Guide](https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/troubleshooting/common-issues/)
-
-## Development
-
-### Structure
-```
-bookloresync.koplugin/
-├── main.lua                    # Core plugin logic
-├── booklore_settings.lua       # Settings UI
-├── booklore_api_client.lua     # API communication
-├── booklore_database.lua       # SQLite operations
-├── booklore_metadata_extractor.lua  # Metadata & highlights
-├── booklore_file_logger.lua    # Debug logging
-├── booklore_updater.lua        # Auto-update system
-├── plugin_version.lua          # Version info
-└── _meta.lua                   # Plugin metadata
-```
-
-### Testing
-```bash
-# Install test tooling (Lua 5.1 recommended, same as CI)
-luarocks --lua-version=5.1 install busted
-luarocks --lua-version=5.1 install luacov
-luarocks --lua-version=5.1 install luacov-cobertura
-
-# Run tests and generate coverage artifacts
-bash run_tests.sh
-```
-
-Artifacts generated by `run_tests.sh`:
-- `luacov.report.out` - human-readable line coverage summary
-- `coverage.xml` - Cobertura report used by GitLab
-
-Test files live under `test/`.
-
-### Database Inspection
-```bash
-sqlite3 ~/.config/koreader/settings/booklore-sync.sqlite
-
-# View cached books
-SELECT * FROM book_cache;
-
-# View pending sessions
-SELECT * FROM pending_sessions;
-
-# View pending annotations
-SELECT * FROM pending_annotations;
-```
-
-## License
-
-MIT License
-
-## Links
-
-- **Documentation:** https://docs.worldteacher.dev/worldteacher/booklore-koreader-plugin/
-- **KOReader:** https://github.com/koreader/koreader
+- Auto-update should remain disabled until GrimmLink has its own release channel.
+- GrimmLink sends KOReader-native EPUB progress only. It does not convert to EPUB CFI and does not bridge into Grimmory Web Reader fields.
+- This repo is now separate from the main Grimmory server repository so plugin work can evolve independently.

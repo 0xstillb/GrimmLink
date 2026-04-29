@@ -1,4 +1,5 @@
 # Generated version file
+grimmlink.koplugin/version.lua
 bookloresync.koplugin/version.lua
 
 # Build artifacts
@@ -14,6 +15,8 @@ bookloresync.koplugin/version.lua
 *.sqlite-wal
 
 # KOReader settings (if testing locally)
+grimmlink.lua
+grimmlink_db.lua
 booklore.lua
 booklore_db.lua
 
