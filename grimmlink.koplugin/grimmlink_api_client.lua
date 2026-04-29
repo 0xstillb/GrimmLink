@@ -3,6 +3,7 @@ local https = require("ssl.https")
 local ltn12 = require("ltn12")
 local json = require("json")
 local logger = require("logger")
+local unpackValues = table.unpack or unpack
 
 local APIClient = {
     timeout = 10,
@@ -43,13 +44,13 @@ function APIClient:log(level, ...)
     end
 
     if level == "warn" then
-        logger.warn(table.unpack(args))
+        logger.warn(unpackValues(args))
     elseif level == "err" then
-        logger.err(table.unpack(args))
+        logger.err(unpackValues(args))
     elseif level == "dbg" then
-        logger.dbg(table.unpack(args))
+        logger.dbg(unpackValues(args))
     else
-        logger.info(table.unpack(args))
+        logger.info(unpackValues(args))
     end
 end
 

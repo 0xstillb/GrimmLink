@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR/grimmlink.koplugin"
 
 if ! command -v busted &>/dev/null; then
     echo "ERROR: busted not found in PATH (install via luarocks install busted)" >&2
@@ -25,7 +25,7 @@ fi
 rm -f luacov.stats.out luacov.report.out coverage.xml
 
 echo "Running GrimmLink KOReader plugin test suite (active MVP tests only)"
-busted --output utfTerminal --pattern "_spec%.lua$" grimmlink.koplugin/test
+busted --output utfTerminal --pattern "_spec%.lua$" test
 
 echo "Generating luacov text report"
 luacov

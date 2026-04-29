@@ -670,10 +670,12 @@ function Grimmlink:compareOpenProgress(local_snapshot, remote_snapshot, state)
     local previous_local = self:buildStoredLocalSnapshot(state)
     local previous_remote = self:buildStoredRemoteSnapshot(state)
 
-    local local_changed = previous_local and self:progressDifferenceExceeded(local_snapshot, previous_local)
-        or self:hasMeaningfulProgress(local_snapshot)
-    local remote_changed = previous_remote and self:progressDifferenceExceeded(remote_snapshot, previous_remote)
-        or self:hasMeaningfulProgress(remote_snapshot)
+    local local_changed = previous_local
+        and self:progressDifferenceExceeded(local_snapshot, previous_local)
+        or (not previous_local and self:hasMeaningfulProgress(local_snapshot))
+    local remote_changed = previous_remote
+        and self:progressDifferenceExceeded(remote_snapshot, previous_remote)
+        or (not previous_remote and self:hasMeaningfulProgress(remote_snapshot))
 
     local remote_is_significantly_different = self:progressDifferenceExceeded(local_snapshot, remote_snapshot)
     if not remote_is_significantly_different then
@@ -976,44 +978,41 @@ function Grimmlink:syncPendingProgress(silent)
         if not ok or type(payload) ~= "table" then
             self.db:deletePendingProgress(item.id)
             failed = failed + 1
-            goto continue
-        end
-
-        local success = self.api:updateProgress(payload)
-        if success then
-            self.db:deletePendingProgress(item.id)
-            self:rememberLocalSnapshot(item.file_hash, {
-                file_path = nil,
-                bookId = payload.bookId,
-                document = payload.document,
-                fileFormat = payload.fileFormat,
-                progress = payload.progress,
-                location = payload.location,
-                percentage = normalizePercent(payload.percentage),
-                currentPage = payload.currentPage,
-                totalPages = payload.totalPages,
-                timestamp = payload.timestamp or nowUtc(),
-            }, "queued-progress-pushed")
-            self:rememberRemoteSnapshot(item.file_hash, {
-                bookId = payload.bookId,
-                document = payload.document,
-                fileFormat = payload.fileFormat,
-                progress = payload.progress,
-                location = payload.location,
-                percentage = normalizePercent(payload.percentage),
-                currentPage = payload.currentPage,
-                totalPages = payload.totalPages,
-                device = payload.device,
-                deviceId = payload.deviceId or payload.device_id,
-                timestamp = payload.timestamp or nowUtc(),
-            }, "queued-progress-pushed")
-            synced = synced + 1
         else
-            self.db:incrementPendingProgressRetry(item.id)
-            failed = failed + 1
+            local success = self.api:updateProgress(payload)
+            if success then
+                self.db:deletePendingProgress(item.id)
+                self:rememberLocalSnapshot(item.file_hash, {
+                    file_path = nil,
+                    bookId = payload.bookId,
+                    document = payload.document,
+                    fileFormat = payload.fileFormat,
+                    progress = payload.progress,
+                    location = payload.location,
+                    percentage = normalizePercent(payload.percentage),
+                    currentPage = payload.currentPage,
+                    totalPages = payload.totalPages,
+                    timestamp = payload.timestamp or nowUtc(),
+                }, "queued-progress-pushed")
+                self:rememberRemoteSnapshot(item.file_hash, {
+                    bookId = payload.bookId,
+                    document = payload.document,
+                    fileFormat = payload.fileFormat,
+                    progress = payload.progress,
+                    location = payload.location,
+                    percentage = normalizePercent(payload.percentage),
+                    currentPage = payload.currentPage,
+                    totalPages = payload.totalPages,
+                    device = payload.device,
+                    deviceId = payload.deviceId or payload.device_id,
+                    timestamp = payload.timestamp or nowUtc(),
+                }, "queued-progress-pushed")
+                synced = synced + 1
+            else
+                self.db:incrementPendingProgressRetry(item.id)
+                failed = failed + 1
+            end
         end
-
-        ::continue::
     end
 
     if not silent and (synced > 0 or failed > 0) then
@@ -1259,26 +1258,24 @@ function Grimmlink:syncPendingSessions(silent)
         if not session.bookId then
             self.db:incrementSessionRetryCount(session.id)
             failed = failed + 1
-            goto continue_group
+        else
+            local group_key = table.concat({
+                tostring(session.bookId),
+                session.bookHash or "",
+                session.bookType or "EPUB",
+                session.device or "",
+                session.deviceId or "",
+            }, "|")
+            groups[group_key] = groups[group_key] or {
+                bookId = session.bookId,
+                bookHash = session.bookHash,
+                bookType = session.bookType,
+                device = session.device,
+                deviceId = session.deviceId,
+                sessions = {},
+            }
+            groups[group_key].sessions[#groups[group_key].sessions + 1] = session
         end
-
-        local group_key = table.concat({
-            tostring(session.bookId),
-            session.bookHash or "",
-            session.bookType or "EPUB",
-            session.device or "",
-            session.deviceId or "",
-        }, "|")
-        groups[group_key] = groups[group_key] or {
-            bookId = session.bookId,
-            bookHash = session.bookHash,
-            bookType = session.bookType,
-            device = session.device,
-            deviceId = session.deviceId,
-            sessions = {},
-        }
-        groups[group_key].sessions[#groups[group_key].sessions + 1] = session
-        ::continue_group::
     end
 
     for _, group in pairs(groups) do

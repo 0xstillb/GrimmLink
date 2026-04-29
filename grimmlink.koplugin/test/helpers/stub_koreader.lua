@@ -24,8 +24,10 @@ local function install()
     end
 
     package.path = table.concat({
-        "plugins/grimmlink.koplugin/?.lua",
-        "plugins/grimmlink.koplugin/?/init.lua",
+        "./?.lua",
+        "./?/init.lua",
+        "./test/?.lua",
+        "./test/?/init.lua",
         package.path,
     }, ";")
 
