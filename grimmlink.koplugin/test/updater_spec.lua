@@ -110,7 +110,7 @@ describe("GrimmLink updater", function()
 
     it("forces the official GrimmLink release repo", function()
         local updater = newUpdater({
-            update_repo = "WorldTeacher/BookLoreSync-plugin",
+            update_repo = "example/not-grimmlink",
         })
 
         assert.are.equal("0xstillb/grimmlink", updater.update_repo)

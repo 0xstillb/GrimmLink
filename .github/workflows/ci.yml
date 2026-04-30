@@ -45,7 +45,7 @@ jobs:
 
       - name: Guard updater repo and upstream references
         run: |
-          if grep -R -n "WorldTeacher/BookLoreSync-plugin" grimmlink.koplugin .github/workflows/ci.yml; then
+          if git grep -n "WorldTeacher/BookLoreSync-plugin" -- grimmlink.koplugin; then
             echo "Forbidden updater reference found in active GrimmLink code"
             exit 1
           fi
