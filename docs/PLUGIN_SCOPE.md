@@ -78,11 +78,36 @@ Current queue behavior:
 - retry happens on reconnect, resume, or manual `Sync Pending Now`
 - failed auth or offline state must not block reading
 
-## Auto-Update
+## Auto-Update (Prompt 7B / Prompt 7B-R)
 
-Auto-update is intentionally disabled for GrimmLink MVP.
+GrimmLink now includes an opt-in auto-update flow for the active
+`grimmlink.koplugin` package.
 
-It must not point to the original `WorldTeacher/BookLoreSync-plugin` releases.
+- Release source is fixed to `0xstillb/grimmlink`.
+- The updater must never point to `WorldTeacher/BookLoreSync-plugin`.
+- Installed version is read from `grimmlink.koplugin/plugin_version.lua`.
+- Supported release assets are:
+  - `grimmlink.koplugin.zip`
+  - `grimmlink-vX.Y.Z.zip`
+- Default settings:
+  - `auto_update_enabled = false`
+  - `check_update_on_startup = false`
+  - `update_channel = stable`
+  - `update_repo = 0xstillb/grimmlink`
+  - `allow_prerelease_updates = false`
+- Update checks may happen on startup only when the user enables both
+  `auto_update_enabled` and `check_update_on_startup`.
+- Manual `Check for Updates` is available from `About & Updates`.
+- Download/install always requires explicit user confirmation.
+- The updater replaces only the plugin package. It must preserve:
+  - settings
+  - database
+  - cache
+  - downloaded books
+  - `.sdr` files
+- If GitHub API access, download, extraction, or install fails, the current
+  GrimmLink plugin remains usable.
+- Restart KOReader after a successful update so the new plugin code is loaded.
 
 Legacy upstream documentation and tests remain in this repository for reference only:
 

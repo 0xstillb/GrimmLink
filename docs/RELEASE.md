@@ -23,21 +23,39 @@
 - [ ] Shelf Sync uses `shelf_sync_map` for tracked GrimmLink downloads
 - [ ] `two_way_shelf_delete_sync` defaults to OFF
 - [ ] `delete_sdr_on_book_delete` defaults to OFF
+- [ ] Prompt 7A annotation pull / merge keeps local KOReader items safe
+- [ ] Prompt 7B auto-update checks `0xstillb/grimmlink` releases only
+- [ ] Prompt 7B-R CI workflow passes on the plugin branch
 
 ## Excluded From MVP
 
 - [ ] Web Reader Bridge
 - [ ] EPUB CFI conversion
-- [ ] rating sync
-- [ ] highlights/notes sync
-- [ ] bookmarks sync
 - [ ] shelf/library sync beyond the current Shelf Sync MVP
 
 ## Auto-Update Safety
 
-- [ ] updater is disabled for MVP
+- [ ] updater source repo is `0xstillb/grimmlink`
 - [ ] no updater path points to `WorldTeacher/BookLoreSync-plugin`
-- [ ] future updater work is tracked separately from MVP rollout
+- [ ] installed version is read from `grimmlink.koplugin/plugin_version.lua`
+- [ ] supported assets are `grimmlink.koplugin.zip` or `grimmlink-vX.Y.Z.zip`
+- [ ] user confirmation is required before download/install
+- [ ] `auto_update_enabled` defaults to OFF
+- [ ] `check_update_on_startup` defaults to OFF
+- [ ] `update_channel` defaults to `stable`
+- [ ] `allow_prerelease_updates` defaults to OFF
+- [ ] settings, database, cache, downloaded books, and `.sdr` files remain untouched by plugin replacement
+- [ ] restart prompt is shown after a successful update
+
+## CI Gate
+
+- [ ] `.github/workflows/ci.yml` passes on pull requests
+- [ ] `.github/workflows/ci.yml` passes on `main`
+- [ ] `.github/workflows/ci.yml` passes on `feature/grimmlink-adaptation`
+- [ ] Lua syntax checks pass
+- [ ] active GrimmLink plugin tests pass
+- [ ] updater repo safety checks pass
+- [ ] no release ZIP artifacts are committed
 
 ## Compatibility Notes
 

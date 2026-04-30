@@ -16,6 +16,7 @@ local APIClient = require("grimmlink_api_client")
 local FileLogger = require("grimmlink_file_logger")
 local ShelfSync = require("grimmlink_shelf_sync")
 local Annotations = require("grimmlink_annotations")
+local Updater = require("grimmlink_updater")
 
 local _ = require("gettext")
 local T = ffiutil.template
@@ -55,6 +56,12 @@ local DEFAULTS = {
     bookmarks_sync_enabled = false,
     rating_sync_enabled = false,
     annotations_capture_on_close = true,
+    -- Auto update (Prompt 7B)
+    auto_update_enabled = false,
+    check_update_on_startup = false,
+    update_channel = "stable",
+    update_repo = "0xstillb/grimmlink",
+    allow_prerelease_updates = false,
 }
 
 local function safeToString(value)
@@ -169,6 +176,19 @@ local function cloneTable(source)
     return copy
 end
 
+local function normalizeUpdateChannel(value)
+    return value == "prerelease" and "prerelease" or "stable"
+end
+
+local function detectPluginDir()
+    local source = debug.getinfo(1, "S").source or ""
+    local from_source = source:match("^@(.*)[/\\]main%.lua$")
+    if from_source and from_source:match("grimmlink%.koplugin$") then
+        return from_source
+    end
+    return DataStorage:getDataDir() .. "/plugins/grimmlink.koplugin"
+end
+
 function Grimmlink:log(level, ...)
     local args = { ... }
     for i = 1, #args do
@@ -272,6 +292,33 @@ function Grimmlink:init()
         rating_sync_enabled = self.rating_sync_enabled,
     })
 
+    self.plugin_dir = detectPluginDir()
+    self.auto_update_enabled = self:readSetting("auto_update_enabled", DEFAULTS.auto_update_enabled)
+    self.check_update_on_startup = self:readSetting("check_update_on_startup", DEFAULTS.check_update_on_startup)
+    self.update_channel = normalizeUpdateChannel(self:readSetting("update_channel", DEFAULTS.update_channel))
+    self.allow_prerelease_updates = self:readSetting("allow_prerelease_updates", DEFAULTS.allow_prerelease_updates)
+    if self.allow_prerelease_updates then
+        self.update_channel = "prerelease"
+    else
+        self.update_channel = normalizeUpdateChannel(self.update_channel)
+        self.allow_prerelease_updates = self.update_channel == "prerelease"
+    end
+    self.update_repo = self:readSetting("update_repo", DEFAULTS.update_repo)
+    if self.update_repo ~= DEFAULTS.update_repo then
+        self.update_repo = DEFAULTS.update_repo
+        self.db:savePluginSetting("update_repo", self.update_repo)
+    end
+    self.db:savePluginSetting("allow_prerelease_updates", self.allow_prerelease_updates)
+    self.db:savePluginSetting("update_channel", self.update_channel)
+    self.last_update_check = tonumber(self:readSetting("last_update_check", 0)) or 0
+    self.update_available = false
+
+    self.updater = Updater:new()
+    self.updater:init(self.plugin_dir, self.db, {
+        allow_prerelease = self.allow_prerelease_updates,
+        update_repo = self.update_repo,
+    })
+
     self.current_session = nil
     self.last_auto_sync_time = 0
     self.last_sync_summary = nil
@@ -308,6 +355,16 @@ function Grimmlink:saveSetting(key, value)
             end
         elseif not value then
             self.file_logger = nil
+        end
+    end
+
+    if (key == "allow_prerelease_updates" or key == "update_repo") and self.updater then
+        if key == "allow_prerelease_updates" then
+            self.updater:setAllowPrerelease(value == true)
+        else
+            self.update_repo = DEFAULTS.update_repo
+            self.db:savePluginSetting("update_repo", self.update_repo)
+            self.updater.update_repo = self.update_repo
         end
     end
 end
@@ -1570,6 +1627,189 @@ function Grimmlink:showPendingStats()
     ), 5)
 end
 
+function Grimmlink:setPrereleaseUpdates(enabled)
+    enabled = enabled == true
+    self:saveSetting("allow_prerelease_updates", enabled)
+    self:saveSetting("update_channel", enabled and "prerelease" or "stable")
+    if self.updater then
+        self.updater:setAllowPrerelease(enabled)
+        self.updater:clearCache()
+    end
+end
+
+function Grimmlink:toggleAutoUpdateEnabled()
+    self:saveSetting("auto_update_enabled", not self.auto_update_enabled)
+    self:showMessage(
+        self.auto_update_enabled
+            and _("GrimmLink update checks are enabled. Installs still require confirmation.")
+            or _("GrimmLink update checks are disabled."),
+        3
+    )
+end
+
+function Grimmlink:toggleStartupUpdateChecks()
+    self:saveSetting("check_update_on_startup", not self.check_update_on_startup)
+    self:showMessage(
+        self.check_update_on_startup
+            and _("Startup update checks are enabled.")
+            or _("Startup update checks are disabled."),
+        3
+    )
+end
+
+function Grimmlink:togglePrereleaseUpdates()
+    local enabled = not self.allow_prerelease_updates
+    self:setPrereleaseUpdates(enabled)
+    self:showMessage(
+        enabled
+            and _("Pre-release GrimmLink updates are enabled.")
+            or _("Only stable GrimmLink updates will be checked."),
+        3
+    )
+end
+
+function Grimmlink:showRestartPrompt(version)
+    local text = T(_([[GrimmLink %1 is ready.
+
+Restart KOReader to finish loading the update.
+
+Settings, cache, database, downloaded books, and .sdr files were left untouched.]]), version or _("update"))
+    if UIManager and type(UIManager.askForRestart) == "function" then
+        UIManager:askForRestart(text)
+        return
+    end
+    self:showMessage(text, 8)
+end
+
+function Grimmlink:installUpdate(release_info)
+    if type(release_info) ~= "table" or not release_info.download_url then
+        self:showMessage(_("Update metadata is incomplete."), 4)
+        return
+    end
+
+    self:showMessage(_("Downloading GrimmLink update..."), 2)
+    local downloaded, zip_path_or_error = self.updater:downloadReleaseAsset(release_info.download_url)
+    if not downloaded then
+        self:showMessage(T(_([[Update download failed:
+%1
+
+Current plugin was left unchanged.]]), tostring(zip_path_or_error)), 6)
+        return
+    end
+
+    self:showMessage(_("Installing GrimmLink update..."), 2)
+    local installed, backup_or_error = self.updater:installDownloadedUpdate(zip_path_or_error)
+    if not installed then
+        self:showMessage(T(_([[Update install failed:
+%1
+
+Current plugin remains usable.]]), tostring(backup_or_error)), 6)
+        return
+    end
+
+    self.update_available = false
+    if self.updater then
+        self.updater:clearCache()
+    end
+    self:showRestartPrompt(release_info.version or _("update"))
+end
+
+function Grimmlink:checkForUpdates(silent)
+    if not self.updater then
+        if not silent then
+            self:showMessage(_("Updater is unavailable in this build."), 4)
+        end
+        return nil
+    end
+
+    if not self:isOnline() then
+        if not silent then
+            self:showMessage(_("No network connection.\n\nConnect to check for GrimmLink updates."), 4)
+        end
+        return nil
+    end
+
+    if not silent then
+        self:showMessage(_("Checking GrimmLink updates..."), 1)
+    end
+
+    local result, error_msg = self.updater:checkForUpdates(silent == true)
+    if not result then
+        self:logWarn("GrimmLink update check failed:", error_msg)
+        if not silent then
+            self:showMessage(T(_("Update check failed:\n%1"), tostring(error_msg)), 5)
+        end
+        return nil
+    end
+
+    self.last_update_check = nowUtc()
+    self:saveSetting("last_update_check", self.last_update_check)
+    self.update_available = result.available
+
+    if not result.available then
+        if not silent then
+            self:showMessage(T(_("GrimmLink is up to date.\nCurrent version: %1"), result.current_version or _("unknown")), 4)
+        end
+        return result
+    end
+
+    if silent then
+        self:showMessage(T(_("GrimmLink update available.\nCurrent: %1\nLatest: %2"),
+            result.current_version or _("unknown"),
+            result.latest_version or _("unknown")), 5)
+        return result
+    end
+
+    local release_info = result.release_info or {}
+    local size_text = self.updater:formatBytes(release_info.size)
+    local channel_text = release_info.prerelease and _("prerelease") or _("stable")
+    UIManager:show(ConfirmBox:new{
+        text = T(_([[GrimmLink update available
+
+Current version: %1
+Latest version: %2
+Asset: %3
+Size: %4
+Channel: %5
+Repo: %6
+
+Download and install now?]]),
+            result.current_version or _("unknown"),
+            result.latest_version or _("unknown"),
+            safeToString(release_info.asset_name or self.updater.RELEASE_ASSET_NAME),
+            size_text,
+            channel_text,
+            self.update_repo or DEFAULTS.update_repo),
+        ok_text = _("Install"),
+        ok_callback = function()
+            self:installUpdate(release_info)
+        end,
+        cancel_text = _("Later"),
+    })
+
+    return result
+end
+
+function Grimmlink:maybeCheckForUpdatesOnStartup()
+    if not self.auto_update_enabled or not self.check_update_on_startup or not self.updater then
+        return
+    end
+    if not self:isOnline() then
+        return
+    end
+
+    local now = nowUtc()
+    local interval = tonumber(self.updater.STARTUP_CHECK_INTERVAL) or 86400
+    if (now - (tonumber(self.last_update_check) or 0)) < interval then
+        return
+    end
+
+    local result = self:checkForUpdates(true)
+    if result and result.available then
+        self:logInfo("GrimmLink: update available on startup", result.latest_version)
+    end
+end
+
 function Grimmlink:showAbout()
     local version = require("plugin_version")
     self:showMessage(table.concat({
@@ -1577,14 +1817,20 @@ function Grimmlink:showAbout()
         _("KOReader Companion for Grimmory"),
         "",
         T(_("Version: %1"), version.version or "0.1.0-dev"),
-        _("Auto-update: disabled for MVP"),
-        _("Phase 6 Web Reader Bridge / EPUB CFI conversion is intentionally not included."),
-    }, "\n"), 6)
+        T(_("Auto-update: %1"), self.auto_update_enabled and _("enabled") or _("disabled")),
+        T(_("Startup update checks: %1"), self.check_update_on_startup and _("enabled") or _("disabled")),
+        T(_("Update channel: %1"), self.allow_prerelease_updates and _("prerelease") or _("stable")),
+        T(_("Release repo: %1"), self.update_repo or DEFAULTS.update_repo),
+        _("Updates always require confirmation before download/install."),
+        _("Updating GrimmLink preserves settings, database, cache, downloaded books, and .sdr files."),
+        _("Prompt 8 Web Reader Bridge / EPUB CFI conversion is intentionally not included here."),
+    }, "\n"), 8)
 end
 
 function Grimmlink:onReaderReady()
     self:logInfo("GrimmLink: reader ready")
     self:startSession()
+    self:maybeCheckForUpdatesOnStartup()
     return false
 end
 
@@ -2090,10 +2336,48 @@ function Grimmlink:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("About"),
-                callback = function()
-                    self:showAbout()
-                end,
+                text = _("About & Updates"),
+                sub_item_table = {
+                    {
+                        text = _("Check for Updates"),
+                        callback = function()
+                            self:checkForUpdates(false)
+                        end,
+                    },
+                    {
+                        text = _("Auto Update Enabled"),
+                        checked_func = function()
+                            return self.auto_update_enabled
+                        end,
+                        callback = function()
+                            self:toggleAutoUpdateEnabled()
+                        end,
+                    },
+                    {
+                        text = _("Check on Startup"),
+                        checked_func = function()
+                            return self.check_update_on_startup
+                        end,
+                        callback = function()
+                            self:toggleStartupUpdateChecks()
+                        end,
+                    },
+                    {
+                        text = _("Allow Pre-release Updates"),
+                        checked_func = function()
+                            return self.allow_prerelease_updates
+                        end,
+                        callback = function()
+                            self:togglePrereleaseUpdates()
+                        end,
+                    },
+                    {
+                        text = _("About GrimmLink"),
+                        callback = function()
+                            self:showAbout()
+                        end,
+                    },
+                },
             },
         },
     }

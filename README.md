@@ -30,6 +30,13 @@ GrimmLink currently supports:
   - raw KOReader xpointer / page is preserved — no EPUB CFI conversion
   - never bridges into Web Reader CFI tables
   - never deletes local user annotations during pull and never silently overwrites a local note/highlight on conflict
+- **Auto Update** — check GrimmLink releases from `0xstillb/grimmlink` without leaving KOReader (Prompt 7B / Prompt 7B-R)
+  - reads the installed version from `grimmlink.koplugin/plugin_version.lua`
+  - checks GitHub Releases for `grimmlink.koplugin.zip` or `grimmlink-vX.Y.Z.zip`
+  - defaults: `auto_update_enabled = false`, `check_update_on_startup = false`, `update_channel = stable`, `allow_prerelease_updates = false`
+  - install always requires explicit user confirmation
+  - only replaces the plugin package, so settings, database, cache, downloaded books, and `.sdr` files are preserved
+  - startup checks are opt-in and rate-limited; failed checks leave the current plugin untouched
 
 Not yet implemented:
 
@@ -66,8 +73,10 @@ Not yet implemented:
 
 ## Notes
 
-- Auto-update should remain disabled until GrimmLink has its own release channel.
+- Auto-update uses only `0xstillb/grimmlink` releases. It does not use `WorldTeacher/BookLoreSync-plugin` releases.
 - GrimmLink sends KOReader-native EPUB progress only. It does not convert to EPUB CFI and does not bridge into Grimmory Web Reader fields.
 - Prompt 7A handles KOReader-native annotation pull / merge only. Prompt 8 is where Web Reader Bridge + EPUB CFI conversion still belong.
+- Restart KOReader after installing an update so the new plugin code is loaded cleanly.
+- CI now checks Lua syntax, plugin tests, updater repo safety, and accidental packaging artifacts before release.
 - This repo is now separate from the main Grimmory server repository so plugin work can evolve independently.
 - The active GrimmLink MVP source of truth is `grimmlink.koplugin/` plus the top-level docs listed above. Legacy upstream docs/tests under `docs/content/` and `legacy/upstream-bookloresync-tests/` are not the authoritative MVP contract.

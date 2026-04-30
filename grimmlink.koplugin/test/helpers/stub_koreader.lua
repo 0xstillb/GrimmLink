@@ -14,6 +14,7 @@ local STUB_KEYS = {
     "grimmlink_database",
     "grimmlink_api_client",
     "grimmlink_file_logger",
+    "grimmlink_updater",
     "bit",
 }
 
@@ -59,6 +60,8 @@ local function install()
         return {
             show = function() end,
             close = function() end,
+            setDirty = function() end,
+            askForRestart = function() end,
         }
     end
 
@@ -149,6 +152,30 @@ local function install()
                 return {
                     init = function() return true end,
                     write = function() return true end,
+                }
+            end,
+        }
+    end
+
+    package.preload["grimmlink_updater"] = function()
+        return {
+            new = function()
+                return {
+                    STARTUP_CHECK_INTERVAL = 86400,
+                    init = function() return true end,
+                    setAllowPrerelease = function() return true end,
+                    clearCache = function() return true end,
+                    checkForUpdates = function()
+                        return {
+                            available = false,
+                            current_version = "0.1.0-dev",
+                            latest_version = "0.1.0-dev",
+                            release_info = {},
+                        }, nil
+                    end,
+                    formatBytes = function(_, bytes)
+                        return tostring(bytes or 0)
+                    end,
                 }
             end,
         }

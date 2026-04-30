@@ -5,6 +5,7 @@
 The active GrimmLink automated tests live under:
 
 - `grimmlink.koplugin/test/`
+- `.github/workflows/ci.yml`
 
 Legacy upstream BookLoreSync tests now live under:
 
@@ -20,7 +21,31 @@ They should be treated as reference/archive material and are not part of the act
 - verify reading session upload and batch replay
 - verify offline queue behavior
 - verify Moon+ Reader-like conflict flow
+- verify GrimmLink auto-update points only to `0xstillb/grimmlink`
+- verify updater never accepts the old BookLoreSync repo in active code
+- verify auto-update keeps user data and downloaded books untouched
 - verify no Web Reader bridge or EPUB CFI behavior is introduced
+
+## CI Gate (Prompt 7B-R)
+
+The plugin CI workflow must pass before release.
+
+Current CI checks:
+
+- Lua syntax check via `luac -p` for `grimmlink.koplugin/**/*.lua`
+- `./run_tests.sh` for the active GrimmLink plugin test suite
+- updater repo safety guard:
+  - fail if active plugin code references `WorldTeacher/BookLoreSync-plugin`
+  - require `grimmlink.koplugin/grimmlink_updater.lua` to use `0xstillb/grimmlink`
+- packaging guard:
+  - fail if release ZIP artifacts are committed into the repo
+
+The CI workflow is intentionally self-contained:
+
+- no KOReader runtime is required
+- no Grimmory server is required
+- no GitHub secrets are required
+- no real update install step is executed
 
 ## Backend Integration Checks
 
@@ -58,6 +83,30 @@ Expected backend endpoints:
    - `Use Remote`
    - `Ignore`
 11. Repeat with the server offline, then use `Sync Pending Now`.
+
+## Auto-Update Checks (Prompt 7B / Prompt 7B-R)
+
+1. Open `About & Updates`.
+2. Verify defaults on a fresh install:
+   - `auto_update_enabled = false`
+   - `check_update_on_startup = false`
+   - `update_channel = stable`
+   - `allow_prerelease_updates = false`
+   - `update_repo = 0xstillb/grimmlink`
+3. Run `Check for Updates` while online.
+4. Verify GrimmLink checks only `0xstillb/grimmlink` releases.
+5. If an update is offered:
+   - confirm the dialog shows a GrimmLink asset name
+   - confirm install does not start until the user presses `Install`
+   - install the update and verify KOReader prompts for restart
+6. Verify plugin settings, local database, cache, downloaded books, and `.sdr`
+   files remain untouched after the update.
+7. Simulate a bad release asset or failed download:
+   - verify the install fails safely
+   - verify the current plugin stays usable
+8. Enable `Check on Startup` and relaunch KOReader:
+   - verify startup checks are rate-limited
+   - verify failure to reach GitHub does not block reading
 
 ## Expected Sync Semantics
 
