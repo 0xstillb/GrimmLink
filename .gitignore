@@ -1,7 +1,3 @@
-# Generated version file
-grimmlink.koplugin/version.lua
-bookloresync.koplugin/version.lua
-
 # Build artifacts
 *.zip
 *.tar.gz

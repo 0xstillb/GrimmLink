@@ -1,50 +1,56 @@
-# GrimmLink MVP Release Checklist
+# GrimmLink Release Candidate Checklist
 
-## Included
+## Version And Packaging
+
+- [ ] `grimmlink.koplugin/plugin_version.lua` is valid for the current branch state
+- [ ] tagged releases regenerate `plugin_version.lua` and `_meta.lua`
+- [ ] canonical release asset name is `grimmlink.koplugin.zip`
+- [ ] compatibility release asset name is `grimmlink-vX.Y.Z.zip`
+- [ ] updater documentation matches the actual asset names
+- [ ] no ZIP artifacts are committed in the repository
+
+## Core Behavior
 
 - [ ] KOReader auth works
 - [ ] hash-based matching works
 - [ ] native progress pull/push works
 - [ ] reading session upload works
-- [ ] shelf sync safety rules remain intact
+- [ ] offline queue replay works
+- [ ] Shelf Sync safety rules remain intact
 - [ ] annotation merge safety remains intact
 - [ ] auto-update still uses `0xstillb/grimmlink` only
-- [ ] CI passes on the plugin branch
-- [ ] Prompt 8 Web Reader Bridge is present but default OFF
-- [ ] Prompt 8 EPUB CFI conversion is present but default OFF
+- [ ] Web Reader Bridge is present but default OFF
+- [ ] EPUB CFI conversion is present but default OFF
 
 ## Safety
 
-- [ ] no user settings/database/cache are deleted
-- [ ] no downloaded books are deleted by updater
-- [ ] no `.sdr` files are deleted by updater
-- [ ] no shelf sync path deletes Grimmory library/server files
-- [ ] no shelf sync path deletes Grimmory book records
+- [ ] no Grimmory library/server file delete path exists
+- [ ] no Grimmory book record delete path exists
+- [ ] Shelf Sync remains shelf membership sync only
+- [ ] no user settings/database/cache are deleted by the updater
+- [ ] no downloaded books are deleted by the updater
+- [ ] no `.sdr` files are deleted by the updater by default
 - [ ] bridge failure never blocks reading
 - [ ] failed CFI conversion falls back safely
 
 ## CI Gate
 
-- [ ] `.github/workflows/ci.yml` passes
+- [ ] `.github/workflows/ci.yml` exists and passes
+- [ ] `.github/workflows/release.yml` exists
 - [ ] Lua syntax checks pass
 - [ ] active plugin tests pass
-- [ ] updater safety checks pass
+- [ ] updater source checks pass
 - [ ] no packaging artifacts are committed
 
-## Web Reader Bridge
+## Documentation Gate
 
-- [ ] bridge reads/writes only the dedicated Web Reader bridge endpoints
-- [ ] native KOReader progress still works independently when bridge is disabled
-- [ ] remote-newer bridge state prompts before jump
-- [ ] conflict flow offers `Use KOReader`, `Use Web Reader`, `Ignore`
-- [ ] raw KOReader location/page/xpointer remains preserved
+- [ ] `README.md` explains install, auth, settings, and safety defaults
+- [ ] `docs/PLUGIN_SCOPE.md` reflects current GrimmLink MVP scope
+- [ ] `docs/TEST_PLAN.md` reflects CI plus manual runtime validation
+- [ ] `docs/RELEASE.md` reflects the release candidate checklist
 
 ## Known Limitations
 
 - real KOReader runtime validation is still required on device
 - EPUB CFI conversion is best-effort, not guaranteed exact
-- local development here may rely on CI for Lua syntax/runtime checks
-
-## Next Phase
-
-- Prompt 9 Full Integration / Runtime Test
+- local development may rely on CI for Lua syntax/runtime checks when Lua tooling is unavailable

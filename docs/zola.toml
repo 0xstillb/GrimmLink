@@ -1,7 +1,7 @@
 # The URL the site will be built for
 base_url = "https://github.com/0xstillb/grimmlink"
-title = "Legacy BookLoreSync Reference"
-description = "Legacy upstream BookLoreSync documentation retained for reference during the GrimmLink MVP transition."
+title = "Legacy GrimmLink Reference"
+description = "Historical upstream KOReader plugin documentation retained for reference during the GrimmLink MVP transition."
 theme = "tanuki"
 # Whether to automatically compile all Sass files in the sass directory
 compile_sass = true

@@ -2,7 +2,7 @@ statsfile = "luacov.stats.out"
 reportfile = "luacov.report.out"
 
 include = {
-  "bookloresync.koplugin.*"
+  "grimmlink.koplugin.*"
 }
 
 exclude = {

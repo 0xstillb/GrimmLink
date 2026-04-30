@@ -1,6 +1,6 @@
 +++
-title = "Legacy BookLoreSync Reference"
-description = "Legacy upstream BookLoreSync documentation retained for reference while GrimmLink MVP documentation lives in the top-level docs files."
+title = "Legacy GrimmLink Reference"
+description = "Historical upstream KOReader plugin documentation retained for reference while the active GrimmLink MVP documentation lives in the top-level docs files."
 sort_by = "weight"
 +++
 

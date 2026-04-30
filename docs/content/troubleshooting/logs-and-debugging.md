@@ -129,7 +129,7 @@ grep "BookloreSync.*update\|version" /tmp/koreader.log
 
 ## Reporting a bug
 
-When opening a bug report on the [GitHub issue tracker](https://github.com/WorldTeacher/BookLoreSync-plugin/issues), please include:
+When opening a bug report on the [GitHub issue tracker](https://github.com/0xstillb/grimmlink/issues), please include:
 
 1. **Plugin version** (from **About & Updates → Version Info**)
 2. **KOReader version** (from KOReader's own About screen)

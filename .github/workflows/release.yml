@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -33,9 +33,16 @@ jobs:
             msgfmt "$po" -o "$mo"
           done
 
-      - name: Create plugin archive
+      - name: Create plugin archives
+        id: assets
         run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          if [[ "$VERSION" != v* ]]; then
+            VERSION="v$VERSION"
+          fi
+          echo "asset_version=$VERSION" >> $GITHUB_OUTPUT
           zip -r grimmlink.koplugin.zip grimmlink.koplugin/
+          cp grimmlink.koplugin.zip "grimmlink-${VERSION}.zip"
 
       - name: Extract and prepare changelog
         id: changelog
@@ -69,10 +76,11 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             grimmlink.koplugin.zip
+            grimmlink-${{ steps.assets.outputs.asset_version }}.zip
             CHANGELOG.md
           body: ${{ steps.changelog.outputs.changelog }}
           draft: false

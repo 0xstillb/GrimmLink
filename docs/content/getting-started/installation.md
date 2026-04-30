@@ -25,7 +25,7 @@ The plugin has no other dependencies - everything it needs (SQLite, JSON, HTTP) 
 
 ## Step 1 - Download the plugin
 
-Download the latest release ZIP from the [GitHub releases page](https://github.com/WorldTeacher/BookLoreSync-plugin/releases).
+Download the latest release ZIP from the [GitHub releases page](https://github.com/0xstillb/grimmlink/releases).
 
 The ZIP contains a single folder named `bookloresync.koplugin`.
 
