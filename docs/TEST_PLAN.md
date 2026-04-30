@@ -32,6 +32,10 @@ Expected backend endpoints:
 - `PUT /api/koreader/syncs/progress`
 - `POST /api/v1/reading-sessions`
 - `POST /api/v1/reading-sessions/batch`
+- `GET /api/koreader/shelves`
+- `GET /api/koreader/shelves/{shelfId}/books`
+- `GET /api/koreader/books/{bookId}/download`
+- `POST /api/koreader/shelves/{shelfId}/books/{bookId}/remove`
 
 ## Manual KOReader Runtime Checks
 
@@ -70,6 +74,16 @@ Expected backend endpoints:
 - failed requests remain queued
 - retry count increases on repeated failures
 - manual sync flushes pending items when online
+
+## Shelf Sync Checks
+
+- shelf selection persists in settings
+- shelf sync downloads missing books into the configured or auto-detected download directory
+- already-downloaded GrimmLink-managed files are skipped
+- local shelf deletions only remove tracked files when `two_way_shelf_delete_sync` is enabled
+- local shelf deletions never call the library delete API
+- shelf removals never delete user-added files
+- `.sdr` removal only happens when `delete_sdr_on_book_delete` is enabled
 
 ## Explicit Non-Goals For This Test Phase
 

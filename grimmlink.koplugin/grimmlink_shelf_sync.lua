@@ -28,6 +28,29 @@ local function sanitizeFilename(name, max_len)
     return s ~= "" and s or nil
 end
 
+local function normalizePathForCompare(path)
+    if not path or path == "" then
+        return nil
+    end
+
+    local normalized = tostring(path):gsub("\\", "/")
+    normalized = normalized:gsub("/+", "/")
+    if #normalized > 1 then
+        normalized = normalized:gsub("/$", "")
+    end
+    return normalized
+end
+
+local function isPathUnderDirectory(path, root_dir)
+    local normalized_path = normalizePathForCompare(path)
+    local normalized_root = normalizePathForCompare(root_dir)
+    if not normalized_path or not normalized_root then
+        return false
+    end
+    return normalized_path == normalized_root
+        or normalized_path:sub(1, #normalized_root + 1) == normalized_root .. "/"
+end
+
 -- Build a safe local filename for a book.
 -- Prefers the remote filename when use_original is true and remote_filename is set.
 -- Falls back to title + book_id + extension.
@@ -122,9 +145,14 @@ end
 
 -- Safely delete a tracked book and optionally its .sdr sidecar.
 -- Only deletes files where downloaded_by_grimmlink == 1.
-function ShelfSync:deleteLocalBook(entry, delete_sdr)
+function ShelfSync:deleteLocalBook(entry, delete_sdr, download_dir)
     if entry.downloaded_by_grimmlink ~= 1 then
         logger.warn("GrimmLink ShelfSync: skip delete — not downloaded by GrimmLink:", entry.local_path)
+        return false
+    end
+
+    if entry.local_path and entry.local_path ~= "" and download_dir and not isPathUnderDirectory(entry.local_path, download_dir) then
+        logger.warn("GrimmLink ShelfSync: skip delete â€” outside download directory:", entry.local_path)
         return false
     end
 
@@ -146,12 +174,38 @@ function ShelfSync:deleteLocalBook(entry, delete_sdr)
     return true
 end
 
+function ShelfSync:processPendingShelfRemovals(shelf_id, download_dir, delete_sdr, skip_download_ids, result, progress)
+    local pending_entries = self.db:getPendingShelfRemovals(shelf_id)
+    for _, entry in ipairs(pending_entries) do
+        if entry.book_id then
+            skip_download_ids[tostring(entry.book_id)] = true
+            if progress then
+                progress("Removing pending: " .. (entry.local_path or tostring(entry.book_id)))
+            end
+            local ok, err = self.api:removeBookFromShelf(entry.shelf_id, entry.book_id)
+            if ok then
+                local tracked = self.db:getShelfSyncEntry(entry.book_id)
+                if tracked then
+                    self:deleteLocalBook(tracked, delete_sdr, download_dir)
+                end
+                self.db:deletePendingShelfRemoval(entry.book_id)
+                result.deleted = result.deleted + 1
+            else
+                self.db:incrementPendingShelfRemovalRetryCount(entry.book_id)
+                result.failed = result.failed + 1
+                result.errors[#result.errors + 1] = "Failed to remove pending bookId=" .. tostring(entry.book_id) .. ": " .. tostring(err)
+                logger.warn("GrimmLink ShelfSync:", result.errors[#result.errors])
+            end
+        end
+    end
+end
+
 -- Main sync function.
 -- opts = {
 --   shelf_id          = number,
 --   download_dir      = string (setting value, may be empty → auto-detect),
 --   use_original_filename = bool,
---   delete_removed    = bool,
+--   two_way_delete_sync = bool,
 --   delete_sdr        = bool,
 --   on_progress       = function(msg) (optional),
 -- }
@@ -183,13 +237,12 @@ function ShelfSync:syncShelf(opts)
     local sync_start = os.time()
     local download_dir = self:resolveDownloadDir(opts.download_dir)
     local use_original = opts.use_original_filename ~= false -- default true
+    local two_way_delete_sync = opts.two_way_delete_sync == true
+    local delete_sdr = opts.delete_sdr == true
+    local skip_download_ids = {}
 
-    -- Build a set of remote book IDs for Phase 3
-    local remote_book_ids = {}
-    for _, book in ipairs(remote_books) do
-        if book.bookId then
-            remote_book_ids[tostring(book.bookId)] = true
-        end
+    if two_way_delete_sync then
+        self:processPendingShelfRemovals(shelf_id, download_dir, delete_sdr, skip_download_ids, result, progress)
     end
 
     -- Phase 2: Download missing books
@@ -197,9 +250,40 @@ function ShelfSync:syncShelf(opts)
     for _, book in ipairs(remote_books) do
         local book_id = book.bookId
         if not book_id then goto continue end
+        local book_id_key = tostring(book_id)
+        if skip_download_ids[book_id_key] then
+            goto continue
+        end
 
         -- Mark as seen in this sync
         local existing = self.db:getShelfSyncEntry(book_id)
+        if two_way_delete_sync and existing and existing.downloaded_by_grimmlink == 1 and existing.local_path and existing.local_path ~= "" and isPathUnderDirectory(existing.local_path, download_dir) then
+            local attr = lfs.attributes(existing.local_path)
+            if not attr then
+                progress("Removing locally deleted book: " .. (book.title or tostring(book_id)))
+                local removal_ok, removal_err = self.api:removeBookFromShelf(shelf_id, book_id)
+                if removal_ok then
+                    self.db:deleteShelfSyncEntry(book_id)
+                    result.deleted = result.deleted + 1
+                    skip_download_ids[book_id_key] = true
+                    goto continue
+                end
+
+                self.db:upsertPendingShelfRemoval({
+                    book_id = book_id,
+                    shelf_id = shelf_id,
+                    local_path = existing.local_path,
+                    delete_sdr = delete_sdr,
+                })
+                self.db:incrementPendingShelfRemovalRetryCount(book_id)
+                result.failed = result.failed + 1
+                local err = "Failed to remove bookId=" .. tostring(book_id) .. " from shelf: " .. tostring(removal_err)
+                result.errors[#result.errors + 1] = err
+                logger.warn("GrimmLink ShelfSync:", err)
+                skip_download_ids[book_id_key] = true
+                goto continue
+            end
+        end
         if existing then
             -- Touch last_seen_in_shelf_at
             self.db:upsertShelfSyncEntry({
@@ -256,15 +340,15 @@ function ShelfSync:syncShelf(opts)
         ::continue::
     end
 
-    -- Phase 3: Delete removed books (only if enabled)
-    if opts.delete_removed then
+    -- Phase 3: Delete removed books (only when two-way shelf delete sync is enabled)
+    if two_way_delete_sync then
         local all_entries = self.db:getAllShelfSyncEntries(shelf_id)
         for _, entry in ipairs(all_entries) do
             -- If this book was not seen in the current sync, it was removed from the shelf
             if entry.last_seen_in_shelf_at == nil or entry.last_seen_in_shelf_at < sync_start then
                 if entry.downloaded_by_grimmlink == 1 then
                     progress("Removing: " .. (entry.remote_title or entry.remote_filename or tostring(entry.book_id)))
-                    self:deleteLocalBook(entry, opts.delete_sdr)
+                    self:deleteLocalBook(entry, delete_sdr, download_dir)
                     result.deleted = result.deleted + 1
                 end
             end

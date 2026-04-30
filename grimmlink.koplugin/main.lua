@@ -46,7 +46,7 @@ local DEFAULTS = {
     shelf_name = "",
     download_dir = "",
     auto_sync_shelf_on_resume = false,
-    delete_removed_shelf_books = false,
+    two_way_shelf_delete_sync = false,
     shelf_use_original_filename = true,
     delete_sdr_on_book_delete = false,
 }
@@ -244,7 +244,9 @@ function Grimmlink:init()
     self.shelf_name = self:readSetting("shelf_name", DEFAULTS.shelf_name)
     self.download_dir = self:readSetting("download_dir", DEFAULTS.download_dir)
     self.auto_sync_shelf_on_resume = self:readSetting("auto_sync_shelf_on_resume", DEFAULTS.auto_sync_shelf_on_resume)
-    self.delete_removed_shelf_books = self:readSetting("delete_removed_shelf_books", DEFAULTS.delete_removed_shelf_books)
+    local legacy_delete_removed = self.db:getPluginSetting("delete_removed_shelf_books")
+    local two_way_default = legacy_delete_removed ~= nil and legacy_delete_removed or DEFAULTS.two_way_shelf_delete_sync
+    self.two_way_shelf_delete_sync = self:readSetting("two_way_shelf_delete_sync", two_way_default)
     self.shelf_use_original_filename = self:readSetting("shelf_use_original_filename", DEFAULTS.shelf_use_original_filename)
     self.delete_sdr_on_book_delete = self:readSetting("delete_sdr_on_book_delete", DEFAULTS.delete_sdr_on_book_delete)
 
@@ -1588,7 +1590,7 @@ function Grimmlink:syncShelfNow(silent)
         shelf_id = self.shelf_id,
         download_dir = self.download_dir,
         use_original_filename = self.shelf_use_original_filename,
-        delete_removed = self.delete_removed_shelf_books,
+        two_way_delete_sync = self.two_way_shelf_delete_sync,
         delete_sdr = self.delete_sdr_on_book_delete,
     })
 
@@ -1780,21 +1782,21 @@ function Grimmlink:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = _("Delete Removed Books"),
+                        text = _("Two-way Shelf Delete Sync"),
                         checked_func = function()
-                            return self.delete_removed_shelf_books
+                            return self.two_way_shelf_delete_sync
                         end,
                         callback = function()
-                            if not self.delete_removed_shelf_books then
+                            if not self.two_way_shelf_delete_sync then
                                 UIManager:show(ConfirmBox:new{
-                                    text = _("Enable deletion of books removed from the shelf?\n\nOnly books previously downloaded by GrimmLink will be affected."),
+                                    text = _("Enable two-way shelf delete sync?\n\nTracked GrimmLink downloads will be mirrored between KOReader and the selected Grimmory shelf."),
                                     ok_text = _("Enable"),
                                     ok_callback = function()
-                                        self:saveSetting("delete_removed_shelf_books", true)
+                                        self:saveSetting("two_way_shelf_delete_sync", true)
                                     end,
                                 })
                             else
-                                self:saveSetting("delete_removed_shelf_books", false)
+                                self:saveSetting("two_way_shelf_delete_sync", false)
                             end
                         end,
                     },

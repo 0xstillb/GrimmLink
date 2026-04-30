@@ -19,6 +19,10 @@
 - [ ] batch pending session upload works
 - [ ] offline queue works
 - [ ] Moon+ Reader-like conflict dialog works
+- [ ] Shelf Sync downloads books from a selected Grimmory shelf
+- [ ] Shelf Sync uses `shelf_sync_map` for tracked GrimmLink downloads
+- [ ] `two_way_shelf_delete_sync` defaults to OFF
+- [ ] `delete_sdr_on_book_delete` defaults to OFF
 
 ## Excluded From MVP
 
@@ -27,7 +31,7 @@
 - [ ] rating sync
 - [ ] highlights/notes sync
 - [ ] bookmarks sync
-- [ ] shelf/library sync
+- [ ] shelf/library sync beyond the current Shelf Sync MVP
 
 ## Auto-Update Safety
 
@@ -46,6 +50,7 @@
 - raw remote jump depends on KOReader runtime methods available on the device
 - some legacy upstream docs/tests remain in the repository as reference material under `docs/content/` and `legacy/upstream-bookloresync-tests/`
 - active GrimmLink MVP source of truth is `grimmlink.koplugin/` and the top-level docs in `docs/`
+- shelf deletions never use a library delete endpoint or server-side file deletion
 
 ## Later Phase Roadmap
 

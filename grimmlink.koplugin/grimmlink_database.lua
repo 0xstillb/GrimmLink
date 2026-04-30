@@ -4,7 +4,7 @@ local json = require("json")
 local logger = require("logger")
 
 local Database = {
-    VERSION = 2,
+    VERSION = 3,
     conn = nil,
     db_path = nil,
 }
@@ -133,6 +133,24 @@ Database.migrations = {
         ]],
         [[
             CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_shelf_id ON shelf_sync_map(shelf_id)
+        ]],
+    },
+    [3] = {
+        [[
+            CREATE TABLE IF NOT EXISTS pending_shelf_removals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id INTEGER NOT NULL UNIQUE,
+                shelf_id INTEGER NOT NULL,
+                local_path TEXT,
+                delete_sdr INTEGER DEFAULT 0,
+                retry_count INTEGER DEFAULT 0,
+                last_retry_at INTEGER,
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_pending_shelf_removals_shelf_id ON pending_shelf_removals(shelf_id)
         ]],
     },
 }
@@ -887,6 +905,83 @@ end
 
 function Database:deleteShelfSyncEntry(book_id)
     local stmt = self.conn:prepare("DELETE FROM shelf_sync_map WHERE book_id = ?")
+    if not stmt then return false end
+    stmt:bind(tonumber(book_id))
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:getPendingShelfRemovals(shelf_id)
+    local stmt = self.conn:prepare([[
+        SELECT id, book_id, shelf_id, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at
+        FROM pending_shelf_removals
+        WHERE shelf_id = ?
+        ORDER BY id ASC
+    ]])
+    if not stmt then return {} end
+    stmt:bind(tonumber(shelf_id))
+
+    local rows = {}
+    for row in stmt:rows() do
+        rows[#rows + 1] = {
+            id = tonumber(row[1]),
+            book_id = tonumber(row[2]),
+            shelf_id = tonumber(row[3]),
+            local_path = row[4] and tostring(row[4]) or nil,
+            delete_sdr = row[5] and tonumber(row[5]) or 0,
+            retry_count = row[6] and tonumber(row[6]) or 0,
+            last_retry_at = row[7] and tonumber(row[7]) or nil,
+            created_at = row[8] and tonumber(row[8]) or nil,
+            updated_at = row[9] and tonumber(row[9]) or nil,
+        }
+    end
+    stmt:close()
+    return rows
+end
+
+function Database:upsertPendingShelfRemoval(entry)
+    local stmt = self.conn:prepare([[
+        INSERT INTO pending_shelf_removals (
+            book_id, shelf_id, local_path, delete_sdr,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER), CAST(strftime('%s', 'now') AS INTEGER))
+        ON CONFLICT(book_id) DO UPDATE SET
+            shelf_id = excluded.shelf_id,
+            local_path = COALESCE(excluded.local_path, pending_shelf_removals.local_path),
+            delete_sdr = excluded.delete_sdr,
+            updated_at = excluded.updated_at
+    ]])
+    if not stmt then return false end
+
+    stmt:bind(
+        tonumber(entry.book_id),
+        tonumber(entry.shelf_id),
+        entry.local_path,
+        entry.delete_sdr and 1 or 0
+    )
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:deletePendingShelfRemoval(book_id)
+    local stmt = self.conn:prepare("DELETE FROM pending_shelf_removals WHERE book_id = ?")
+    if not stmt then return false end
+    stmt:bind(tonumber(book_id))
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:incrementPendingShelfRemovalRetryCount(book_id)
+    local stmt = self.conn:prepare([[
+        UPDATE pending_shelf_removals
+        SET retry_count = retry_count + 1,
+            last_retry_at = CAST(strftime('%s', 'now') AS INTEGER),
+            updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+        WHERE book_id = ?
+    ]])
     if not stmt then return false end
     stmt:bind(tonumber(book_id))
     local result = stmt:step()

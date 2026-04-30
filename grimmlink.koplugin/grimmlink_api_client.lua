@@ -298,6 +298,17 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec)
     return true, nil
 end
 
+function APIClient:removeBookFromShelf(shelf_id, book_id)
+    local success, code, response = self:request(
+        "POST",
+        "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove"
+    )
+    if success then
+        return true, response
+    end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
 function APIClient:submitSessionBatch(book_id, book_hash, book_type, device, device_id, sessions)
     local payload = {
         bookId = book_id,

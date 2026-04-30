@@ -18,8 +18,8 @@ GrimmLink currently supports:
   - shelf selection via in-plugin picker
   - safe local mapping (`shelf_sync_map`) — tracks GrimmLink-downloaded files
   - skip already-downloaded books
-  - optional deletion of removed shelf books (default off; only GrimmLink-tracked files)
-  - optional `.sdr` sidecar deletion (default off)
+  - two-way shelf delete sync (`two_way_shelf_delete_sync`, default off)
+  - optional `.sdr` sidecar deletion (`delete_sdr_on_book_delete`, default off)
   - configurable download directory
 
 Not yet implemented:
