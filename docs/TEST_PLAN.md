@@ -71,6 +71,8 @@ record that limitation in the release notes.
 
 ## Web Reader Bridge Checks
 
+The bridge conflict dialog is intentionally a separate dialog from the native KOReader sync conflict dialog above; its button labels (`Use KOReader` / `Use Web Reader` / `Ignore`) differ on purpose so the user can tell the two flows apart.
+
 - `web_reader_bridge_enabled` defaults to `false`
 - `cfi_conversion_enabled` defaults to `false`
 - with bridge disabled, native KOReader sync behavior is unchanged

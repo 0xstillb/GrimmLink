@@ -152,7 +152,7 @@ function ShelfSync:deleteLocalBook(entry, delete_sdr, download_dir)
     end
 
     if entry.local_path and entry.local_path ~= "" and download_dir and not isPathUnderDirectory(entry.local_path, download_dir) then
-        logger.warn("GrimmLink ShelfSync: skip delete â€” outside download directory:", entry.local_path)
+        logger.warn("GrimmLink ShelfSync: skip delete — outside download directory:", entry.local_path)
         return false
     end
 

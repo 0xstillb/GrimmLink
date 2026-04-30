@@ -99,6 +99,8 @@ The updater is restricted to the official GrimmLink release source:
   - `grimmlink.koplugin.zip`
   - `grimmlink-vX.Y.Z.zip`
 
+Startup update checks require both `auto_update_enabled = true` and `check_update_on_startup = true`; flipping only `check_update_on_startup` will not trigger a check on its own.
+
 Update safety rules:
 
 - install always requires user confirmation
