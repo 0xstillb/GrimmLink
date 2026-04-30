@@ -267,6 +267,8 @@ function Grimmlink:init()
     self.annotations = Annotations:new({
         db = self.db,
         api = self.api,
+        annotations_sync_enabled = self.annotations_sync_enabled,
+        bookmarks_sync_enabled = self.bookmarks_sync_enabled,
         rating_sync_enabled = self.rating_sync_enabled,
     })
 
@@ -1211,6 +1213,7 @@ function Grimmlink:startSession()
 
     self:logInfo("GrimmLink session started for", title, "hash:", file_hash or "nil")
     self:maybePullRemoteProgress(file_hash, file_path, book_id)
+    self:maybePullRemoteAnnotations(book_id)
 end
 
 function Grimmlink:endSession(options)
@@ -1433,6 +1436,100 @@ function Grimmlink:syncPendingAnnotations(silent)
     return result or empty
 end
 
+function Grimmlink:resolveCurrentDocumentBookId(preferred_book_id)
+    if preferred_book_id then
+        return tonumber(preferred_book_id)
+    end
+    if self.current_session and self.current_session.book_id then
+        return tonumber(self.current_session.book_id)
+    end
+    if not self.ui or not self.ui.document or not self.ui.document.file then
+        return nil
+    end
+
+    local file_path = tostring(self.ui.document.file)
+    local cached = self.db:getBookByFilePath(file_path)
+    if cached and cached.book_id then
+        return tonumber(cached.book_id)
+    end
+
+    local file_hash = cached and cached.file_hash or self:calculateBookHash(file_path)
+    local matched = self:resolveBookByHash(file_path, file_hash, true)
+    return matched and matched.book_id or nil
+end
+
+function Grimmlink:pullCurrentDocumentAnnotations(silent, opts)
+    opts = opts or {}
+    local empty = {
+        fetched = 0,
+        imported = 0,
+        updated = 0,
+        duplicates = 0,
+        conflicts = 0,
+        pending = 0,
+        skipped = 0,
+        errors = {},
+    }
+    if not self.enabled then return empty end
+    if not (self.annotations_sync_enabled or self.bookmarks_sync_enabled) then
+        return empty
+    end
+    if not self:isOnline() then
+        if not silent then self:showMessage(_("Offline - remote annotation pull skipped."), 3) end
+        return empty
+    end
+    if not self.ui or not self.ui.document then
+        return empty
+    end
+
+    local book_id = self:resolveCurrentDocumentBookId(opts.book_id)
+    if not book_id then
+        if not silent then self:showMessage(_("No matched Grimmory book for remote annotation pull."), 3) end
+        return empty
+    end
+
+    self.annotations.annotations_sync_enabled = self.annotations_sync_enabled
+    self.annotations.bookmarks_sync_enabled = self.bookmarks_sync_enabled
+    self.annotations.rating_sync_enabled = self.rating_sync_enabled
+
+    local ok, result = pcall(function()
+        return self.annotations:pullRemoteForCurrentDocument(book_id, self.ui)
+    end)
+    if not ok then
+        self:logWarn("GrimmLink: remote annotation pull error:", tostring(result))
+        if not silent then
+            self:showMessage(T(_("Remote annotation pull failed: %1"), tostring(result)), 4)
+        end
+        return empty
+    end
+
+    if not silent and result then
+        self:showMessage(T(
+            _("Remote annotation merge\nImported: %1\nUpdated: %2\nDuplicates: %3\nConflicts: %4\nPending retry: %5"),
+            result.imported or 0,
+            result.updated or 0,
+            result.duplicates or 0,
+            result.conflicts or 0,
+            result.pending or 0
+        ), 4)
+    end
+
+    return result or empty
+end
+
+function Grimmlink:maybePullRemoteAnnotations(book_id)
+    if not self.auto_pull_on_open then
+        return
+    end
+    if not (self.annotations_sync_enabled or self.bookmarks_sync_enabled) then
+        return
+    end
+    if not self:isOnline() then
+        return
+    end
+    self:pullCurrentDocumentAnnotations(true, { book_id = book_id })
+end
+
 -- Capture annotations / bookmarks / rating from the current document into the queue.
 -- Called on close. Honors per-kind enable flags.
 function Grimmlink:captureCurrentDocumentAnnotations()
@@ -1452,6 +1549,8 @@ function Grimmlink:captureCurrentDocumentAnnotations()
     end
 
     -- Refresh annotations module flags (user may toggle at runtime).
+    self.annotations.annotations_sync_enabled = self.annotations_sync_enabled
+    self.annotations.bookmarks_sync_enabled = self.bookmarks_sync_enabled
     self.annotations.rating_sync_enabled = self.rating_sync_enabled
     self.annotations:captureCurrentDocument(cached.book_id, self.ui)
 end
@@ -1529,6 +1628,7 @@ function Grimmlink:onResume()
     if self:isOnline() and (now - (self.last_auto_sync_time or 0)) >= ((tonumber(self.threshold_minutes) or DEFAULTS.threshold_minutes) * 60) then
         self.last_auto_sync_time = now
         self:syncPendingNow(true)
+        self:pullCurrentDocumentAnnotations(true)
     end
 
     if self.ui and self.ui.document and not self.current_session then
@@ -1897,6 +1997,9 @@ function Grimmlink:addToMainMenu(menu_items)
                         callback = function()
                             self.annotations_sync_enabled = not self.annotations_sync_enabled
                             self:saveSetting("annotations_sync_enabled", self.annotations_sync_enabled)
+                            if self.annotations then
+                                self.annotations.annotations_sync_enabled = self.annotations_sync_enabled
+                            end
                         end,
                     },
                     {
@@ -1905,6 +2008,9 @@ function Grimmlink:addToMainMenu(menu_items)
                         callback = function()
                             self.bookmarks_sync_enabled = not self.bookmarks_sync_enabled
                             self:saveSetting("bookmarks_sync_enabled", self.bookmarks_sync_enabled)
+                            if self.annotations then
+                                self.annotations.bookmarks_sync_enabled = self.bookmarks_sync_enabled
+                            end
                         end,
                     },
                     {
@@ -1938,15 +2044,25 @@ function Grimmlink:addToMainMenu(menu_items)
                         end,
                     },
                     {
+                        text = _("Pull Remote Annotations Now"),
+                        callback = function()
+                            self:pullCurrentDocumentAnnotations(false)
+                        end,
+                    },
+                    {
                         text_func = function()
                             local n = self.db:getPendingAnnotationCount()
                             if n == 0 then return _("Sync Annotations Now") end
                             return T(_("Sync Annotations Now (%1 pending)"), n)
                         end,
                         callback = function()
+                            local pull = self:pullCurrentDocumentAnnotations(true)
                             local r = self:syncPendingAnnotations(false)
                             self:showMessage(T(
-                                _("Annotation sync\nPosted: %1\nFailed: %2"),
+                                _("Annotation sync\nPulled: %1 imported, %2 updated\nConflicts: %3\nPosted: %4\nFailed: %5"),
+                                pull.imported or 0,
+                                pull.updated or 0,
+                                pull.conflicts or 0,
                                 r.posted, r.failed), 4)
                         end,
                     },

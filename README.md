@@ -21,13 +21,15 @@ GrimmLink currently supports:
   - two-way shelf delete sync (`two_way_shelf_delete_sync`, default off)
   - optional `.sdr` sidecar deletion (`delete_sdr_on_book_delete`, default off)
   - configurable download directory
-- **Annotation Sync** — push KOReader highlights, notes, bookmarks and personal rating to Grimmory (Prompt 6)
+- **Annotation Sync** — push KOReader highlights, notes, bookmarks and personal rating to Grimmory, then safely merge remote-newer items back into KOReader (Prompt 6 / Prompt 7A)
   - per-kind toggles: `annotations_sync_enabled`, `bookmarks_sync_enabled`, `rating_sync_enabled` (all default off)
-  - capture-on-close hook + manual `Sync Annotations Now` action
+  - capture-on-close hook + manual `Sync Annotations Now` / `Pull Remote Annotations Now` actions
   - offline queue (`pending_annotations`) — survives restart, retried on next sync
+  - pending remote-import cache for items that could not be imported safely yet
   - server-side dedupe via stable `dedupeKey` (md5 of book + kind + position + text)
   - raw KOReader xpointer / page is preserved — no EPUB CFI conversion
   - never bridges into Web Reader CFI tables
+  - never deletes local user annotations during pull and never silently overwrites a local note/highlight on conflict
 
 Not yet implemented:
 
@@ -66,5 +68,6 @@ Not yet implemented:
 
 - Auto-update should remain disabled until GrimmLink has its own release channel.
 - GrimmLink sends KOReader-native EPUB progress only. It does not convert to EPUB CFI and does not bridge into Grimmory Web Reader fields.
+- Prompt 7A handles KOReader-native annotation pull / merge only. Prompt 8 is where Web Reader Bridge + EPUB CFI conversion still belong.
 - This repo is now separate from the main Grimmory server repository so plugin work can evolve independently.
 - The active GrimmLink MVP source of truth is `grimmlink.koplugin/` plus the top-level docs listed above. Legacy upstream docs/tests under `docs/content/` and `legacy/upstream-bookloresync-tests/` are not the authoritative MVP contract.

@@ -86,7 +86,7 @@ Expected backend endpoints:
 - `.sdr` removal only happens when `delete_sdr_on_book_delete` is enabled
 - public shelves remain read-only from the plugin's perspective unless the backend authorizes a membership mutation
 
-## Annotation Sync Test Surface (Prompt 6)
+## Annotation Sync Test Surface (Prompt 6 / Prompt 7A)
 
 Manual checks for highlight / note / bookmark / rating sync:
 
@@ -108,6 +108,17 @@ Manual checks for highlight / note / bookmark / rating sync:
 5. With `rating_sync_enabled` ON, set a 4-star KOReader rating — verify
    the queue contains a single `rating` item that maps to `rating = 8`.
 6. Verify reading is NEVER blocked when sync is in flight.
+7. With remote annotations present and the local item missing:
+   - open the matched KOReader document online
+   - run "Pull Remote Annotations Now"
+   - verify the remote item is imported into KOReader without deleting any local item
+8. With the same remote item already present locally:
+   - rerun "Pull Remote Annotations Now"
+   - verify it is treated as a duplicate and is not re-imported repeatedly
+9. With local note text changed after the last remote version:
+   - rerun remote pull
+   - verify the local note is kept untouched and the merge is recorded as a conflict/pending-safe case rather than overwritten
+10. Verify raw `koreaderPos` / `page` survives push + pull without EPUB CFI conversion.
 
 ## Safety invariants
 
@@ -117,11 +128,13 @@ Manual checks for highlight / note / bookmark / rating sync:
 - The legacy `annotations` and `book_marks` tables on the backend are
   unchanged before / after any plugin sync.
 - No `BookEntity` rows are deleted by the plugin.
+- No local user annotation or bookmark is deleted by Prompt 7A pull / merge.
+- No Web Reader annotation fields are written in Prompt 7A.
 
 ## Explicit Non-Goals For This Test Phase
 
-- Web Reader Bridge
-- EPUB CFI conversion
+- Web Reader Bridge (Prompt 8)
+- EPUB CFI conversion (Prompt 8)
 - Hardcover rating sync
 
 If any of those appear during GrimmLink MVP testing, treat that as drift from scope rather than as a missing MVP feature.

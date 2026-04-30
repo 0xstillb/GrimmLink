@@ -311,9 +311,13 @@ end
 
 -- ===== Annotation / Bookmark / Rating sync =====
 
-function APIClient:getAnnotations(book_id)
+function APIClient:getAnnotations(book_id, since_epoch_sec)
+    local path = "/api/koreader/books/" .. tostring(book_id) .. "/annotations"
+    if since_epoch_sec then
+        path = path .. "?since=" .. self:_urlEncode(since_epoch_sec)
+    end
     local success, code, response = self:request(
-        "GET", "/api/koreader/books/" .. tostring(book_id) .. "/annotations")
+        "GET", path)
     if success then return true, response end
     return false, response or ("HTTP " .. tostring(code or "?"))
 end
@@ -325,9 +329,13 @@ function APIClient:postAnnotationsBatch(book_id, items)
     return false, response or ("HTTP " .. tostring(code or "?"))
 end
 
-function APIClient:getBookmarks(book_id)
+function APIClient:getBookmarks(book_id, since_epoch_sec)
+    local path = "/api/koreader/books/" .. tostring(book_id) .. "/bookmarks"
+    if since_epoch_sec then
+        path = path .. "?since=" .. self:_urlEncode(since_epoch_sec)
+    end
     local success, code, response = self:request(
-        "GET", "/api/koreader/books/" .. tostring(book_id) .. "/bookmarks")
+        "GET", path)
     if success then return true, response end
     return false, response or ("HTTP " .. tostring(code or "?"))
 end

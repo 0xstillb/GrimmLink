@@ -89,7 +89,7 @@ Legacy upstream documentation and tests remain in this repository for reference 
 - `docs/content/`
 - `legacy/upstream-bookloresync-tests/`
 
-## Annotation Sync (Prompt 6)
+## Annotation Sync (Prompt 6 / Prompt 7A)
 
 GrimmLink's MVP also includes opt-in sync for KOReader highlights, notes,
 bookmarks and personal rating against `/api/koreader/books/{bookId}/...`
@@ -103,11 +103,20 @@ endpoints in Grimmory.
   but only effective when at least one kind is enabled).
 - Items are queued in the `pending_annotations` table and flushed on
   `syncPendingNow` / suspend / resume / "Sync Annotations Now" menu action.
+- Prompt 7A also pulls remote annotations/bookmarks back into KOReader using
+  the KOReader-native endpoints and preserves raw `koreaderPos` / `page`.
+- Remote pull uses conservative merge rules:
+  - exact duplicate: skip
+  - remote exists, local missing: import into KOReader when a safe local store exists
+  - remote newer than local: update only when the local note/text is still safe to touch
+  - uncertain match / both changed: keep the local user item untouched and cache a conflict instead of silently overwriting
 - Stable client-computed `dedupeKey` (md5 of book + kind + KOReader pos +
   text) prevents duplicates on the server.
 - Raw KOReader xpointer / page is preserved as `koreaderPos` / `page` on the
   wire and in the new server-side `koreader_annotations` /
   `koreader_bookmarks` tables. No EPUB CFI conversion is performed.
+- Local user annotations are never deleted during pull. Web Reader fields are
+  never written in this phase.
 - Rating is mapped from KOReader's 0..5 star summary to Grimmory's 1..10
   `personal_rating` (0 = "no rating", skipped).
 
@@ -118,8 +127,8 @@ and any failure is logged + retried.
 
 Not part of the current MVP:
 
-- Web Reader Bridge
-- EPUB CFI conversion
+- Web Reader Bridge (Prompt 8)
+- EPUB CFI conversion (Prompt 8)
 - Hardcover rating sync
 - shelf/library sync beyond the current Shelf Sync MVP
 

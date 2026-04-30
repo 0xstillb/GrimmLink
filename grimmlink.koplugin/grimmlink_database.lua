@@ -4,7 +4,7 @@ local json = require("json")
 local logger = require("logger")
 
 local Database = {
-    VERSION = 4,
+    VERSION = 5,
     conn = nil,
     db_path = nil,
 }
@@ -189,6 +189,29 @@ Database.migrations = {
                 last_pulled_at INTEGER,
                 PRIMARY KEY (book_id, kind)
             )
+        ]],
+    },
+    [5] = {
+        [[
+            CREATE TABLE IF NOT EXISTS remote_annotation_merge_state (
+                book_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                remote_key TEXT NOT NULL,
+                remote_id INTEGER,
+                remote_updated_at INTEGER,
+                local_key TEXT,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                retry_count INTEGER DEFAULT 0,
+                last_error TEXT,
+                conflict_reason TEXT,
+                updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (book_id, kind, remote_key)
+            )
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_remote_annotation_merge_state_book_kind
+                ON remote_annotation_merge_state(book_id, kind, status)
         ]],
     },
 }
@@ -1183,6 +1206,116 @@ function Database:setAnnotationSyncState(book_id, kind, last_synced_at, last_pul
     local result = stmt:step()
     stmt:close()
     return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:getAnnotationSyncState(book_id, kind)
+    local stmt = self.conn:prepare([[
+        SELECT last_synced_at, last_pulled_at
+        FROM annotation_sync_state
+        WHERE book_id = ? AND kind = ?
+    ]])
+    if not stmt then return nil end
+    stmt:bind(tonumber(book_id), tostring(kind))
+
+    return firstRow(stmt, function(row)
+        return {
+            last_synced_at = row[1] and tonumber(row[1]) or nil,
+            last_pulled_at = row[2] and tonumber(row[2]) or nil,
+        }
+    end)
+end
+
+function Database:saveRemoteAnnotationMergeState(entry)
+    if not entry or not entry.book_id or not entry.kind or not entry.remote_key then
+        return false
+    end
+
+    local stmt = self.conn:prepare([[
+        INSERT INTO remote_annotation_merge_state (
+            book_id, kind, remote_key, remote_id, remote_updated_at, local_key,
+            status, payload_json, retry_count, last_error, conflict_reason, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
+        ON CONFLICT(book_id, kind, remote_key) DO UPDATE SET
+            remote_id = excluded.remote_id,
+            remote_updated_at = excluded.remote_updated_at,
+            local_key = COALESCE(excluded.local_key, remote_annotation_merge_state.local_key),
+            status = excluded.status,
+            payload_json = excluded.payload_json,
+            retry_count = excluded.retry_count,
+            last_error = excluded.last_error,
+            conflict_reason = excluded.conflict_reason,
+            updated_at = excluded.updated_at
+    ]])
+    if not stmt then return false end
+
+    stmt:bind(
+        tonumber(entry.book_id),
+        tostring(entry.kind),
+        tostring(entry.remote_key),
+        entry.remote_id and tonumber(entry.remote_id) or nil,
+        entry.remote_updated_at and tonumber(entry.remote_updated_at) or nil,
+        entry.local_key and tostring(entry.local_key) or nil,
+        tostring(entry.status or "pending"),
+        tostring(entry.payload_json or "{}"),
+        tonumber(entry.retry_count or 0),
+        entry.last_error and tostring(entry.last_error):sub(1, 250) or nil,
+        entry.conflict_reason and tostring(entry.conflict_reason):sub(1, 250) or nil
+    )
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:getRemoteAnnotationMergeState(book_id, kind, remote_key)
+    local stmt = self.conn:prepare([[
+        SELECT remote_id, remote_updated_at, local_key, status, payload_json, retry_count, last_error, conflict_reason, updated_at
+        FROM remote_annotation_merge_state
+        WHERE book_id = ? AND kind = ? AND remote_key = ?
+    ]])
+    if not stmt then return nil end
+    stmt:bind(tonumber(book_id), tostring(kind), tostring(remote_key))
+
+    return firstRow(stmt, function(row)
+        return {
+            remote_id = row[1] and tonumber(row[1]) or nil,
+            remote_updated_at = row[2] and tonumber(row[2]) or nil,
+            local_key = row[3] and tostring(row[3]) or nil,
+            status = row[4] and tostring(row[4]) or nil,
+            payload_json = row[5] and tostring(row[5]) or nil,
+            retry_count = row[6] and tonumber(row[6]) or 0,
+            last_error = row[7] and tostring(row[7]) or nil,
+            conflict_reason = row[8] and tostring(row[8]) or nil,
+            updated_at = row[9] and tonumber(row[9]) or nil,
+        }
+    end)
+end
+
+function Database:getPendingRemoteAnnotationMergeStates(book_id, kind)
+    local stmt = self.conn:prepare([[
+        SELECT remote_key, remote_id, remote_updated_at, local_key, status, payload_json, retry_count, last_error, conflict_reason
+        FROM remote_annotation_merge_state
+        WHERE book_id = ? AND kind = ? AND status = 'pending'
+        ORDER BY updated_at ASC
+    ]])
+    if not stmt then return {} end
+    stmt:bind(tonumber(book_id), tostring(kind))
+
+    local items = {}
+    for row in stmt:rows() do
+        items[#items + 1] = {
+            remote_key = tostring(row[1]),
+            remote_id = row[2] and tonumber(row[2]) or nil,
+            remote_updated_at = row[3] and tonumber(row[3]) or nil,
+            local_key = row[4] and tostring(row[4]) or nil,
+            status = row[5] and tostring(row[5]) or "pending",
+            payload_json = row[6] and tostring(row[6]) or "{}",
+            retry_count = row[7] and tonumber(row[7]) or 0,
+            last_error = row[8] and tostring(row[8]) or nil,
+            conflict_reason = row[9] and tostring(row[9]) or nil,
+        }
+    end
+    stmt:close()
+    return items
 end
 
 return Database
