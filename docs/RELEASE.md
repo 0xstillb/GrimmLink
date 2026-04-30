@@ -52,12 +52,22 @@
 - active GrimmLink MVP source of truth is `grimmlink.koplugin/` and the top-level docs in `docs/`
 - shelf deletions never use a library delete endpoint or server-side file deletion
 
+## Annotation Sync (Prompt 6)
+
+- New plugin module: `grimmlink_annotations.lua`.
+- New plugin DB migration 4 adds `pending_annotations` queue and
+  `annotation_sync_state` table.
+- Per-kind toggles all default OFF until the user explicitly opts in.
+- KOReader xpointer / page is preserved as raw `koreaderPos` / `page`.
+  No EPUB CFI conversion. No Web Reader bridge.
+- Backend tables: `koreader_annotations`, `koreader_bookmarks` (separate
+  from the existing CFI-based `annotations` / `book_marks`).
+- Rating reuses the existing `user_book_progress.personal_rating` column.
+
 ## Later Phase Roadmap
 
-- ratings
-- highlights/notes
-- bookmarks
-- shelf/library sync
+- Hardcover rating sync
+- shelf/library sync beyond current Shelf Sync MVP
 
 ## Phase 6 - Web Reader Bridge
 

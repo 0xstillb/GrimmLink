@@ -309,6 +309,51 @@ function APIClient:removeBookFromShelf(shelf_id, book_id)
     return false, response or ("HTTP " .. tostring(code or "?"))
 end
 
+-- ===== Annotation / Bookmark / Rating sync =====
+
+function APIClient:getAnnotations(book_id)
+    local success, code, response = self:request(
+        "GET", "/api/koreader/books/" .. tostring(book_id) .. "/annotations")
+    if success then return true, response end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
+function APIClient:postAnnotationsBatch(book_id, items)
+    local success, code, response = self:request(
+        "POST", "/api/koreader/books/" .. tostring(book_id) .. "/annotations/batch", items or {})
+    if success then return true, response end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
+function APIClient:getBookmarks(book_id)
+    local success, code, response = self:request(
+        "GET", "/api/koreader/books/" .. tostring(book_id) .. "/bookmarks")
+    if success then return true, response end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
+function APIClient:postBookmarksBatch(book_id, items)
+    local success, code, response = self:request(
+        "POST", "/api/koreader/books/" .. tostring(book_id) .. "/bookmarks/batch", items or {})
+    if success then return true, response end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
+function APIClient:getRating(book_id)
+    local success, code, response = self:request(
+        "GET", "/api/koreader/books/" .. tostring(book_id) .. "/rating")
+    if success then return true, response end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
+function APIClient:putRating(book_id, rating)
+    local success, code, response = self:request(
+        "PUT", "/api/koreader/books/" .. tostring(book_id) .. "/rating",
+        { bookId = tonumber(book_id), rating = rating })
+    if success then return true, response end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
 function APIClient:submitSessionBatch(book_id, book_hash, book_type, device, device_id, sessions)
     local payload = {
         bookId = book_id,

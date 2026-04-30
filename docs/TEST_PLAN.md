@@ -86,13 +86,42 @@ Expected backend endpoints:
 - `.sdr` removal only happens when `delete_sdr_on_book_delete` is enabled
 - public shelves remain read-only from the plugin's perspective unless the backend authorizes a membership mutation
 
+## Annotation Sync Test Surface (Prompt 6)
+
+Manual checks for highlight / note / bookmark / rating sync:
+
+1. With `annotations_sync_enabled` OFF:
+   - Make a highlight in a downloaded book, close the book.
+   - Verify `pending_annotations` count stays 0.
+   - Verify nothing is posted to `/api/koreader/books/{id}/annotations/batch`.
+2. With `annotations_sync_enabled` ON, online:
+   - Make 2 highlights, close the book.
+   - Verify items appear in `pending_annotations`, then are flushed on auto sync.
+   - Verify the server returns `inserted >= 2` on first sync.
+   - Re-close the book without changes — verify second sync is `skipped == 2`.
+3. With `annotations_sync_enabled` ON, offline:
+   - Make a highlight, close the book.
+   - Verify items stay in `pending_annotations`.
+   - Reconnect, run "Sync Annotations Now" — verify `posted > 0`.
+4. With `bookmarks_sync_enabled` ON, add bookmarks (no highlight) — verify
+   they go to `/bookmarks/batch`, not `/annotations/batch`.
+5. With `rating_sync_enabled` ON, set a 4-star KOReader rating — verify
+   the queue contains a single `rating` item that maps to `rating = 8`.
+6. Verify reading is NEVER blocked when sync is in flight.
+
+## Safety invariants
+
+- `pending_annotations` is empty for any book whose feature toggle is OFF.
+- Manually adding a `koreader_annotations` row and then submitting the same
+  `dedupeKey` again does NOT create a duplicate row server-side.
+- The legacy `annotations` and `book_marks` tables on the backend are
+  unchanged before / after any plugin sync.
+- No `BookEntity` rows are deleted by the plugin.
+
 ## Explicit Non-Goals For This Test Phase
 
 - Web Reader Bridge
 - EPUB CFI conversion
-- rating sync
-- highlights/notes sync
-- bookmarks sync
-- shelf sync
+- Hardcover rating sync
 
 If any of those appear during GrimmLink MVP testing, treat that as drift from scope rather than as a missing MVP feature.

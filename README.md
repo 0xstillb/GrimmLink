@@ -21,13 +21,19 @@ GrimmLink currently supports:
   - two-way shelf delete sync (`two_way_shelf_delete_sync`, default off)
   - optional `.sdr` sidecar deletion (`delete_sdr_on_book_delete`, default off)
   - configurable download directory
+- **Annotation Sync** — push KOReader highlights, notes, bookmarks and personal rating to Grimmory (Prompt 6)
+  - per-kind toggles: `annotations_sync_enabled`, `bookmarks_sync_enabled`, `rating_sync_enabled` (all default off)
+  - capture-on-close hook + manual `Sync Annotations Now` action
+  - offline queue (`pending_annotations`) — survives restart, retried on next sync
+  - server-side dedupe via stable `dedupeKey` (md5 of book + kind + position + text)
+  - raw KOReader xpointer / page is preserved — no EPUB CFI conversion
+  - never bridges into Web Reader CFI tables
 
 Not yet implemented:
 
 - Web Reader bridge
 - EPUB CFI conversion
-- rating sync
-- highlights, notes, or bookmarks sync
+- Hardcover rating sync
 - magic shelf (dynamic filter-based shelf) support
 
 ## Repository Layout

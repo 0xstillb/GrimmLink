@@ -89,15 +89,38 @@ Legacy upstream documentation and tests remain in this repository for reference 
 - `docs/content/`
 - `legacy/upstream-bookloresync-tests/`
 
+## Annotation Sync (Prompt 6)
+
+GrimmLink's MVP also includes opt-in sync for KOReader highlights, notes,
+bookmarks and personal rating against `/api/koreader/books/{bookId}/...`
+endpoints in Grimmory.
+
+- Per-kind toggles default OFF; user must explicitly enable each:
+  - `annotations_sync_enabled` (highlights + notes)
+  - `bookmarks_sync_enabled`
+  - `rating_sync_enabled`
+- Capture happens on book close (`annotations_capture_on_close`, default ON
+  but only effective when at least one kind is enabled).
+- Items are queued in the `pending_annotations` table and flushed on
+  `syncPendingNow` / suspend / resume / "Sync Annotations Now" menu action.
+- Stable client-computed `dedupeKey` (md5 of book + kind + KOReader pos +
+  text) prevents duplicates on the server.
+- Raw KOReader xpointer / page is preserved as `koreaderPos` / `page` on the
+  wire and in the new server-side `koreader_annotations` /
+  `koreader_bookmarks` tables. No EPUB CFI conversion is performed.
+- Rating is mapped from KOReader's 0..5 star summary to Grimmory's 1..10
+  `personal_rating` (0 = "no rating", skipped).
+
+Reading is never blocked — capture and sync run after the document closes
+and any failure is logged + retried.
+
 ## Later Phases Only
 
 Not part of the current MVP:
 
 - Web Reader Bridge
 - EPUB CFI conversion
-- rating sync
-- highlights/notes sync
-- bookmarks sync
+- Hardcover rating sync
 - shelf/library sync beyond the current Shelf Sync MVP
 
 These remain later-phase work and are not the source of truth for the current plugin behavior.

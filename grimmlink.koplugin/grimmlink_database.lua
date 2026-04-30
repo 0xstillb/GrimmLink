@@ -4,7 +4,7 @@ local json = require("json")
 local logger = require("logger")
 
 local Database = {
-    VERSION = 3,
+    VERSION = 4,
     conn = nil,
     db_path = nil,
 }
@@ -151,6 +151,44 @@ Database.migrations = {
         ]],
         [[
             CREATE INDEX IF NOT EXISTS idx_pending_shelf_removals_shelf_id ON pending_shelf_removals(shelf_id)
+        ]],
+    },
+    [4] = {
+        -- Offline queue for annotation/bookmark/rating sync.
+        -- kind: 'annotation' | 'bookmark' | 'rating'
+        -- payload_json: array (annotations/bookmarks) or { rating = N } (rating)
+        -- dedupe_key: same key used by the server for upsert. NULL for ratings.
+        [[
+            CREATE TABLE IF NOT EXISTS pending_annotations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                dedupe_key TEXT,
+                payload_json TEXT NOT NULL,
+                retry_count INTEGER DEFAULT 0,
+                last_retry_at INTEGER,
+                last_error TEXT,
+                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_pending_annotations_book_id
+                ON pending_annotations(book_id)
+        ]],
+        [[
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_annotations_unique_key
+                ON pending_annotations(book_id, kind, dedupe_key)
+                WHERE dedupe_key IS NOT NULL
+        ]],
+        -- Per-book per-kind last successful sync timestamp (epoch seconds).
+        [[
+            CREATE TABLE IF NOT EXISTS annotation_sync_state (
+                book_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                last_synced_at INTEGER,
+                last_pulled_at INTEGER,
+                PRIMARY KEY (book_id, kind)
+            )
         ]],
     },
 }
@@ -999,6 +1037,152 @@ function Database:getShelfSyncStats()
     end
     stmt:close()
     return { total = count }
+end
+
+-- ===== Annotation/Bookmark/Rating offline queue =====
+
+-- Enqueue or refresh a pending annotation/bookmark item.
+-- For ratings, dedupe_key may be nil — only one rating row should exist per book.
+function Database:enqueueAnnotation(book_id, kind, dedupe_key, payload_json)
+    if kind == "rating" then
+        -- Replace any prior queued rating for this book
+        local del = self.conn:prepare("DELETE FROM pending_annotations WHERE book_id = ? AND kind = 'rating'")
+        if del then del:bind(tonumber(book_id)); del:step(); del:close() end
+
+        local ins = self.conn:prepare([[
+            INSERT INTO pending_annotations (book_id, kind, dedupe_key, payload_json, retry_count, created_at)
+            VALUES (?, 'rating', NULL, ?, 0, CAST(strftime('%s', 'now') AS INTEGER))
+        ]])
+        if not ins then return false end
+        ins:bind(tonumber(book_id), tostring(payload_json))
+        local result = ins:step()
+        ins:close()
+        return result == SQ3.DONE or result == SQ3.OK
+    end
+
+    -- annotation/bookmark — UPSERT by (book_id, kind, dedupe_key)
+    local stmt = self.conn:prepare([[
+        INSERT INTO pending_annotations (book_id, kind, dedupe_key, payload_json, retry_count, created_at)
+        VALUES (?, ?, ?, ?, 0, CAST(strftime('%s', 'now') AS INTEGER))
+        ON CONFLICT(book_id, kind, dedupe_key) DO UPDATE SET
+            payload_json = excluded.payload_json,
+            retry_count = 0,
+            last_retry_at = NULL,
+            last_error = NULL
+    ]])
+    if not stmt then return false end
+    stmt:bind(tonumber(book_id), tostring(kind), tostring(dedupe_key or ""), tostring(payload_json))
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+-- Returns rows grouped per (book_id, kind) so caller can batch-upload.
+function Database:getPendingAnnotationGroups(limit_per_group)
+    local stmt = self.conn:prepare([[
+        SELECT id, book_id, kind, dedupe_key, payload_json, retry_count
+        FROM pending_annotations
+        ORDER BY book_id ASC, kind ASC, created_at ASC
+    ]])
+    if not stmt then return {} end
+
+    local groups = {}
+    local key_index = {}
+    for row in stmt:rows() do
+        local book_id = tonumber(row[2])
+        local kind = tostring(row[3])
+        local key = book_id .. ":" .. kind
+        local g = key_index[key]
+        if not g then
+            g = { book_id = book_id, kind = kind, items = {} }
+            groups[#groups + 1] = g
+            key_index[key] = g
+        end
+        if not limit_per_group or #g.items < limit_per_group then
+            g.items[#g.items + 1] = {
+                id = tonumber(row[1]),
+                dedupe_key = row[4] and tostring(row[4]) or nil,
+                payload_json = tostring(row[5]),
+                retry_count = tonumber(row[6]) or 0,
+            }
+        end
+    end
+    stmt:close()
+    return groups
+end
+
+function Database:getPendingAnnotationCount()
+    local stmt = self.conn:prepare("SELECT COUNT(*) FROM pending_annotations")
+    if not stmt then return 0 end
+    local count = 0
+    for row in stmt:rows() do
+        count = tonumber(row[1]) or 0
+        break
+    end
+    stmt:close()
+    return count
+end
+
+function Database:deletePendingAnnotations(ids)
+    if not ids or #ids == 0 then return true end
+    local all_ok = true
+    for _, id in ipairs(ids) do
+        local stmt = self.conn:prepare("DELETE FROM pending_annotations WHERE id = ?")
+        if stmt then
+            stmt:bind(tonumber(id))
+            local result = stmt:step()
+            stmt:close()
+            if result ~= SQ3.DONE and result ~= SQ3.OK then
+                all_ok = false
+            end
+        else
+            all_ok = false
+        end
+    end
+    return all_ok
+end
+
+function Database:incrementPendingAnnotationRetry(ids, error_msg)
+    if not ids or #ids == 0 then return true end
+    local err = error_msg and tostring(error_msg):sub(1, 250) or nil
+    local all_ok = true
+    for _, id in ipairs(ids) do
+        local stmt = self.conn:prepare([[
+            UPDATE pending_annotations
+            SET retry_count = retry_count + 1,
+                last_retry_at = CAST(strftime('%s', 'now') AS INTEGER),
+                last_error = ?
+            WHERE id = ?
+        ]])
+        if stmt then
+            stmt:bind(err, tonumber(id))
+            local result = stmt:step()
+            stmt:close()
+            if result ~= SQ3.DONE and result ~= SQ3.OK then
+                all_ok = false
+            end
+        else
+            all_ok = false
+        end
+    end
+    return all_ok
+end
+
+function Database:setAnnotationSyncState(book_id, kind, last_synced_at, last_pulled_at)
+    local stmt = self.conn:prepare([[
+        INSERT INTO annotation_sync_state (book_id, kind, last_synced_at, last_pulled_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(book_id, kind) DO UPDATE SET
+            last_synced_at = COALESCE(excluded.last_synced_at, annotation_sync_state.last_synced_at),
+            last_pulled_at = COALESCE(excluded.last_pulled_at, annotation_sync_state.last_pulled_at)
+    ]])
+    if not stmt then return false end
+    stmt:bind(tonumber(book_id), tostring(kind),
+        last_synced_at and tonumber(last_synced_at) or nil,
+        last_pulled_at and tonumber(last_pulled_at) or nil)
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
 end
 
 return Database

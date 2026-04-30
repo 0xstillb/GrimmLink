@@ -15,6 +15,7 @@ local Database = require("grimmlink_database")
 local APIClient = require("grimmlink_api_client")
 local FileLogger = require("grimmlink_file_logger")
 local ShelfSync = require("grimmlink_shelf_sync")
+local Annotations = require("grimmlink_annotations")
 
 local _ = require("gettext")
 local T = ffiutil.template
@@ -49,6 +50,11 @@ local DEFAULTS = {
     two_way_shelf_delete_sync = false,
     shelf_use_original_filename = true,
     delete_sdr_on_book_delete = false,
+    -- Annotation / bookmark / rating sync (Prompt 6)
+    annotations_sync_enabled = false,
+    bookmarks_sync_enabled = false,
+    rating_sync_enabled = false,
+    annotations_capture_on_close = true,
 }
 
 local function safeToString(value)
@@ -251,6 +257,18 @@ function Grimmlink:init()
     self.delete_sdr_on_book_delete = self:readSetting("delete_sdr_on_book_delete", DEFAULTS.delete_sdr_on_book_delete)
 
     self.shelf_sync = ShelfSync:new(self.db, self.api)
+
+    -- Annotation / bookmark / rating sync (Prompt 6)
+    self.annotations_sync_enabled = self:readSetting("annotations_sync_enabled", DEFAULTS.annotations_sync_enabled)
+    self.bookmarks_sync_enabled = self:readSetting("bookmarks_sync_enabled", DEFAULTS.bookmarks_sync_enabled)
+    self.rating_sync_enabled = self:readSetting("rating_sync_enabled", DEFAULTS.rating_sync_enabled)
+    self.annotations_capture_on_close = self:readSetting("annotations_capture_on_close", DEFAULTS.annotations_capture_on_close)
+
+    self.annotations = Annotations:new({
+        db = self.db,
+        api = self.api,
+        rating_sync_enabled = self.rating_sync_enabled,
+    })
 
     self.current_session = nil
     self.last_auto_sync_time = 0
@@ -1370,23 +1388,72 @@ end
 function Grimmlink:syncPendingNow(silent)
     local progress_synced, progress_failed = self:syncPendingProgress(true)
     local sessions_synced, sessions_failed = self:syncPendingSessions(true)
+    local annot_result = self:syncPendingAnnotations(true)
 
     self.last_sync_summary = {
         progress_synced = progress_synced,
         progress_failed = progress_failed,
         sessions_synced = sessions_synced,
         sessions_failed = sessions_failed,
+        annotations_posted = annot_result.posted,
+        annotations_failed = annot_result.failed,
     }
 
     if not silent then
         self:showMessage(T(
-            _("GrimmLink sync complete\nProgress: %1 synced, %2 failed\nSessions: %3 synced, %4 failed"),
+            _("GrimmLink sync complete\nProgress: %1 synced, %2 failed\nSessions: %3 synced, %4 failed\nAnnotations: %5 posted, %6 failed"),
             progress_synced,
             progress_failed,
             sessions_synced,
-            sessions_failed
+            sessions_failed,
+            annot_result.posted,
+            annot_result.failed
         ), 4)
     end
+end
+
+-- Flush queued annotations / bookmarks / ratings.
+-- Returns { posted, failed, skipped, errors }.
+function Grimmlink:syncPendingAnnotations(silent)
+    local empty = { posted = 0, failed = 0, skipped = 0, errors = {} }
+    if not self.enabled then return empty end
+    if not (self.annotations_sync_enabled or self.bookmarks_sync_enabled or self.rating_sync_enabled) then
+        return empty
+    end
+    if not self:isOnline() then
+        if not silent then self:showMessage(_("Offline — annotation sync queued."), 3) end
+        return empty
+    end
+
+    local ok, result = pcall(function() return self.annotations:syncPending() end)
+    if not ok then
+        self:logWarn("GrimmLink: annotation sync error:", tostring(result))
+        return empty
+    end
+    return result or empty
+end
+
+-- Capture annotations / bookmarks / rating from the current document into the queue.
+-- Called on close. Honors per-kind enable flags.
+function Grimmlink:captureCurrentDocumentAnnotations()
+    if not self.enabled then return end
+    if not (self.annotations_sync_enabled or self.bookmarks_sync_enabled or self.rating_sync_enabled) then
+        return
+    end
+    if not self.ui or not self.ui.document then return end
+
+    local file_path = self.ui.document.file
+    if not file_path then return end
+
+    local cached = self.db:getBookByFilePath(file_path)
+    if not cached or not cached.book_id then
+        self:logInfo("GrimmLink Annotations: no remote book_id cached for", file_path)
+        return
+    end
+
+    -- Refresh annotations module flags (user may toggle at runtime).
+    self.annotations.rating_sync_enabled = self.rating_sync_enabled
+    self.annotations:captureCurrentDocument(cached.book_id, self.ui)
 end
 
 function Grimmlink:showPendingStats()
@@ -1429,6 +1496,10 @@ function Grimmlink:onCloseDocument()
 
     self:logInfo("GrimmLink: document closing")
     self:endSession({ reason = "close" })
+    if self.annotations_capture_on_close then
+        local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
+        if not ok then self:logWarn("GrimmLink: capture annotations error:", tostring(err)) end
+    end
     if self:isOnline() then
         self:syncPendingNow(true)
     end
@@ -1818,13 +1889,79 @@ function Grimmlink:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("Annotation Sync"),
+                sub_item_table = {
+                    {
+                        text = _("Sync Highlights / Notes"),
+                        checked_func = function() return self.annotations_sync_enabled end,
+                        callback = function()
+                            self.annotations_sync_enabled = not self.annotations_sync_enabled
+                            self:saveSetting("annotations_sync_enabled", self.annotations_sync_enabled)
+                        end,
+                    },
+                    {
+                        text = _("Sync Bookmarks"),
+                        checked_func = function() return self.bookmarks_sync_enabled end,
+                        callback = function()
+                            self.bookmarks_sync_enabled = not self.bookmarks_sync_enabled
+                            self:saveSetting("bookmarks_sync_enabled", self.bookmarks_sync_enabled)
+                        end,
+                    },
+                    {
+                        text = _("Sync Personal Rating"),
+                        checked_func = function() return self.rating_sync_enabled end,
+                        callback = function()
+                            self.rating_sync_enabled = not self.rating_sync_enabled
+                            self:saveSetting("rating_sync_enabled", self.rating_sync_enabled)
+                            if self.annotations then
+                                self.annotations.rating_sync_enabled = self.rating_sync_enabled
+                            end
+                        end,
+                    },
+                    {
+                        text = _("Capture on Book Close"),
+                        checked_func = function() return self.annotations_capture_on_close end,
+                        callback = function()
+                            self.annotations_capture_on_close = not self.annotations_capture_on_close
+                            self:saveSetting("annotations_capture_on_close", self.annotations_capture_on_close)
+                        end,
+                    },
+                    {
+                        text = _("Capture Current Document Now"),
+                        callback = function()
+                            local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
+                            if ok then
+                                self:showMessage(_("Captured current annotations / bookmarks / rating into queue."), 3)
+                            else
+                                self:showMessage(T(_("Capture failed: %1"), tostring(err)), 4)
+                            end
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            local n = self.db:getPendingAnnotationCount()
+                            if n == 0 then return _("Sync Annotations Now") end
+                            return T(_("Sync Annotations Now (%1 pending)"), n)
+                        end,
+                        callback = function()
+                            local r = self:syncPendingAnnotations(false)
+                            self:showMessage(T(
+                                _("Annotation sync\nPosted: %1\nFailed: %2"),
+                                r.posted, r.failed), 4)
+                        end,
+                    },
+                },
+            },
+            {
                 text_func = function()
                     local pending_progress = self.db:getPendingProgressCount()
                     local pending_sessions = self.db:getPendingSessionCount()
-                    if pending_progress == 0 and pending_sessions == 0 then
+                    local pending_annotations = self.db:getPendingAnnotationCount()
+                    if pending_progress == 0 and pending_sessions == 0 and pending_annotations == 0 then
                         return _("Sync Pending Now")
                     end
-                    return T(_("Sync Pending Now (%1 P, %2 S)"), pending_progress, pending_sessions)
+                    return T(_("Sync Pending Now (%1 P, %2 S, %3 A)"),
+                        pending_progress, pending_sessions, pending_annotations)
                 end,
                 callback = function()
                     self:syncPendingNow(false)
