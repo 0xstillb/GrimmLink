@@ -27,6 +27,7 @@ This repository is the dedicated plugin repo. Backend code and backend API imple
   - download missing shelf books to the local KOReader folder
   - mirror shelf removals to tracked local files only when `two_way_shelf_delete_sync` is enabled
   - remove local shelf members from Grimmory through the KOReader shelf-remove endpoint, never by deleting library records
+  - treat public shelves as readable, but not writable unless the backend grants owner/admin mutation access
 
 ## Current Backend Contract
 

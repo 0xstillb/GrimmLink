@@ -84,6 +84,7 @@ Expected backend endpoints:
 - local shelf deletions never call the library delete API
 - shelf removals never delete user-added files
 - `.sdr` removal only happens when `delete_sdr_on_book_delete` is enabled
+- public shelves remain read-only from the plugin's perspective unless the backend authorizes a membership mutation
 
 ## Explicit Non-Goals For This Test Phase
 
