@@ -25,7 +25,15 @@ fi
 rm -f luacov.stats.out luacov.report.out coverage.xml
 
 echo "Running GrimmLink KOReader plugin test suite (active MVP tests only)"
+# Ensure luacov hooks are loaded when busted starts so coverage stats are written.
+LUA_INIT_BACKUP="${LUA_INIT-}"
+export LUA_INIT='@require("luacov.runner")()'
 busted --output utfTerminal --pattern "_spec%.lua$" test
+if [ -n "${LUA_INIT_BACKUP}" ]; then
+    export LUA_INIT="$LUA_INIT_BACKUP"
+else
+    unset LUA_INIT
+fi
 
 echo "Generating luacov text report"
 luacov
