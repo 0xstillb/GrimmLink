@@ -11,6 +11,9 @@ describe("GrimmLink helper methods", function()
         plugin = setmetatable({
             threshold_percent = 1.0,
             threshold_pages = 5,
+            cfi_conversion_enabled = false,
+            device_name = "KOReader",
+            device_id = "device-1",
         }, { __index = Grimmlink })
     end)
 
@@ -83,5 +86,39 @@ describe("GrimmLink helper methods", function()
         )
 
         assert.are.equal("conflict", decision)
+    end)
+
+    it("does not treat backend raw native fields as a web jump target", function()
+        local normalized = plugin:normalizeWebBridgeProgress({
+            percentage = 61.2,
+            timestamp = 500,
+            rawKoreaderXPointer = "/body/DocFragment[9]/body/div[1]",
+            source = "WEB_READER",
+        })
+
+        assert.are.equal(61.2, normalized.percentage)
+        assert.is_nil(normalized.location)
+        assert.are.equal("WEB_READER", normalized.source)
+    end)
+
+    it("builds a percentage-first web bridge payload when CFI conversion is disabled", function()
+        local payload = plugin:buildWebBridgePayload({
+            bookId = 42,
+            bookHash = "hash-1",
+            percentage = 44.5,
+            currentPage = 120,
+            totalPages = 300,
+            location = "/body/DocFragment[1]/body/div[3]",
+            progress = "/body/DocFragment[1]/body/div[3]",
+            timestamp = 900,
+        }, {
+            remote_updated_at = 850,
+        }, false)
+
+        assert.are.equal(44.5, payload.percentage)
+        assert.are.equal(850, payload.expectedUpdatedAt)
+        assert.is_nil(payload.epubCfi)
+        assert.are.equal("/body/DocFragment[1]/body/div[3]", payload.rawKoreaderXPointer)
+        assert.is_false(payload.force)
     end)
 end)

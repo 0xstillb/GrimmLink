@@ -62,6 +62,9 @@ local DEFAULTS = {
     update_channel = "stable",
     update_repo = "0xstillb/grimmlink",
     allow_prerelease_updates = false,
+    -- Web Reader Bridge (Prompt 8)
+    web_reader_bridge_enabled = false,
+    cfi_conversion_enabled = false,
 }
 
 local function safeToString(value)
@@ -291,6 +294,10 @@ function Grimmlink:init()
         bookmarks_sync_enabled = self.bookmarks_sync_enabled,
         rating_sync_enabled = self.rating_sync_enabled,
     })
+
+    self.web_reader_bridge_enabled = self:readSetting("web_reader_bridge_enabled", DEFAULTS.web_reader_bridge_enabled)
+    self.cfi_conversion_enabled = self:readSetting("cfi_conversion_enabled", DEFAULTS.cfi_conversion_enabled)
+    self.last_web_bridge_result = nil
 
     self.plugin_dir = detectPluginDir()
     self.auto_update_enabled = self:readSetting("auto_update_enabled", DEFAULTS.auto_update_enabled)
@@ -700,6 +707,30 @@ function Grimmlink:normalizeRemoteProgress(remote_progress)
     return normalized
 end
 
+function Grimmlink:looksLikeXPointer(value)
+    return isNonEmpty(value) and tostring(value):sub(1, 1) == "/"
+end
+
+function Grimmlink:normalizeWebBridgeProgress(remote_progress)
+    if not remote_progress or type(remote_progress) ~= "table" then
+        return nil
+    end
+
+    local normalized = self:normalizeRemoteProgress(remote_progress) or cloneTable(remote_progress)
+    normalized.epubCfi = remote_progress.epubCfi
+    normalized.positionHref = remote_progress.positionHref
+    normalized.contentSourceProgressPercent = normalizePercent(remote_progress.contentSourceProgressPercent)
+    normalized.updatedAt = maybeNumber(remote_progress.timestamp)
+    normalized.source = remote_progress.source or "WEB_READER"
+    normalized.device = remote_progress.device or "Web Reader"
+    normalized.deviceId = remote_progress.deviceId or remote_progress.device_id or "web-reader"
+    normalized.conversionStatus = remote_progress.conversionStatus
+    normalized.conversionConfidence = maybeNumber(remote_progress.conversionConfidence)
+    normalized.currentPage = maybeNumber(remote_progress.currentPage)
+    normalized.totalPages = maybeNumber(remote_progress.totalPages)
+    return normalized
+end
+
 function Grimmlink:hasMeaningfulProgress(snapshot)
     return (snapshot and (
         snapshot.percentage ~= nil
@@ -842,6 +873,101 @@ function Grimmlink:rememberRemoteSnapshot(file_hash, snapshot, action)
         timestamp = snapshot.timestamp,
         last_action = action,
     })
+end
+
+function Grimmlink:rememberLocalWebBridgeSnapshot(file_hash, snapshot, action)
+    if not file_hash or not snapshot then
+        return
+    end
+
+    self.db:upsertLocalWebBridgeState(file_hash, {
+        file_path = snapshot.file_path,
+        book_id = snapshot.bookId,
+        document = snapshot.document,
+        file_format = snapshot.fileFormat,
+        progress = snapshot.progress,
+        location = snapshot.location,
+        percentage = snapshot.percentage,
+        current_page = snapshot.currentPage,
+        total_pages = snapshot.totalPages,
+        timestamp = snapshot.timestamp,
+        last_action = action,
+    })
+end
+
+function Grimmlink:rememberRemoteWebBridgeSnapshot(file_hash, snapshot, action)
+    if not file_hash or not snapshot then
+        return
+    end
+
+    self.db:upsertRemoteWebBridgeState(file_hash, {
+        file_path = snapshot.file_path,
+        book_id = snapshot.bookId,
+        document = snapshot.document,
+        file_format = snapshot.fileFormat,
+        progress = snapshot.progress,
+        location = snapshot.location,
+        percentage = snapshot.percentage,
+        current_page = snapshot.currentPage,
+        total_pages = snapshot.totalPages,
+        timestamp = snapshot.timestamp,
+        remote_updated_at = snapshot.updatedAt or snapshot.timestamp,
+        remote_epub_cfi = snapshot.epubCfi,
+        remote_position_href = snapshot.positionHref,
+        remote_content_source_progress_percent = snapshot.contentSourceProgressPercent,
+        remote_source = snapshot.source,
+        device = snapshot.device,
+        device_id = snapshot.deviceId or snapshot.device_id,
+        last_action = action,
+    })
+end
+
+function Grimmlink:buildStoredRemoteWebBridgeSnapshot(state)
+    if not state then
+        return nil
+    end
+    return {
+        progress = state.remote_progress,
+        location = state.remote_location,
+        percentage = state.remote_percentage,
+        currentPage = state.remote_current_page,
+        totalPages = state.remote_total_pages,
+        timestamp = state.remote_timestamp or state.remote_updated_at,
+        updatedAt = state.remote_updated_at,
+        epubCfi = state.remote_epub_cfi,
+        positionHref = state.remote_position_href,
+        contentSourceProgressPercent = state.remote_content_source_progress_percent,
+        source = state.remote_source,
+        device = state.remote_device,
+        deviceId = state.remote_device_id,
+    }
+end
+
+function Grimmlink:buildWebBridgeConflictDialogText(local_snapshot, remote_snapshot)
+    local local_percent = local_snapshot.percentage and string.format("%.1f%%", local_snapshot.percentage) or _("unknown")
+    local remote_percent = remote_snapshot.percentage and string.format("%.1f%%", remote_snapshot.percentage) or _("unknown")
+    local local_page = local_snapshot.currentPage and local_snapshot.totalPages
+        and string.format("%s / %s", local_snapshot.currentPage, local_snapshot.totalPages)
+        or _("unknown")
+    local remote_page = remote_snapshot.currentPage and remote_snapshot.totalPages
+        and string.format("%s / %s", remote_snapshot.currentPage, remote_snapshot.totalPages)
+        or _("unknown")
+
+    return table.concat({
+        _("Found different Web Reader and KOReader positions"),
+        "",
+        _("KOReader:"),
+        T(_("- progress: %1"), local_percent),
+        T(_("- page: %1"), local_page),
+        T(_("- updated: %1"), formatTimestamp(local_snapshot.timestamp)),
+        "",
+        _("Web Reader:"),
+        T(_("- progress: %1"), remote_percent),
+        T(_("- page: %1"), remote_page),
+        T(_("- updated: %1"), formatTimestamp(remote_snapshot.updatedAt or remote_snapshot.timestamp)),
+        T(_("- source: %1"), remote_snapshot.source or _("Web Reader")),
+        T(_("- conversion: %1"), remote_snapshot.conversionStatus or _("unknown")),
+    }, "\n")
 end
 
 function Grimmlink:jumpToPage(page_number)
@@ -1229,6 +1355,313 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id)
     end
 end
 
+function Grimmlink:resolveBridgeConversion(book_id, payload)
+    if not self.cfi_conversion_enabled or not book_id or not payload then
+        return nil
+    end
+
+    self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
+    local success, response = self.api:resolveBridgeCfi(book_id, payload)
+    if success and type(response) == "table" then
+        return response
+    end
+
+    self:logWarn("GrimmLink Web Reader bridge conversion failed:", response)
+    return nil
+end
+
+function Grimmlink:buildWebBridgePayload(snapshot, bridge_state, force_update)
+    local conversion = nil
+    local raw_xpointer = self:looksLikeXPointer(snapshot.location) and tostring(snapshot.location)
+        or (self:looksLikeXPointer(snapshot.progress) and tostring(snapshot.progress) or nil)
+
+    if self.cfi_conversion_enabled and raw_xpointer and snapshot.bookId then
+        conversion = self:resolveBridgeConversion(snapshot.bookId, {
+            rawKoreaderLocation = snapshot.location,
+            rawKoreaderXPointer = raw_xpointer,
+            currentPage = snapshot.currentPage,
+            totalPages = snapshot.totalPages,
+            percentage = snapshot.percentage,
+        })
+    end
+
+    return {
+        percentage = snapshot.percentage,
+        currentPage = snapshot.currentPage,
+        totalPages = snapshot.totalPages,
+        epubCfi = conversion and conversion.converted and conversion.epubCfi or nil,
+        positionHref = conversion and conversion.positionHref or nil,
+        contentSourceProgressPercent = conversion and conversion.contentSourceProgressPercent or nil,
+        rawKoreaderLocation = snapshot.location,
+        rawKoreaderProgress = snapshot.progress,
+        rawKoreaderXPointer = raw_xpointer,
+        source = "KOREADER",
+        device = self.device_name,
+        deviceId = self.device_id,
+        timestamp = snapshot.timestamp,
+        expectedUpdatedAt = bridge_state and bridge_state.remote_updated_at or nil,
+        force = force_update == true,
+    }, conversion
+end
+
+function Grimmlink:pushWebReaderBridgeSnapshot(snapshot, opts)
+    opts = opts or {}
+    if not self.web_reader_bridge_enabled or not snapshot or not snapshot.bookHash or not snapshot.bookId then
+        return { ok = false, skipped = true, reason = "disabled_or_unmatched" }
+    end
+
+    if not self:isOnline() then
+        return { ok = false, skipped = true, reason = "offline" }
+    end
+
+    local bridge_state = self.db:getWebBridgeState(snapshot.bookHash)
+    local payload, conversion = self:buildWebBridgePayload(snapshot, bridge_state, opts.force)
+
+    self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
+    local success, response = self.api:updateWebProgress(snapshot.bookId, payload)
+    if not success then
+        self.last_web_bridge_result = {
+            ok = false,
+            reason = tostring(response),
+            at = nowUtc(),
+        }
+        return { ok = false, reason = tostring(response), conversion = conversion }
+    end
+
+    local remote_snapshot = self:normalizeWebBridgeProgress(response)
+    if remote_snapshot then
+        remote_snapshot.bookHash = snapshot.bookHash
+        remote_snapshot.bookId = snapshot.bookId
+        remote_snapshot.fileFormat = snapshot.fileFormat
+        remote_snapshot.document = snapshot.document
+        remote_snapshot.file_path = snapshot.file_path
+    end
+
+    if response and response.conflictDetected then
+        if remote_snapshot then
+            self:rememberRemoteWebBridgeSnapshot(snapshot.bookHash, remote_snapshot, opts.reason or "web-bridge-conflict")
+        end
+        self.last_web_bridge_result = {
+            ok = false,
+            conflict = true,
+            reason = response.message or "remote_newer",
+            at = nowUtc(),
+        }
+        return {
+            ok = false,
+            conflict = true,
+            reason = response.message or "remote_newer",
+            remote_snapshot = remote_snapshot,
+            conversion = conversion,
+        }
+    end
+
+    self:rememberLocalWebBridgeSnapshot(snapshot.bookHash, snapshot, opts.reason or "web-bridge-push")
+    if remote_snapshot then
+        self:rememberRemoteWebBridgeSnapshot(snapshot.bookHash, remote_snapshot, opts.reason or "web-bridge-push")
+        self.db:setWebBridgeLastAction(snapshot.bookHash, opts.reason or "web-bridge-push")
+    end
+
+    self.last_web_bridge_result = {
+        ok = true,
+        updated = true,
+        conversion = conversion and conversion.conversionStatus or nil,
+        at = nowUtc(),
+    }
+    return {
+        ok = true,
+        remote_snapshot = remote_snapshot,
+        conversion = conversion,
+    }
+end
+
+function Grimmlink:showWebBridgeConflictDialog(file_hash, local_snapshot, remote_snapshot, mode)
+    local dialog
+    dialog = ButtonDialog:new{
+        title = self:buildWebBridgeConflictDialogText(local_snapshot, remote_snapshot),
+        buttons = {
+            {
+                {
+                    text = _("Use KOReader"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        local result = self:pushWebReaderBridgeSnapshot(local_snapshot, {
+                            reason = mode == "remote_newer" and "web-bridge-use-local-remote-newer" or "web-bridge-use-local-conflict",
+                            force = true,
+                        })
+                        if result.ok then
+                            self:showMessage(_("Updated Web Reader progress from KOReader"), 3)
+                        elseif result.conflict then
+                            self:showMessage(_("Web Reader changed again; keeping the remote position."), 4)
+                        else
+                            self:showMessage(_("Web Reader bridge push failed, but KOReader reading continues normally."), 4)
+                        end
+                    end,
+                },
+                {
+                    text = _("Use Web Reader"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        local jumped = self:applyRemoteProgress(remote_snapshot)
+                        if jumped then
+                            local applied = self:getCurrentProgressSnapshot(file_hash,
+                                self.ui and self.ui.document and tostring(self.ui.document.file) or nil,
+                                remote_snapshot.bookId or local_snapshot.bookId)
+                            self:rememberLocalWebBridgeSnapshot(file_hash, applied, "web-bridge-use-remote")
+                            self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-use-remote")
+                            self:showMessage(_("Jumped to Web Reader progress"), 3)
+                        else
+                            self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-remote-jump-unsafe")
+                            self:showMessage(_("Web Reader progress found, but a safe jump was not possible"), 4)
+                        end
+                    end,
+                },
+                {
+                    text = _("Ignore"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot,
+                            mode == "remote_newer" and "web-bridge-remote-ignored" or "web-bridge-conflict-ignored")
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+end
+
+function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, silent)
+    if not self.web_reader_bridge_enabled or not file_hash or file_hash == "" or not book_id then
+        return nil
+    end
+    if not self:isOnline() then
+        return nil
+    end
+
+    self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
+    local bridge_state = self.db:getWebBridgeState(file_hash)
+    local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
+    local success, remote = self.api:getWebProgress(book_id)
+    if not success then
+        self:logWarn("GrimmLink Web Reader bridge pull failed:", remote)
+        self:rememberLocalWebBridgeSnapshot(file_hash, local_snapshot, "web-bridge-open-local")
+        return { decision = "error", reason = remote }
+    end
+
+    local remote_snapshot = self:normalizeWebBridgeProgress(remote)
+    if remote_snapshot then
+        remote_snapshot.bookHash = file_hash
+        remote_snapshot.bookId = book_id
+        remote_snapshot.fileFormat = self:getBookType(file_path)
+        remote_snapshot.document = file_hash
+        remote_snapshot.file_path = file_path
+    end
+
+    if remote_snapshot and self.cfi_conversion_enabled and isNonEmpty(remote_snapshot.epubCfi) then
+        local resolved = self:resolveBridgeConversion(book_id, {
+            epubCfi = remote_snapshot.epubCfi,
+            currentPage = remote_snapshot.currentPage,
+            totalPages = remote_snapshot.totalPages,
+            percentage = remote_snapshot.percentage,
+        })
+        if resolved and resolved.converted then
+            remote_snapshot.location = resolved.rawKoreaderXPointer or resolved.rawLocation or remote_snapshot.location
+            remote_snapshot.progress = remote_snapshot.location or remote_snapshot.progress
+            remote_snapshot.positionHref = resolved.positionHref or remote_snapshot.positionHref
+            remote_snapshot.contentSourceProgressPercent = resolved.contentSourceProgressPercent or remote_snapshot.contentSourceProgressPercent
+            remote_snapshot.conversionStatus = resolved.conversionStatus or remote_snapshot.conversionStatus
+            remote_snapshot.conversionConfidence = resolved.conversionConfidence or remote_snapshot.conversionConfidence
+        elseif resolved then
+            remote_snapshot.conversionStatus = resolved.conversionStatus or "conversion_failed"
+            remote_snapshot.conversionConfidence = resolved.conversionConfidence or 0
+        end
+    end
+
+    self:rememberLocalWebBridgeSnapshot(file_hash, local_snapshot, "web-bridge-open-local")
+    self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-open-remote")
+
+    local bridge_compare_state = nil
+    if bridge_state then
+        bridge_compare_state = {
+            local_progress = bridge_state.local_progress,
+            local_location = bridge_state.local_location,
+            local_percentage = bridge_state.local_percentage,
+            local_current_page = bridge_state.local_current_page,
+            local_total_pages = bridge_state.local_total_pages,
+            local_timestamp = bridge_state.local_timestamp,
+            remote_progress = bridge_state.remote_progress,
+            remote_location = bridge_state.remote_location,
+            remote_percentage = bridge_state.remote_percentage,
+            remote_current_page = bridge_state.remote_current_page,
+            remote_total_pages = bridge_state.remote_total_pages,
+            remote_timestamp = bridge_state.remote_timestamp or bridge_state.remote_updated_at,
+        }
+    end
+
+    local decision = self:compareOpenProgress(local_snapshot, remote_snapshot, bridge_compare_state)
+    self:logInfo("GrimmLink Web Reader bridge decision:", decision or "nil")
+
+    if decision == "none" and self:hasMeaningfulProgress(local_snapshot) then
+        local push_result = self:pushWebReaderBridgeSnapshot(local_snapshot, {
+            reason = "web-bridge-open-remote-empty",
+        })
+        if not silent and push_result.ok then
+            self:showMessage(_("Seeded the Web Reader bridge from KOReader progress"), 3)
+        end
+        return { decision = decision, remote_snapshot = remote_snapshot, local_snapshot = local_snapshot }
+    end
+
+    if decision == "local_newer" then
+        local push_result = self:pushWebReaderBridgeSnapshot(local_snapshot, {
+            reason = "web-bridge-open-local-newer",
+        })
+        if not silent and push_result.ok then
+            self:showMessage(_("Pushed newer KOReader progress to the Web Reader bridge"), 3)
+        elseif push_result.conflict then
+            self:showWebBridgeConflictDialog(file_hash, local_snapshot, push_result.remote_snapshot or remote_snapshot, "conflict")
+        end
+        return { decision = decision, remote_snapshot = remote_snapshot, local_snapshot = local_snapshot }
+    end
+
+    if decision == "remote_newer" or decision == "conflict" then
+        self:showWebBridgeConflictDialog(file_hash, local_snapshot, remote_snapshot, decision)
+    elseif not silent and decision == "same" then
+        self:showMessage(_("Web Reader bridge is already aligned with KOReader"), 3)
+    end
+
+    return {
+        decision = decision,
+        remote_snapshot = remote_snapshot,
+        local_snapshot = local_snapshot,
+    }
+end
+
+function Grimmlink:syncWebReaderBridgeNow(silent)
+    if not self.web_reader_bridge_enabled then
+        if not silent then
+            self:showMessage(_("Web Reader Bridge is disabled."), 3)
+        end
+        return nil
+    end
+    if not self.ui or not self.ui.document or not self.ui.document.file then
+        return nil
+    end
+
+    local file_path = tostring(self.ui.document.file)
+    local cached = self.db:getBookByFilePath(file_path)
+    local file_hash = cached and cached.file_hash or self:calculateBookHash(file_path)
+    local matched = self:resolveBookByHash(file_path, file_hash, true)
+    local book_id = matched and matched.book_id or (cached and cached.book_id or nil)
+    if not book_id then
+        if not silent then
+            self:showMessage(_("No matched Grimmory book for Web Reader bridge."), 3)
+        end
+        return nil
+    end
+
+    return self:maybePullWebReaderProgress(file_hash, file_path, book_id, silent)
+end
+
 function Grimmlink:validateSession(duration_seconds, progress_delta, start_page, end_page)
     if duration_seconds < (tonumber(self.session_min_seconds) or DEFAULTS.session_min_seconds) then
         local pages_delta = math.abs((tonumber(end_page) or 0) - (tonumber(start_page) or 0))
@@ -1270,6 +1703,7 @@ function Grimmlink:startSession()
 
     self:logInfo("GrimmLink session started for", title, "hash:", file_hash or "nil")
     self:maybePullRemoteProgress(file_hash, file_path, book_id)
+    self:maybePullWebReaderProgress(file_hash, file_path, book_id, true)
     self:maybePullRemoteAnnotations(book_id)
 end
 
@@ -1318,6 +1752,9 @@ function Grimmlink:endSession(options)
     local should_push = self:shouldPushProgress(end_snapshot, state, options.reason or "close")
     if should_push and self.auto_push_on_close then
         self:pushProgressSnapshot(end_snapshot, options.reason or "close", true)
+        self:pushWebReaderBridgeSnapshot(end_snapshot, {
+            reason = "web-bridge-" .. (options.reason or "close"),
+        })
     end
 
     self.current_session = nil
@@ -1823,7 +2260,9 @@ function Grimmlink:showAbout()
         T(_("Release repo: %1"), self.update_repo or DEFAULTS.update_repo),
         _("Updates always require confirmation before download/install."),
         _("Updating GrimmLink preserves settings, database, cache, downloaded books, and .sdr files."),
-        _("Prompt 8 Web Reader Bridge / EPUB CFI conversion is intentionally not included here."),
+        T(_("Web Reader Bridge: %1"), self.web_reader_bridge_enabled and _("enabled") or _("disabled")),
+        T(_("EPUB CFI conversion: %1"), self.cfi_conversion_enabled and _("enabled") or _("disabled")),
+        _("Prompt 8 keeps Web Reader Bridge optional and preserves native KOReader sync separately."),
     }, "\n"), 8)
 end
 
@@ -2125,6 +2564,24 @@ function Grimmlink:addToMainMenu(menu_items)
                         end,
                     },
                     {
+                        text = _("Web Reader Bridge"),
+                        checked_func = function()
+                            return self.web_reader_bridge_enabled
+                        end,
+                        callback = function()
+                            self:saveSetting("web_reader_bridge_enabled", not self.web_reader_bridge_enabled)
+                        end,
+                    },
+                    {
+                        text = _("EPUB CFI Conversion"),
+                        checked_func = function()
+                            return self.cfi_conversion_enabled
+                        end,
+                        callback = function()
+                            self:saveSetting("cfi_conversion_enabled", not self.cfi_conversion_enabled)
+                        end,
+                    },
+                    {
                         text = _("Progress threshold (%)"),
                         callback = function()
                             self:showNumberInput(_("Progress threshold (%)"), self.threshold_percent, "1.0", function(value)
@@ -2232,6 +2689,12 @@ function Grimmlink:addToMainMenu(menu_items)
                 text = _("Sync Shelf Now"),
                 callback = function()
                     self:syncShelfNow()
+                end,
+            },
+            {
+                text = _("Sync Web Reader Progress Now"),
+                callback = function()
+                    self:syncWebReaderBridgeNow(false)
                 end,
             },
             {

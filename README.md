@@ -2,7 +2,7 @@
 
 KOReader Companion for Grimmory
 
-This repository is the dedicated KOReader plugin home for GrimmLink. It started as a fork of `WorldTeacher/BookLoreSync-plugin`, and it is now being adapted for Grimmory-specific backend support and GrimmLink branding.
+This repository is the dedicated KOReader plugin home for GrimmLink.
 
 ## Current Scope
 
@@ -11,72 +11,71 @@ GrimmLink currently supports:
 - KOReader authentication with `x-auth-user` and `x-auth-key`
 - book matching by hash against Grimmory
 - KOReader-native progress pull and push
-- EPUB progress syncing as KOReader-native data
 - reading session upload and offline batch replay
 - Moon+ Reader-like local/remote progress comparison
-- **Shelf Sync** — download books from a selected Grimmory shelf to a local KOReader folder
-  - shelf selection via in-plugin picker
-  - safe local mapping (`shelf_sync_map`) — tracks GrimmLink-downloaded files
-  - skip already-downloaded books
-  - two-way shelf delete sync (`two_way_shelf_delete_sync`, default off)
-  - optional `.sdr` sidecar deletion (`delete_sdr_on_book_delete`, default off)
-  - configurable download directory
-- **Annotation Sync** — push KOReader highlights, notes, bookmarks and personal rating to Grimmory, then safely merge remote-newer items back into KOReader (Prompt 6 / Prompt 7A)
-  - per-kind toggles: `annotations_sync_enabled`, `bookmarks_sync_enabled`, `rating_sync_enabled` (all default off)
-  - capture-on-close hook + manual `Sync Annotations Now` / `Pull Remote Annotations Now` actions
-  - offline queue (`pending_annotations`) — survives restart, retried on next sync
-  - pending remote-import cache for items that could not be imported safely yet
-  - server-side dedupe via stable `dedupeKey` (md5 of book + kind + position + text)
-  - raw KOReader xpointer / page is preserved — no EPUB CFI conversion
-  - never bridges into Web Reader CFI tables
-  - never deletes local user annotations during pull and never silently overwrites a local note/highlight on conflict
-- **Auto Update** — check GrimmLink releases from `0xstillb/grimmlink` without leaving KOReader (Prompt 7B / Prompt 7B-R)
-  - reads the installed version from `grimmlink.koplugin/plugin_version.lua`
-  - checks GitHub Releases for `grimmlink.koplugin.zip` or `grimmlink-vX.Y.Z.zip`
-  - defaults: `auto_update_enabled = false`, `check_update_on_startup = false`, `update_channel = stable`, `allow_prerelease_updates = false`
-  - install always requires explicit user confirmation
-  - only replaces the plugin package, so settings, database, cache, downloaded books, and `.sdr` files are preserved
-  - startup checks are opt-in and rate-limited; failed checks leave the current plugin untouched
+- Shelf Sync with safe tracked-download deletion rules only
+- Annotation push sync plus safe remote pull / two-way merge
+- Auto Update using `0xstillb/grimmlink` releases only
+- Prompt 8 Web Reader Bridge
+  - `web_reader_bridge_enabled = false` by default
+  - `cfi_conversion_enabled = false` by default
+  - Web Reader Bridge is optional and does not replace native KOReader sync
+  - EPUB CFI conversion is best-effort only
+  - failed conversion falls back cleanly and does not block reading
 
-Not yet implemented:
+## Important Safety Rules
 
-- Web Reader bridge
-- EPUB CFI conversion
-- Hardcover rating sync
-- magic shelf (dynamic filter-based shelf) support
+- Shelf Sync is shelf membership sync only, not library delete sync
+- GrimmLink never deletes Grimmory library/server files
+- GrimmLink never deletes Grimmory book records
+- raw KOReader location/page/xpointer remains preserved
+- local user annotations are not deleted or silently overwritten during merge
+- Auto Update never points to `WorldTeacher/BookLoreSync-plugin`
 
-## Repository Layout
+## Web Reader Bridge Notes
 
-- `grimmlink.koplugin/`: active plugin package for KOReader
-- `grimmlink.koplugin/test/`: active GrimmLink MVP test surface
-- `docs/PLUGIN_SCOPE.md`: current GrimmLink MVP scope and integration notes
-- `docs/TEST_PLAN.md`: current manual and backend/plugin integration test plan
-- `docs/RELEASE.md`: current MVP release checklist and known limitations
-- `docs/content/`: legacy upstream BookLoreSync documentation retained as reference only
-- `legacy/upstream-bookloresync-tests/`: legacy upstream test suite retained as reference only
+- pulls Web Reader progress on book open only when enabled
+- pushes bridge progress on close/suspend/manual sync when enabled
+- prompts before using newer remote Web Reader progress
+- keeps KOReader-native progress working independently when bridge is disabled
+- does not require EPUB CFI conversion for normal KOReader-native sync
 
 ## Installation
 
-1. Copy the plugin package into KOReader's `plugins` directory:
-
-   ```bash
-   cp -r grimmlink.koplugin {your_koreader_installation}/plugins/
-   ```
-
+1. Copy `grimmlink.koplugin` into KOReader's `plugins` directory.
 2. Fully restart KOReader.
-
-3. In KOReader, configure:
+3. Configure:
    - Grimmory server URL
    - username
    - auth key
    - device name / device ID
 
-## Notes
+## CI
 
-- Auto-update uses only `0xstillb/grimmlink` releases. It does not use `WorldTeacher/BookLoreSync-plugin` releases.
-- GrimmLink sends KOReader-native EPUB progress only. It does not convert to EPUB CFI and does not bridge into Grimmory Web Reader fields.
-- Prompt 7A handles KOReader-native annotation pull / merge only. Prompt 8 is where Web Reader Bridge + EPUB CFI conversion still belong.
-- Restart KOReader after installing an update so the new plugin code is loaded cleanly.
-- CI now checks Lua syntax, plugin tests, updater repo safety, and accidental packaging artifacts before release.
-- This repo is now separate from the main Grimmory server repository so plugin work can evolve independently.
-- The active GrimmLink MVP source of truth is `grimmlink.koplugin/` plus the top-level docs listed above. Legacy upstream docs/tests under `docs/content/` and `legacy/upstream-bookloresync-tests/` are not the authoritative MVP contract.
+CI lives in `.github/workflows/ci.yml` and must pass before release.
+
+It checks:
+
+- Lua syntax
+- active plugin tests
+- updater repo safety
+- accidental packaging artifacts
+
+The workflow does not require:
+
+- a real KOReader runtime
+- a real Grimmory server
+- secrets
+- real GitHub update installs
+
+## Repository Layout
+
+- `grimmlink.koplugin/`: active plugin package
+- `grimmlink.koplugin/test/`: active automated test surface
+- `docs/PLUGIN_SCOPE.md`: current feature/safety scope
+- `docs/TEST_PLAN.md`: current runtime and CI verification plan
+- `docs/RELEASE.md`: release checklist
+
+## Next Step
+
+- Prompt 9 Full Integration / Runtime Test

@@ -1,100 +1,50 @@
 # GrimmLink MVP Release Checklist
 
-## Release Summary
+## Included
 
-- Release name:
-- Release date:
-- Plugin branch:
-- Backend branch:
-
-## Included In MVP
-
-- [ ] GrimmLink branding is visible in the plugin UI
-- [ ] Grimmory server URL can be configured
-- [ ] `x-auth-user` and `x-auth-key` auth works
-- [ ] hash-based book matching works
-- [ ] KOReader-native progress pull works
-- [ ] KOReader-native progress push works
+- [ ] KOReader auth works
+- [ ] hash-based matching works
+- [ ] native progress pull/push works
 - [ ] reading session upload works
-- [ ] batch pending session upload works
-- [ ] offline queue works
-- [ ] Moon+ Reader-like conflict dialog works
-- [ ] Shelf Sync downloads books from a selected Grimmory shelf
-- [ ] Shelf Sync uses `shelf_sync_map` for tracked GrimmLink downloads
-- [ ] `two_way_shelf_delete_sync` defaults to OFF
-- [ ] `delete_sdr_on_book_delete` defaults to OFF
-- [ ] Prompt 7A annotation pull / merge keeps local KOReader items safe
-- [ ] Prompt 7B auto-update checks `0xstillb/grimmlink` releases only
-- [ ] Prompt 7B-R CI workflow passes on the plugin branch
+- [ ] shelf sync safety rules remain intact
+- [ ] annotation merge safety remains intact
+- [ ] auto-update still uses `0xstillb/grimmlink` only
+- [ ] CI passes on the plugin branch
+- [ ] Prompt 8 Web Reader Bridge is present but default OFF
+- [ ] Prompt 8 EPUB CFI conversion is present but default OFF
 
-## Excluded From MVP
+## Safety
 
-- [ ] Web Reader Bridge
-- [ ] EPUB CFI conversion
-- [ ] shelf/library sync beyond the current Shelf Sync MVP
-
-## Auto-Update Safety
-
-- [ ] updater source repo is `0xstillb/grimmlink`
-- [ ] no updater path points to `WorldTeacher/BookLoreSync-plugin`
-- [ ] installed version is read from `grimmlink.koplugin/plugin_version.lua`
-- [ ] supported assets are `grimmlink.koplugin.zip` or `grimmlink-vX.Y.Z.zip`
-- [ ] user confirmation is required before download/install
-- [ ] `auto_update_enabled` defaults to OFF
-- [ ] `check_update_on_startup` defaults to OFF
-- [ ] `update_channel` defaults to `stable`
-- [ ] `allow_prerelease_updates` defaults to OFF
-- [ ] settings, database, cache, downloaded books, and `.sdr` files remain untouched by plugin replacement
-- [ ] restart prompt is shown after a successful update
+- [ ] no user settings/database/cache are deleted
+- [ ] no downloaded books are deleted by updater
+- [ ] no `.sdr` files are deleted by updater
+- [ ] no shelf sync path deletes Grimmory library/server files
+- [ ] no shelf sync path deletes Grimmory book records
+- [ ] bridge failure never blocks reading
+- [ ] failed CFI conversion falls back safely
 
 ## CI Gate
 
-- [ ] `.github/workflows/ci.yml` passes on pull requests
-- [ ] `.github/workflows/ci.yml` passes on `main`
-- [ ] `.github/workflows/ci.yml` passes on `feature/grimmlink-adaptation`
+- [ ] `.github/workflows/ci.yml` passes
 - [ ] Lua syntax checks pass
-- [ ] active GrimmLink plugin tests pass
-- [ ] updater repo safety checks pass
-- [ ] no release ZIP artifacts are committed
+- [ ] active plugin tests pass
+- [ ] updater safety checks pass
+- [ ] no packaging artifacts are committed
 
-## Compatibility Notes
+## Web Reader Bridge
 
-- [ ] plugin targets Grimmory backend endpoints documented for GrimmLink MVP
-- [ ] plugin remains in this dedicated repository
-- [ ] backend implementation remains in the separate `grimmory` repository
+- [ ] bridge reads/writes only the dedicated Web Reader bridge endpoints
+- [ ] native KOReader progress still works independently when bridge is disabled
+- [ ] remote-newer bridge state prompts before jump
+- [ ] conflict flow offers `Use KOReader`, `Use Web Reader`, `Ignore`
+- [ ] raw KOReader location/page/xpointer remains preserved
 
 ## Known Limitations
 
-- raw remote jump depends on KOReader runtime methods available on the device
-- some legacy upstream docs/tests remain in the repository as reference material under `docs/content/` and `legacy/upstream-bookloresync-tests/`
-- active GrimmLink MVP source of truth is `grimmlink.koplugin/` and the top-level docs in `docs/`
-- shelf deletions never use a library delete endpoint or server-side file deletion
+- real KOReader runtime validation is still required on device
+- EPUB CFI conversion is best-effort, not guaranteed exact
+- local development here may rely on CI for Lua syntax/runtime checks
 
-## Annotation Sync (Prompt 6 / Prompt 7A)
+## Next Phase
 
-- New plugin module: `grimmlink_annotations.lua`.
-- New plugin DB migration 4 adds `pending_annotations` queue and
-  `annotation_sync_state` table.
-- New plugin DB migration 5 adds `remote_annotation_merge_state` so pending
-  remote imports/conflicts can be retried without duplicate spam.
-- Per-kind toggles all default OFF until the user explicitly opts in.
-- KOReader xpointer / page is preserved as raw `koreaderPos` / `page`.
-  No EPUB CFI conversion. No Web Reader bridge.
-- Prompt 7A adds remote annotation pull / two-way merge for highlights,
-  notes and bookmarks while keeping local user annotations intact on conflict.
-- Backend tables: `koreader_annotations`, `koreader_bookmarks` (separate
-  from the existing CFI-based `annotations` / `book_marks`).
-- Rating reuses the existing `user_book_progress.personal_rating` column.
-
-## Later Phase Roadmap
-
-- Hardcover rating sync
-- shelf/library sync beyond current Shelf Sync MVP
-
-## Prompt 8 - Web Reader Bridge
-
-This remains a later dedicated phase only.
-
-- keep KOReader-native progress separate from Grimmory Web Reader progress
-- treat EPUB CFI conversion as best-effort future work
-- do not block GrimmLink MVP release on Web Reader Bridge work
+- Prompt 9 Full Integration / Runtime Test

@@ -309,6 +309,41 @@ function APIClient:removeBookFromShelf(shelf_id, book_id)
     return false, response or ("HTTP " .. tostring(code or "?"))
 end
 
+function APIClient:getWebProgress(book_id)
+    local success, code, response = self:request(
+        "GET",
+        "/api/koreader/books/" .. tostring(book_id) .. "/web-progress"
+    )
+    if success and type(response) == "table" then
+        return true, response
+    end
+    return false, response or ("HTTP " .. tostring(code or "?"))
+end
+
+function APIClient:updateWebProgress(book_id, progress_payload)
+    local success, code, response = self:request(
+        "PUT",
+        "/api/koreader/books/" .. tostring(book_id) .. "/web-progress",
+        progress_payload
+    )
+    if success then
+        return true, response, code
+    end
+    return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
+function APIClient:resolveBridgeCfi(book_id, payload)
+    local success, code, response = self:request(
+        "POST",
+        "/api/koreader/books/" .. tostring(book_id) .. "/cfi/resolve",
+        payload
+    )
+    if success then
+        return true, response, code
+    end
+    return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
 -- ===== Annotation / Bookmark / Rating sync =====
 
 function APIClient:getAnnotations(book_id, since_epoch_sec)

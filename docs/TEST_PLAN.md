@@ -1,189 +1,74 @@
 # GrimmLink Plugin Test Plan
 
-## Current Automated Test Target
+## CI Gate
 
-The active GrimmLink automated tests live under:
-
-- `grimmlink.koplugin/test/`
-- `.github/workflows/ci.yml`
-
-Legacy upstream BookLoreSync tests now live under:
-
-- `legacy/upstream-bookloresync-tests/`
-
-They should be treated as reference/archive material and are not part of the active GrimmLink MVP gate.
-
-## MVP Verification Goals
-
-- verify Grimmory auth integration
-- verify hash-based book matching
-- verify KOReader-native progress pull and push
-- verify reading session upload and batch replay
-- verify offline queue behavior
-- verify Moon+ Reader-like conflict flow
-- verify GrimmLink auto-update points only to `0xstillb/grimmlink`
-- verify updater never accepts the old BookLoreSync repo in active code
-- verify auto-update keeps user data and downloaded books untouched
-- verify no Web Reader bridge or EPUB CFI behavior is introduced
-
-## CI Gate (Prompt 7B-R)
-
-The plugin CI workflow must pass before release.
+The plugin CI workflow in `.github/workflows/ci.yml` must pass before release.
 
 Current CI checks:
 
-- Lua syntax check via `luac -p` for `grimmlink.koplugin/**/*.lua`
-- `./run_tests.sh` for the active GrimmLink plugin test suite
-- updater repo safety guard:
-  - fail if active plugin code references `WorldTeacher/BookLoreSync-plugin`
-  - require `grimmlink.koplugin/grimmlink_updater.lua` to use `0xstillb/grimmlink`
-- packaging guard:
-  - fail if release ZIP artifacts are committed into the repo
+- Lua syntax via `luac -p`
+- active plugin tests via `./run_tests.sh`
+- updater safety guard for `0xstillb/grimmlink`
+- failure if active code references `WorldTeacher/BookLoreSync-plugin`
+- failure if release ZIP artifacts are committed
 
-The CI workflow is intentionally self-contained:
+The workflow does not require:
 
-- no KOReader runtime is required
-- no Grimmory server is required
-- no GitHub secrets are required
-- no real update install step is executed
+- a real KOReader runtime
+- a real Grimmory server
+- secrets
+- real GitHub update installs
 
-## Backend Integration Checks
+## Manual KOReader Checks
 
-Expected backend endpoints:
-
-- `GET /api/koreader/users/auth`
-- `GET /api/koreader/books/by-hash/{bookHash}`
-- `GET /api/koreader/syncs/progress/{bookHash}`
-- `PUT /api/koreader/syncs/progress`
-- `POST /api/v1/reading-sessions`
-- `POST /api/v1/reading-sessions/batch`
-- `GET /api/koreader/shelves`
-- `GET /api/koreader/shelves/{shelfId}/books`
-- `GET /api/koreader/books/{bookId}/download`
-- `POST /api/koreader/shelves/{shelfId}/books/{bookId}/remove`
-
-## Manual KOReader Runtime Checks
-
-1. Install `grimmlink.koplugin` into KOReader's plugins directory.
-2. Configure:
-   - Grimmory server URL
-   - username
-   - auth key
-   - device name
-   - device ID
+1. Install `grimmlink.koplugin`.
+2. Configure server URL, username, auth key, device name, and device ID.
 3. Run `Test Connection`.
-4. Open a book that exists in Grimmory.
-5. Confirm hash match succeeds.
-6. Confirm remote progress is pulled when available.
-7. Read forward and close the book.
-8. Confirm local progress is pushed or queued.
-9. Reopen with a meaningful local/remote difference.
-10. Verify:
+4. Open a matched book.
+5. Verify native progress pull works.
+6. Read forward, close, and verify native progress push or queue behavior.
+7. Reopen with a meaningful local/remote difference and verify:
    - `Use Local`
    - `Use Remote`
    - `Ignore`
-11. Repeat with the server offline, then use `Sync Pending Now`.
-
-## Auto-Update Checks (Prompt 7B / Prompt 7B-R)
-
-1. Open `About & Updates`.
-2. Verify defaults on a fresh install:
-   - `auto_update_enabled = false`
-   - `check_update_on_startup = false`
-   - `update_channel = stable`
-   - `allow_prerelease_updates = false`
-   - `update_repo = 0xstillb/grimmlink`
-3. Run `Check for Updates` while online.
-4. Verify GrimmLink checks only `0xstillb/grimmlink` releases.
-5. If an update is offered:
-   - confirm the dialog shows a GrimmLink asset name
-   - confirm install does not start until the user presses `Install`
-   - install the update and verify KOReader prompts for restart
-6. Verify plugin settings, local database, cache, downloaded books, and `.sdr`
-   files remain untouched after the update.
-7. Simulate a bad release asset or failed download:
-   - verify the install fails safely
-   - verify the current plugin stays usable
-8. Enable `Check on Startup` and relaunch KOReader:
-   - verify startup checks are rate-limited
-   - verify failure to reach GitHub does not block reading
-
-## Expected Sync Semantics
-
-- percentage is treated as `0..100`
-- raw KOReader location is preferred for remote jump
-- page fallback is allowed if raw jump is unavailable
-- percentage fallback is allowed only as a last safe option
-- reading must continue even if sync fails
-
-## Offline Queue Checks
-
-- progress queue survives restart
-- session queue survives restart
-- failed requests remain queued
-- retry count increases on repeated failures
-- manual sync flushes pending items when online
 
 ## Shelf Sync Checks
 
-- shelf selection persists in settings
-- shelf sync downloads missing books into the configured or auto-detected download directory
-- already-downloaded GrimmLink-managed files are skipped
-- local shelf deletions only remove tracked files when `two_way_shelf_delete_sync` is enabled
-- local shelf deletions never call the library delete API
-- shelf removals never delete user-added files
-- `.sdr` removal only happens when `delete_sdr_on_book_delete` is enabled
-- public shelves remain read-only from the plugin's perspective unless the backend authorizes a membership mutation
+- shelf selection persists
+- tracked shelf downloads are created in the configured directory
+- two-way shelf delete sync stays OFF by default
+- `.sdr` deletion stays OFF by default
+- only GrimmLink-tracked files are removed
+- no library delete endpoint is ever called
 
-## Annotation Sync Test Surface (Prompt 6 / Prompt 7A)
+## Annotation Merge Checks
 
-Manual checks for highlight / note / bookmark / rating sync:
+- remote missing locally -> safe import
+- duplicate remote item -> skip
+- local note edited after last remote version -> keep local, mark conflict
+- raw KOReader xpointer/page survives push + pull
+- no Web Reader annotation fields are written
 
-1. With `annotations_sync_enabled` OFF:
-   - Make a highlight in a downloaded book, close the book.
-   - Verify `pending_annotations` count stays 0.
-   - Verify nothing is posted to `/api/koreader/books/{id}/annotations/batch`.
-2. With `annotations_sync_enabled` ON, online:
-   - Make 2 highlights, close the book.
-   - Verify items appear in `pending_annotations`, then are flushed on auto sync.
-   - Verify the server returns `inserted >= 2` on first sync.
-   - Re-close the book without changes — verify second sync is `skipped == 2`.
-3. With `annotations_sync_enabled` ON, offline:
-   - Make a highlight, close the book.
-   - Verify items stay in `pending_annotations`.
-   - Reconnect, run "Sync Annotations Now" — verify `posted > 0`.
-4. With `bookmarks_sync_enabled` ON, add bookmarks (no highlight) — verify
-   they go to `/bookmarks/batch`, not `/annotations/batch`.
-5. With `rating_sync_enabled` ON, set a 4-star KOReader rating — verify
-   the queue contains a single `rating` item that maps to `rating = 8`.
-6. Verify reading is NEVER blocked when sync is in flight.
-7. With remote annotations present and the local item missing:
-   - open the matched KOReader document online
-   - run "Pull Remote Annotations Now"
-   - verify the remote item is imported into KOReader without deleting any local item
-8. With the same remote item already present locally:
-   - rerun "Pull Remote Annotations Now"
-   - verify it is treated as a duplicate and is not re-imported repeatedly
-9. With local note text changed after the last remote version:
-   - rerun remote pull
-   - verify the local note is kept untouched and the merge is recorded as a conflict/pending-safe case rather than overwritten
-10. Verify raw `koreaderPos` / `page` survives push + pull without EPUB CFI conversion.
+## Web Reader Bridge Checks (Prompt 8)
 
-## Safety invariants
+- `web_reader_bridge_enabled` defaults to `false`
+- `cfi_conversion_enabled` defaults to `false`
+- with bridge disabled, KOReader-native sync behavior is unchanged
+- with bridge enabled, plugin pulls Web Reader progress on open
+- with bridge enabled, plugin pushes bridge progress on close/suspend/manual sync
+- if Web Reader progress is newer, plugin prompts before jumping
+- if both sides changed, plugin offers `Use KOReader`, `Use Web Reader`, `Ignore`
+- if CFI conversion fails, bridge falls back safely without blocking reading
+- if conversion is disabled, percentage/page fallback still works when possible
 
-- `pending_annotations` is empty for any book whose feature toggle is OFF.
-- Manually adding a `koreader_annotations` row and then submitting the same
-  `dedupeKey` again does NOT create a duplicate row server-side.
-- The legacy `annotations` and `book_marks` tables on the backend are
-  unchanged before / after any plugin sync.
-- No `BookEntity` rows are deleted by the plugin.
-- No local user annotation or bookmark is deleted by Prompt 7A pull / merge.
-- No Web Reader annotation fields are written in Prompt 7A.
+## Auto-Update Checks
 
-## Explicit Non-Goals For This Test Phase
+- updater source repo is `0xstillb/grimmlink`
+- install requires explicit confirmation
+- restart prompt appears after successful install
+- settings/database/cache/downloaded books/.sdr remain untouched
 
-- Web Reader Bridge (Prompt 8)
-- EPUB CFI conversion (Prompt 8)
-- Hardcover rating sync
+## Known Local Limitation
 
-If any of those appear during GrimmLink MVP testing, treat that as drift from scope rather than as a missing MVP feature.
+This workspace currently lacks a local Lua toolchain, so runtime Lua validation
+must happen in CI or on a KOReader-capable machine.
