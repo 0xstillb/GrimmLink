@@ -2297,6 +2297,8 @@ function Grimmlink:onSuspend()
 
     self:logInfo("GrimmLink: suspend")
     self:endSession({ reason = "suspend" })
+    local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
+    if not ok then self:logWarn("GrimmLink: suspend annotation capture error:", tostring(err)) end
     if self:isOnline() then
         self:syncPendingNow(true)
     end

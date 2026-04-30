@@ -121,4 +121,33 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("/body/DocFragment[1]/body/div[3]", payload.rawKoreaderXPointer)
         assert.is_false(payload.force)
     end)
+
+    it("captures annotations before syncing pending work on suspend", function()
+        local calls = {}
+        plugin.enabled = true
+        plugin.endSession = function(_, options)
+            calls[#calls + 1] = "endSession:" .. tostring(options.reason)
+            return true
+        end
+        plugin.captureCurrentDocumentAnnotations = function()
+            calls[#calls + 1] = "capture"
+        end
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.syncPendingNow = function(_, silent)
+            calls[#calls + 1] = "syncPendingNow:" .. tostring(silent)
+        end
+        plugin.logInfo = function() end
+        plugin.logWarn = function() end
+
+        local result = plugin:onSuspend()
+
+        assert.is_false(result)
+        assert.are.same({
+            "endSession:suspend",
+            "capture",
+            "syncPendingNow:true",
+        }, calls)
+    end)
 end)
