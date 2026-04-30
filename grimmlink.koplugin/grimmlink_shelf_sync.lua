@@ -249,95 +249,97 @@ function ShelfSync:syncShelf(opts)
     progress("Processing " .. #remote_books .. " books in shelf…")
     for _, book in ipairs(remote_books) do
         local book_id = book.bookId
-        if not book_id then goto continue end
-        local book_id_key = tostring(book_id)
-        if skip_download_ids[book_id_key] then
-            goto continue
-        end
+        local should_continue = false
+        if book_id then
+            local book_id_key = tostring(book_id)
+            should_continue = skip_download_ids[book_id_key] == true
 
-        -- Mark as seen in this sync
-        local existing = self.db:getShelfSyncEntry(book_id)
-        if two_way_delete_sync and existing and existing.downloaded_by_grimmlink == 1 and existing.local_path and existing.local_path ~= "" and isPathUnderDirectory(existing.local_path, download_dir) then
-            local attr = lfs.attributes(existing.local_path)
-            if not attr then
-                progress("Removing locally deleted book: " .. (book.title or tostring(book_id)))
-                local removal_ok, removal_err = self.api:removeBookFromShelf(shelf_id, book_id)
-                if removal_ok then
-                    self.db:deleteShelfSyncEntry(book_id)
-                    result.deleted = result.deleted + 1
-                    skip_download_ids[book_id_key] = true
-                    goto continue
+            -- Mark as seen in this sync
+            local existing = self.db:getShelfSyncEntry(book_id)
+            if not should_continue and two_way_delete_sync and existing and existing.downloaded_by_grimmlink == 1 and existing.local_path and existing.local_path ~= "" and isPathUnderDirectory(existing.local_path, download_dir) then
+                local attr = lfs.attributes(existing.local_path)
+                if not attr then
+                    progress("Removing locally deleted book: " .. (book.title or tostring(book_id)))
+                    local removal_ok, removal_err = self.api:removeBookFromShelf(shelf_id, book_id)
+                    if removal_ok then
+                        self.db:deleteShelfSyncEntry(book_id)
+                        result.deleted = result.deleted + 1
+                        skip_download_ids[book_id_key] = true
+                        should_continue = true
+                    else
+                        self.db:upsertPendingShelfRemoval({
+                            book_id = book_id,
+                            shelf_id = shelf_id,
+                            local_path = existing.local_path,
+                            delete_sdr = delete_sdr,
+                        })
+                        self.db:incrementPendingShelfRemovalRetryCount(book_id)
+                        result.failed = result.failed + 1
+                        local err = "Failed to remove bookId=" .. tostring(book_id) .. " from shelf: " .. tostring(removal_err)
+                        result.errors[#result.errors + 1] = err
+                        logger.warn("GrimmLink ShelfSync:", err)
+                        skip_download_ids[book_id_key] = true
+                        should_continue = true
+                    end
                 end
-
-                self.db:upsertPendingShelfRemoval({
+            end
+            if not should_continue and existing then
+                -- Touch last_seen_in_shelf_at
+                self.db:upsertShelfSyncEntry({
                     book_id = book_id,
                     shelf_id = shelf_id,
-                    local_path = existing.local_path,
-                    delete_sdr = delete_sdr,
+                    last_seen_in_shelf_at = sync_start,
                 })
-                self.db:incrementPendingShelfRemovalRetryCount(book_id)
-                result.failed = result.failed + 1
-                local err = "Failed to remove bookId=" .. tostring(book_id) .. " from shelf: " .. tostring(removal_err)
-                result.errors[#result.errors + 1] = err
-                logger.warn("GrimmLink ShelfSync:", err)
-                skip_download_ids[book_id_key] = true
-                goto continue
-            end
-        end
-        if existing then
-            -- Touch last_seen_in_shelf_at
-            self.db:upsertShelfSyncEntry({
-                book_id = book_id,
-                shelf_id = shelf_id,
-                last_seen_in_shelf_at = sync_start,
-            })
 
-            -- Check if local file still exists and size roughly matches
-            if existing.local_path and existing.local_path ~= "" then
-                local attr = lfs.attributes(existing.local_path)
-                if attr and attr.mode == "file" then
-                    local remote_kb = book.fileSizeKb
-                    local local_kb = math.floor(attr.size / 1024)
-                    if remote_kb == nil or math.abs(local_kb - remote_kb) < 10 then
-                        result.skipped = result.skipped + 1
-                        goto continue
+                -- Check if local file still exists and size roughly matches
+                if existing.local_path and existing.local_path ~= "" then
+                    local attr = lfs.attributes(existing.local_path)
+                    if attr and attr.mode == "file" then
+                        local remote_kb = book.fileSizeKb
+                        local local_kb = math.floor(attr.size / 1024)
+                        if remote_kb == nil or math.abs(local_kb - remote_kb) < 10 then
+                            result.skipped = result.skipped + 1
+                            should_continue = true
+                        else
+                            -- File size mismatch - re-download
+                            logger.info("GrimmLink ShelfSync: re-downloading due to size mismatch, bookId=", book_id)
+                        end
                     end
-                    -- File size mismatch — re-download
-                    logger.info("GrimmLink ShelfSync: re-downloading due to size mismatch, bookId=", book_id)
                 end
             end
         end
 
-        -- Need to download
-        local filename = self:buildSafeFilename(book, use_original)
-        local dest_path = uniquePath(download_dir, filename)
+        if book_id and not should_continue then
+            -- Need to download
+            local filename = self:buildSafeFilename(book, use_original)
+            local dest_path = uniquePath(download_dir, filename)
 
-        progress("Downloading: " .. (book.title or filename))
-        local dl_ok, dl_err = self.api:downloadBookToFile(book_id, dest_path)
-        if dl_ok then
-            self.db:upsertShelfSyncEntry({
-                book_id = book_id,
-                shelf_id = shelf_id,
-                remote_filename = book.fileName,
-                remote_title = book.title,
-                remote_author = book.author,
-                remote_format = book.fileFormat,
-                remote_file_size_kb = book.fileSizeKb,
-                local_path = dest_path,
-                downloaded_at = os.time(),
-                last_seen_in_shelf_at = sync_start,
-                downloaded_by_grimmlink = 1,
-            })
-            result.synced = result.synced + 1
-            logger.info("GrimmLink ShelfSync: downloaded bookId=" .. tostring(book_id) .. " to " .. dest_path)
-        else
-            result.failed = result.failed + 1
-            local err = "Failed to download bookId=" .. tostring(book_id) .. ": " .. tostring(dl_err)
-            result.errors[#result.errors + 1] = err
-            logger.warn("GrimmLink ShelfSync:", err)
+            progress("Downloading: " .. (book.title or filename))
+            local dl_ok, dl_err = self.api:downloadBookToFile(book_id, dest_path)
+            if dl_ok then
+                self.db:upsertShelfSyncEntry({
+                    book_id = book_id,
+                    shelf_id = shelf_id,
+                    remote_filename = book.fileName,
+                    remote_title = book.title,
+                    remote_author = book.author,
+                    remote_format = book.fileFormat,
+                    remote_file_size_kb = book.fileSizeKb,
+                    local_path = dest_path,
+                    downloaded_at = os.time(),
+                    last_seen_in_shelf_at = sync_start,
+                    downloaded_by_grimmlink = 1,
+                })
+                result.synced = result.synced + 1
+                logger.info("GrimmLink ShelfSync: downloaded bookId=" .. tostring(book_id) .. " to " .. dest_path)
+            else
+                result.failed = result.failed + 1
+                local err = "Failed to download bookId=" .. tostring(book_id) .. ": " .. tostring(dl_err)
+                result.errors[#result.errors + 1] = err
+                logger.warn("GrimmLink ShelfSync:", err)
+            end
         end
 
-        ::continue::
     end
 
     -- Phase 3: Delete removed books (only when two-way shelf delete sync is enabled)
