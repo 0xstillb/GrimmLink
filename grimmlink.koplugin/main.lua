@@ -10,6 +10,8 @@ local logger = require("logger")
 local json = require("json")
 local bit = require("bit")
 local ffiutil = require("ffi/util")
+local Dispatcher = require("dispatcher")
+local FileManager = require("apps/filemanager/filemanager")
 
 local Database = require("grimmlink_database")
 local APIClient = require("grimmlink_api_client")
@@ -25,6 +27,8 @@ local Grimmlink = WidgetContainer:extend{
     name = "grimmlink",
     is_doc_only = false,
 }
+
+local grimmlink_fm_patched = false
 
 local DEFAULTS = {
     enabled = true,
@@ -334,6 +338,29 @@ function Grimmlink:init()
 
     if self.ui and self.ui.menu and type(self.ui.menu.registerToMainMenu) == "function" then
         self.ui.menu:registerToMainMenu(self)
+    end
+
+    FileManager.addFileDialogButtons(FileManager, "grimmlink_actions", function(file, is_file, _book_props)
+        if not is_file then return nil end
+        return {
+            {
+                text = _("GrimmLink"),
+                callback = function()
+                    local fc = FileManager.instance and FileManager.instance.file_chooser
+                    if fc and fc.file_dialog then UIManager:close(fc.file_dialog) end
+                    self:showGrimmLinkFileDialog(file)
+                end,
+            },
+        }
+    end)
+
+    self:registerDispatcherActions()
+
+    local grimmlink_self = self
+    local ok_fm, FileManagerMod = pcall(require, "apps/filemanager/filemanager")
+    if ok_fm and FileManagerMod and not grimmlink_fm_patched then
+        grimmlink_fm_patched = true
+        self:logInfo("GrimmLink: FileManager integration installed")
     end
 end
 
@@ -2463,6 +2490,86 @@ function Grimmlink:syncShelfNow(silent)
         end
         self:showMessage(msg, 5)
     end
+end
+
+function Grimmlink:onExit()
+    FileManager.removeFileDialogButtons(FileManager, "grimmlink_actions")
+    if self.db then self.db:close() end
+    if self.file_logger then self.file_logger:close() end
+end
+
+function Grimmlink:registerDispatcherActions()
+    Dispatcher:registerAction("grimmlink_sync_pending", {
+        category = "none",
+        event = "GrimmLinkSyncPending",
+        title = _("GrimmLink: Sync Pending"),
+        general = true,
+    })
+    Dispatcher:registerAction("grimmlink_test_connection", {
+        category = "none",
+        event = "GrimmLinkTestConnection",
+        title = _("GrimmLink: Test Connection"),
+        general = true,
+    })
+    Dispatcher:registerAction("grimmlink_sync_shelf", {
+        category = "none",
+        event = "GrimmLinkSyncShelf",
+        title = _("GrimmLink: Sync Shelf"),
+        general = true,
+    })
+end
+
+function Grimmlink:onGrimmLinkSyncPending()
+    self:syncPendingNow(false)
+    return true
+end
+
+function Grimmlink:onGrimmLinkTestConnection()
+    self:testConnection()
+    return true
+end
+
+function Grimmlink:onGrimmLinkSyncShelf()
+    self:syncShelfNow(false)
+    return true
+end
+
+function Grimmlink:showGrimmLinkFileDialog(file)
+    local buttons = {
+        {
+            {
+                text = _("Sync Pending Now"),
+                callback = function()
+                    UIManager:close(self._grimmlink_file_dialog)
+                    self:syncPendingNow(false)
+                end,
+            },
+            {
+                text = _("Sync Shelf"),
+                callback = function()
+                    UIManager:close(self._grimmlink_file_dialog)
+                    self:syncShelfNow(false)
+                end,
+            },
+        },
+        {
+            {
+                text = _("Test Connection"),
+                callback = function()
+                    UIManager:close(self._grimmlink_file_dialog)
+                    self:testConnection()
+                end,
+            },
+            {
+                text = _("Close"),
+                callback = function()
+                    UIManager:close(self._grimmlink_file_dialog)
+                end,
+            },
+        },
+    }
+    self._grimmlink_file_dialog = ButtonDialog:new{ buttons = buttons }
+    UIManager:show(self._grimmlink_file_dialog)
 end
 
 function Grimmlink:addToMainMenu(menu_items)
