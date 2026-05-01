@@ -10,15 +10,28 @@ local logger = require("logger")
 local json = require("json")
 local bit = require("bit")
 local ffiutil = require("ffi/util")
-local Dispatcher = require("dispatcher")
-local FileManager = require("apps/filemanager/filemanager")
 
-local Database = require("grimmlink_database")
-local APIClient = require("grimmlink_api_client")
-local FileLogger = require("grimmlink_file_logger")
-local ShelfSync = require("grimmlink_shelf_sync")
-local Annotations = require("grimmlink_annotations")
-local Updater = require("grimmlink_updater")
+local _ok_dispatcher, Dispatcher = pcall(require, "dispatcher")
+if not _ok_dispatcher then Dispatcher = nil end
+local _ok_fm, FileManager = pcall(require, "apps/filemanager/filemanager")
+if not _ok_fm then FileManager = nil end
+
+local _gl_load_errors = {}
+local function _glRequire(name)
+    local ok, mod = pcall(require, name)
+    if not ok then
+        _gl_load_errors[#_gl_load_errors + 1] = name .. ": " .. tostring(mod)
+        return {}
+    end
+    return mod
+end
+
+local Database    = _glRequire("grimmlink_database")
+local APIClient   = _glRequire("grimmlink_api_client")
+local FileLogger  = _glRequire("grimmlink_file_logger")
+local ShelfSync   = _glRequire("grimmlink_shelf_sync")
+local Annotations = _glRequire("grimmlink_annotations")
+local Updater     = _glRequire("grimmlink_updater")
 
 local _ = require("gettext")
 local T = ffiutil.template
@@ -236,6 +249,18 @@ function Grimmlink:logDbg(...)
 end
 
 function Grimmlink:init()
+    if #_gl_load_errors > 0 then
+        logger.warn("GrimmLink: module load errors: " .. table.concat(_gl_load_errors, " | "))
+        UIManager:show(InfoMessage:new{
+            text = "GrimmLink load error:\n" .. _gl_load_errors[1],
+            timeout = 8,
+        })
+    end
+
+    if self.ui and self.ui.menu and type(self.ui.menu.registerToMainMenu) == "function" then
+        self.ui.menu:registerToMainMenu(self)
+    end
+
     self.db = Database:new()
     if not self.db:init() then
         UIManager:show(InfoMessage:new{
@@ -336,31 +361,26 @@ function Grimmlink:init()
 
     self:logInfo("GrimmLink initialized")
 
-    if self.ui and self.ui.menu and type(self.ui.menu.registerToMainMenu) == "function" then
-        self.ui.menu:registerToMainMenu(self)
-    end
-
-    FileManager.addFileDialogButtons(FileManager, "grimmlink_actions", function(file, is_file, _book_props)
-        if not is_file then return nil end
-        return {
-            {
-                text = _("GrimmLink"),
-                callback = function()
-                    local fc = FileManager.instance and FileManager.instance.file_chooser
-                    if fc and fc.file_dialog then UIManager:close(fc.file_dialog) end
-                    self:showGrimmLinkFileDialog(file)
-                end,
-            },
-        }
-    end)
-
-    self:registerDispatcherActions()
-
-    local grimmlink_self = self
-    local ok_fm, FileManagerMod = pcall(require, "apps/filemanager/filemanager")
-    if ok_fm and FileManagerMod and not grimmlink_fm_patched then
+    if FileManager and FileManager.addFileDialogButtons then
+        FileManager.addFileDialogButtons(FileManager, "grimmlink_actions", function(file, is_file, _book_props)
+            if not is_file then return nil end
+            return {
+                {
+                    text = _("GrimmLink"),
+                    callback = function()
+                        local fc = FileManager.instance and FileManager.instance.file_chooser
+                        if fc and fc.file_dialog then UIManager:close(fc.file_dialog) end
+                        self:showGrimmLinkFileDialog(file)
+                    end,
+                },
+            }
+        end)
         grimmlink_fm_patched = true
         self:logInfo("GrimmLink: FileManager integration installed")
+    end
+
+    if Dispatcher then
+        self:registerDispatcherActions()
     end
 end
 
@@ -2493,7 +2513,9 @@ function Grimmlink:syncShelfNow(silent)
 end
 
 function Grimmlink:onExit()
-    FileManager.removeFileDialogButtons(FileManager, "grimmlink_actions")
+    if FileManager and FileManager.removeFileDialogButtons then
+        FileManager.removeFileDialogButtons(FileManager, "grimmlink_actions")
+    end
     if self.db then self.db:close() end
     if self.file_logger then self.file_logger:close() end
 end
