@@ -47,7 +47,7 @@ local DEFAULTS = {
     enabled = true,
     server_url = "",
     username = "",
-    auth_key = "",
+    password = "",
     device_name = "KOReader",
     device_id = nil,
     auto_pull_on_open = true,
@@ -248,6 +248,90 @@ function Grimmlink:logDbg(...)
     self:log("dbg", ...)
 end
 
+function Grimmlink:isReady(require_api)
+    if not self or not self._initialized or not self.db then
+        return false
+    end
+    if require_api and not self.api then
+        return false
+    end
+    return true
+end
+
+function Grimmlink:requireReady(opts)
+    opts = opts or {}
+    if self:isReady(opts.require_api) then
+        return true
+    end
+
+    if not opts.silent then
+        self:showMessage(opts.message or _("GrimmLink is still starting up"), opts.timeout or 2)
+    end
+    return false
+end
+
+function Grimmlink:invokeSafely(label, fn, args, opts)
+    opts = opts or {}
+    if type(fn) ~= "function" then
+        return opts.fallback
+    end
+
+    local ok, result = pcall(fn, table.unpack(args or {}))
+    if ok then
+        return result
+    end
+
+    local err = tostring(result)
+    logger.err("GrimmLink " .. tostring(label) .. " error:", err)
+    if not opts.silent then
+        pcall(function()
+            self:showMessage(T(_("GrimmLink %1 failed:\n%2"), tostring(label), err), opts.timeout or 4)
+        end)
+    end
+    return opts.fallback
+end
+
+function Grimmlink:wrapUiSpec(spec, path)
+    if type(spec) ~= "table" then
+        return spec
+    end
+
+    local wrapped = {}
+    local base_path = path or "GrimmLink"
+
+    for key, value in pairs(spec) do
+        local child_path = base_path .. "/" .. tostring(key)
+        if key == "callback" then
+            wrapped[key] = function(...)
+                return self:invokeSafely(base_path, value, { ... }, { fallback = nil, silent = false })
+            end
+        elseif key == "checked_func" then
+            wrapped[key] = function(...)
+                return self:invokeSafely(base_path .. " checked", value, { ... }, { fallback = false, silent = true })
+            end
+        elseif key == "text_func" then
+            wrapped[key] = function(...)
+                local fallback = spec.text or _("GrimmLink")
+                local result = self:invokeSafely(base_path .. " label", value, { ... }, { fallback = fallback, silent = true })
+                if result == nil or result == "" then
+                    return fallback
+                end
+                return result
+            end
+        elseif key == "ok_callback" or key == "cancel_callback" or key == "close_callback" or key == "on_select" then
+            wrapped[key] = function(...)
+                return self:invokeSafely(base_path .. " " .. tostring(key), value, { ... }, { fallback = nil, silent = false })
+            end
+        elseif type(value) == "table" then
+            wrapped[key] = self:wrapUiSpec(value, child_path)
+        else
+            wrapped[key] = value
+        end
+    end
+
+    return wrapped
+end
+
 function Grimmlink:init()
     self._initialized = false
 
@@ -273,7 +357,18 @@ function Grimmlink:init()
     end
 
     self.db = Database:new()
-    if not self.db:init() then
+    local _db_ok, _db_result = pcall(function() return self.db:init() end)
+    if not _db_ok then
+        local err_msg = tostring(_db_result)
+        logger.err("GrimmLink: db init threw:", err_msg)
+        _gl_load_errors[#_gl_load_errors + 1] = "db: " .. err_msg
+        UIManager:show(InfoMessage:new{
+            text = "GrimmLink db error:\n" .. err_msg,
+            timeout = 10,
+        })
+        return
+    elseif not _db_result then
+        logger.err("GrimmLink: db init returned false, path:", DataStorage:getSettingsDir())
         UIManager:show(InfoMessage:new{
             text = _("Failed to initialize GrimmLink database"),
             timeout = 4,
@@ -284,7 +379,8 @@ function Grimmlink:init()
     self.enabled = self:readSetting("enabled", DEFAULTS.enabled)
     self.server_url = self:readSetting("server_url", DEFAULTS.server_url)
     self.username = self:readSetting("username", DEFAULTS.username)
-    self.auth_key = self:readSetting("auth_key", DEFAULTS.auth_key)
+    local legacy_auth_key = self.db:getPluginSetting("auth_key")
+    self.auth_key = self:readSetting("password", legacy_auth_key or DEFAULTS.password)
     self.device_name = self:readSetting("device_name", self:defaultDeviceName())
     self.device_id = self:readSetting("device_id", self:defaultDeviceId())
     self.auto_pull_on_open = self:readSetting("auto_pull_on_open", DEFAULTS.auto_pull_on_open)
@@ -376,7 +472,7 @@ function Grimmlink:init()
     if FileManager and FileManager.addFileDialogButtons then
         FileManager.addFileDialogButtons(FileManager, "grimmlink_actions", function(file, is_file, _book_props)
             if not is_file then return nil end
-            return {
+            return self:wrapUiSpec({
                 {
                     text = _("GrimmLink"),
                     callback = function()
@@ -385,7 +481,7 @@ function Grimmlink:init()
                         self:showGrimmLinkFileDialog(file)
                     end,
                 },
-            }
+            }, "GrimmLink FileManager Menu")
         end)
         grimmlink_fm_patched = true
         self:logInfo("GrimmLink: FileManager integration installed")
@@ -406,11 +502,21 @@ function Grimmlink:readSetting(key, default_value)
 end
 
 function Grimmlink:saveSetting(key, value)
+    if not self.db then
+        if not self._initialized then
+            return false
+        end
+        self:showMessage(_("GrimmLink is still starting up"), 2)
+        return false
+    end
+
     self.db:savePluginSetting(key, value)
     self[key] = value
 
-    if key == "server_url" or key == "username" or key == "auth_key" or key == "debug_logging" then
-        self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
+    if key == "server_url" or key == "username" or key == "password" or key == "debug_logging" then
+        if self.api and type(self.api.init) == "function" then
+            self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
+        end
     end
 
     if key == "log_to_file" then
@@ -433,6 +539,8 @@ function Grimmlink:saveSetting(key, value)
             self.updater.update_repo = self.update_repo
         end
     end
+
+    return true
 end
 
 function Grimmlink:defaultDeviceName()
@@ -471,6 +579,18 @@ function Grimmlink:showMessage(text, timeout)
         text = text,
         timeout = timeout or 3,
     })
+end
+
+function Grimmlink:refreshTouchMenu(touchmenu_instance)
+    if touchmenu_instance then
+        safeMethodCall(touchmenu_instance, "updateItems")
+        safeMethodCall(touchmenu_instance, "updateItemTable")
+        safeMethodCall(touchmenu_instance, "refresh")
+    end
+
+    if UIManager and type(UIManager.setDirty) == "function" then
+        pcall(UIManager.setDirty, UIManager, nil, "ui")
+    end
 end
 
 function Grimmlink:showTextInput(title, current_value, hint, secret, on_save)
@@ -532,10 +652,10 @@ function Grimmlink:configureUsername()
     end)
 end
 
-function Grimmlink:configureAuthKey()
-    self:showTextInput(_("Auth Key / Password Hash"), self.auth_key, _("Enter x-auth-key value"), true, function(value)
-        self:saveSetting("auth_key", safeToString(value))
-        self:showMessage(_("Auth key saved"), 2)
+function Grimmlink:configurePassword()
+    self:showTextInput(_("Password"), self.auth_key, _("Enter Grimmory password"), true, function(value)
+        self:saveSetting("password", safeToString(value))
+        self:showMessage(_("Password saved"), 2)
     end)
 end
 
@@ -562,6 +682,10 @@ function Grimmlink:configureDeviceId()
 end
 
 function Grimmlink:testConnection()
+    if not self:requireReady({ require_api = true }) then
+        return
+    end
+
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
 
     local success, response = self.api:testAuth()
@@ -1702,6 +1826,9 @@ function Grimmlink:syncWebReaderBridgeNow(silent)
         end
         return nil
     end
+    if not self:requireReady({ require_api = true, silent = silent }) then
+        return nil
+    end
     if not self.ui or not self.ui.document or not self.ui.document.file then
         return nil
     end
@@ -1733,7 +1860,7 @@ function Grimmlink:validateSession(duration_seconds, progress_delta, start_page,
 end
 
 function Grimmlink:startSession()
-    if not self.enabled or not self.ui or not self.ui.document or not self.ui.document.file then
+    if not self.enabled or not self:requireReady({ require_api = true, silent = true }) or not self.ui or not self.ui.document or not self.ui.document.file then
         return
     end
 
@@ -1768,7 +1895,7 @@ end
 
 function Grimmlink:endSession(options)
     options = options or {}
-    if not self.current_session then
+    if not self.current_session or not self:requireReady({ require_api = true, silent = true }) then
         return false
     end
 
@@ -1824,6 +1951,9 @@ function Grimmlink:syncPendingSessions(silent)
     local synced = 0
     local failed = 0
 
+    if not self:requireReady({ require_api = true, silent = silent }) then
+        return synced, failed
+    end
     if not self:isOnline() then
         return synced, failed
     end
@@ -1942,6 +2072,10 @@ function Grimmlink:syncPendingSessions(silent)
 end
 
 function Grimmlink:syncPendingNow(silent)
+    if not self:requireReady({ require_api = true, silent = silent }) then
+        return
+    end
+
     local progress_synced, progress_failed = self:syncPendingProgress(true)
     local sessions_synced, sessions_failed = self:syncPendingSessions(true)
     local annot_result = self:syncPendingAnnotations(true)
@@ -2023,6 +2157,9 @@ function Grimmlink:pullCurrentDocumentAnnotations(silent, opts)
         skipped = 0,
         errors = {},
     }
+    if not self:requireReady({ require_api = true, silent = silent }) then
+        return empty
+    end
     if not self.enabled then return empty end
     if not (self.annotations_sync_enabled or self.bookmarks_sync_enabled) then
         return empty
@@ -2086,19 +2223,20 @@ end
 -- Capture annotations / bookmarks / rating from the current document into the queue.
 -- Called on close. Honors per-kind enable flags.
 function Grimmlink:captureCurrentDocumentAnnotations()
-    if not self.enabled then return end
+    if not self:requireReady({ require_api = true, silent = true }) then return false end
+    if not self.enabled then return false end
     if not (self.annotations_sync_enabled or self.bookmarks_sync_enabled or self.rating_sync_enabled) then
-        return
+        return false
     end
-    if not self.ui or not self.ui.document then return end
+    if not self.ui or not self.ui.document then return false end
 
     local file_path = self.ui.document.file
-    if not file_path then return end
+    if not file_path then return false end
 
     local cached = self.db:getBookByFilePath(file_path)
     if not cached or not cached.book_id then
         self:logInfo("GrimmLink Annotations: no remote book_id cached for", file_path)
-        return
+        return false
     end
 
     -- Refresh annotations module flags (user may toggle at runtime).
@@ -2106,9 +2244,14 @@ function Grimmlink:captureCurrentDocumentAnnotations()
     self.annotations.bookmarks_sync_enabled = self.bookmarks_sync_enabled
     self.annotations.rating_sync_enabled = self.rating_sync_enabled
     self.annotations:captureCurrentDocument(cached.book_id, self.ui)
+    return true
 end
 
 function Grimmlink:showPendingStats()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
     local stats = self.db:getBookCacheStats()
     local pending_progress = self.db:getPendingProgressCount()
     local pending_sessions = self.db:getPendingSessionCount()
@@ -2125,16 +2268,23 @@ end
 
 function Grimmlink:setPrereleaseUpdates(enabled)
     enabled = enabled == true
+    if not self:requireReady({ require_api = true, silent = true }) then
+        return false
+    end
+
     self:saveSetting("allow_prerelease_updates", enabled)
     self:saveSetting("update_channel", enabled and "prerelease" or "stable")
     if self.updater then
         self.updater:setAllowPrerelease(enabled)
         self.updater:clearCache()
     end
+    return true
 end
 
 function Grimmlink:toggleAutoUpdateEnabled()
-    self:saveSetting("auto_update_enabled", not self.auto_update_enabled)
+    if not self:saveSetting("auto_update_enabled", not self.auto_update_enabled) then
+        return
+    end
     self:showMessage(
         self.auto_update_enabled
             and _("GrimmLink update checks are enabled. Installs still require confirmation.")
@@ -2144,7 +2294,9 @@ function Grimmlink:toggleAutoUpdateEnabled()
 end
 
 function Grimmlink:toggleStartupUpdateChecks()
-    self:saveSetting("check_update_on_startup", not self.check_update_on_startup)
+    if not self:saveSetting("check_update_on_startup", not self.check_update_on_startup) then
+        return
+    end
     self:showMessage(
         self.check_update_on_startup
             and _("Startup update checks are enabled.")
@@ -2155,7 +2307,9 @@ end
 
 function Grimmlink:togglePrereleaseUpdates()
     local enabled = not self.allow_prerelease_updates
-    self:setPrereleaseUpdates(enabled)
+    if not self:setPrereleaseUpdates(enabled) then
+        return
+    end
     self:showMessage(
         enabled
             and _("Pre-release GrimmLink updates are enabled.")
@@ -2217,6 +2371,9 @@ function Grimmlink:checkForUpdates(silent)
         end
         return nil
     end
+    if not self:requireReady({ silent = silent }) then
+        return nil
+    end
 
     if not self:isOnline() then
         if not silent then
@@ -2259,7 +2416,7 @@ function Grimmlink:checkForUpdates(silent)
     local release_info = result.release_info or {}
     local size_text = self.updater:formatBytes(release_info.size)
     local channel_text = release_info.prerelease and _("prerelease") or _("stable")
-    UIManager:show(ConfirmBox:new{
+    local update_confirm = self:wrapUiSpec({
         text = T(_([[GrimmLink update available
 
 Current version: %1
@@ -2281,7 +2438,8 @@ Download and install now?]]),
             self:installUpdate(release_info)
         end,
         cancel_text = _("Later"),
-    })
+    }, "GrimmLink Update Confirm")
+    UIManager:show(ConfirmBox:new(update_confirm))
 
     return result
 end
@@ -2326,70 +2484,81 @@ function Grimmlink:showAbout()
 end
 
 function Grimmlink:onReaderReady()
-    self:logInfo("GrimmLink: reader ready")
-    self:startSession()
-    self:maybeCheckForUpdatesOnStartup()
+    self:invokeSafely("Reader Ready", function()
+        self:logInfo("GrimmLink: reader ready")
+        self:startSession()
+        self:maybeCheckForUpdatesOnStartup()
+    end, {}, { silent = false })
     return false
 end
 
 function Grimmlink:onCloseDocument()
-    if not self.enabled then
-        return false
-    end
+    self:invokeSafely("Close Document", function()
+        if not self.enabled then
+            return false
+        end
 
-    self:logInfo("GrimmLink: document closing")
-    self:endSession({ reason = "close" })
-    if self.annotations_capture_on_close then
-        local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
-        if not ok then self:logWarn("GrimmLink: capture annotations error:", tostring(err)) end
-    end
-    if self:isOnline() then
-        self:syncPendingNow(true)
-    end
+        self:logInfo("GrimmLink: document closing")
+        self:endSession({ reason = "close" })
+        if self.annotations_capture_on_close then
+            local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
+            if not ok then self:logWarn("GrimmLink: capture annotations error:", tostring(err)) end
+        end
+        if self:isOnline() then
+            self:syncPendingNow(true)
+        end
+    end, {}, { silent = true })
     return false
 end
 
 function Grimmlink:onSuspend()
-    if not self.enabled then
-        return false
-    end
+    self:invokeSafely("Suspend", function()
+        if not self.enabled then
+            return false
+        end
 
-    self:logInfo("GrimmLink: suspend")
-    self:endSession({ reason = "suspend" })
-    local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
-    if not ok then self:logWarn("GrimmLink: suspend annotation capture error:", tostring(err)) end
-    if self:isOnline() then
-        self:syncPendingNow(true)
-    end
+        self:logInfo("GrimmLink: suspend")
+        self:endSession({ reason = "suspend" })
+        local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
+        if not ok then self:logWarn("GrimmLink: suspend annotation capture error:", tostring(err)) end
+        if self:isOnline() then
+            self:syncPendingNow(true)
+        end
+    end, {}, { silent = true })
     return false
 end
 
 function Grimmlink:onResume()
-    if not self.enabled then
-        return false
-    end
+    self:invokeSafely("Resume", function()
+        if not self.enabled then
+            return false
+        end
 
-    self:logInfo("GrimmLink: resume")
-    local now = nowUtc()
-    if self:isOnline() and (now - (self.last_auto_sync_time or 0)) >= ((tonumber(self.threshold_minutes) or DEFAULTS.threshold_minutes) * 60) then
-        self.last_auto_sync_time = now
-        self:syncPendingNow(true)
-        self:pullCurrentDocumentAnnotations(true)
-    end
+        self:logInfo("GrimmLink: resume")
+        local now = nowUtc()
+        if self:isOnline() and (now - (self.last_auto_sync_time or 0)) >= ((tonumber(self.threshold_minutes) or DEFAULTS.threshold_minutes) * 60) then
+            self.last_auto_sync_time = now
+            self:syncPendingNow(true)
+            self:pullCurrentDocumentAnnotations(true)
+        end
 
-    if self.ui and self.ui.document and not self.current_session then
-        self:startSession()
-    end
+        if self.ui and self.ui.document and not self.current_session then
+            self:startSession()
+        end
 
-    -- Auto-sync shelf on resume (optional, default OFF)
-    if self.shelf_sync_enabled and self.auto_sync_shelf_on_resume and self.shelf_id and self:isOnline() then
-        self:syncShelfNow(true)
-    end
+        -- Auto-sync shelf on resume (optional, default OFF)
+        if self.shelf_sync_enabled and self.auto_sync_shelf_on_resume and self.shelf_id and self:isOnline() then
+            self:syncShelfNow(true)
+        end
+    end, {}, { silent = true })
 
     return false
 end
 
 function Grimmlink:showShelfPicker()
+    if not self:requireReady({ require_api = true }) then
+        return
+    end
     if not self.enabled then
         self:showMessage(_("GrimmLink sync is disabled. Enable it first."), 3)
         return
@@ -2412,7 +2581,7 @@ function Grimmlink:showShelfPicker()
     end
 
     local buttons = {}
-    for _, shelf in ipairs(shelves) do
+    for shelf_index, shelf in ipairs(shelves) do
         local shelf_id = shelf.id
         local shelf_name = shelf.name or ("Shelf #" .. tostring(shelf_id))
         local count_str = shelf.bookCount and (" (" .. shelf.bookCount .. ")") or ""
@@ -2437,6 +2606,7 @@ function Grimmlink:showShelfPicker()
         }
     }
 
+    buttons = self:wrapUiSpec(buttons, "GrimmLink Shelf Picker")
     self._shelf_picker_dialog = ButtonDialog:new{
         title = _("Select Shelf to Sync"),
         buttons = buttons,
@@ -2445,12 +2615,16 @@ function Grimmlink:showShelfPicker()
 end
 
 function Grimmlink:configureDownloadDir()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
     local current = self.download_dir or ""
     local dialog
     dialog = InputDialog:new{
         title = _("Download Directory"),
         input = current,
-        description = _("Leave empty to auto-detect KOReader books directory."),
+        description = _("Leave empty to auto-create and use a Book folder inside the KOReader books directory."),
         buttons = {
             {
                 {
@@ -2478,6 +2652,9 @@ function Grimmlink:configureDownloadDir()
 end
 
 function Grimmlink:syncShelfNow(silent)
+    if not self:requireReady({ require_api = true, silent = silent }) then
+        return
+    end
     if not self.shelf_sync_enabled then
         if not silent then
             self:showMessage(_("Shelf Sync is disabled. Enable it in Shelf Sync settings."), 3)
@@ -2552,17 +2729,23 @@ function Grimmlink:registerDispatcherActions()
 end
 
 function Grimmlink:onGrimmLinkSyncPending()
-    self:syncPendingNow(false)
+    self:invokeSafely("Dispatcher Sync Pending", function()
+        self:syncPendingNow(false)
+    end, {}, { silent = false })
     return true
 end
 
 function Grimmlink:onGrimmLinkTestConnection()
-    self:testConnection()
+    self:invokeSafely("Dispatcher Test Connection", function()
+        self:testConnection()
+    end, {}, { silent = false })
     return true
 end
 
 function Grimmlink:onGrimmLinkSyncShelf()
-    self:syncShelfNow(false)
+    self:invokeSafely("Dispatcher Sync Shelf", function()
+        self:syncShelfNow(false)
+    end, {}, { silent = false })
     return true
 end
 
@@ -2600,26 +2783,34 @@ function Grimmlink:showGrimmLinkFileDialog(file)
             },
         },
     }
+    buttons = self:wrapUiSpec(buttons, "GrimmLink File Dialog")
     self._grimmlink_file_dialog = ButtonDialog:new{ buttons = buttons }
     UIManager:show(self._grimmlink_file_dialog)
 end
 
 function Grimmlink:addToMainMenu(menu_items)
-    if not self._initialized then
-        menu_items.grimmlink = {
-            text = _("GrimmLink"),
-            sorting_hint = "tools",
-            sub_item_table = {
-                {
-                    text = #_gl_load_errors > 0
-                        and ("Load error: " .. _gl_load_errors[1])
-                        or _("GrimmLink failed to initialize"),
-                    callback = function() end,
-                },
-            },
-        }
-        return
+    local function menuReady()
+        return self._initialized and self.db ~= nil
     end
+
+    local function safeDbCount(method_name)
+        if not menuReady() then
+            return 0
+        end
+
+        local getter = self.db[method_name]
+        if type(getter) ~= "function" then
+            return 0
+        end
+
+        local ok, value = pcall(getter, self.db)
+        if not ok then
+            return 0
+        end
+
+        return tonumber(value) or 0
+    end
+
     menu_items.grimmlink = {
         text = _("GrimmLink"),
         sorting_hint = "tools",
@@ -2650,9 +2841,9 @@ function Grimmlink:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = _("Auth Key / Password Hash"),
+                        text = _("Password"),
                         callback = function()
-                            self:configureAuthKey()
+                            self:configurePassword()
                         end,
                     },
                     {
@@ -2816,17 +3007,20 @@ function Grimmlink:addToMainMenu(menu_items)
                         checked_func = function()
                             return self.two_way_shelf_delete_sync
                         end,
-                        callback = function()
+                        callback = function(touchmenu_instance)
                             if not self.two_way_shelf_delete_sync then
-                                UIManager:show(ConfirmBox:new{
+                                local confirm_spec = self:wrapUiSpec({
                                     text = _("Enable two-way shelf delete sync?\n\nTracked GrimmLink downloads will be mirrored between KOReader and the selected Grimmory shelf."),
                                     ok_text = _("Enable"),
                                     ok_callback = function()
                                         self:saveSetting("two_way_shelf_delete_sync", true)
+                                        self:refreshTouchMenu(touchmenu_instance)
                                     end,
-                                })
+                                }, "GrimmLink Two-way Shelf Delete Sync Confirm")
+                                UIManager:show(ConfirmBox:new(confirm_spec))
                             else
                                 self:saveSetting("two_way_shelf_delete_sync", false)
+                                self:refreshTouchMenu(touchmenu_instance)
                             end
                         end,
                     },
@@ -2900,11 +3094,19 @@ function Grimmlink:addToMainMenu(menu_items)
                     {
                         text = _("Capture Current Document Now"),
                         callback = function()
-                            local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
-                            if ok then
+                            if not menuReady() then
+                                self:showMessage(_("GrimmLink is still starting up"), 2)
+                                return
+                            end
+                            local ok, captured = pcall(function()
+                                return self:captureCurrentDocumentAnnotations()
+                            end)
+                            if ok and captured then
                                 self:showMessage(_("Captured current annotations / bookmarks / rating into queue."), 3)
+                            elseif ok then
+                                self:showMessage(_("No annotations captured."), 3)
                             else
-                                self:showMessage(T(_("Capture failed: %1"), tostring(err)), 4)
+                                self:showMessage(T(_("Capture failed: %1"), tostring(captured)), 4)
                             end
                         end,
                     },
@@ -2916,11 +3118,15 @@ function Grimmlink:addToMainMenu(menu_items)
                     },
                     {
                         text_func = function()
-                            local n = self.db:getPendingAnnotationCount()
+                            local n = safeDbCount("getPendingAnnotationCount")
                             if n == 0 then return _("Sync Annotations Now") end
                             return T(_("Sync Annotations Now (%1 pending)"), n)
                         end,
                         callback = function()
+                            if not menuReady() then
+                                self:showMessage(_("GrimmLink is still starting up"), 2)
+                                return
+                            end
                             local pull = self:pullCurrentDocumentAnnotations(true)
                             local r = self:syncPendingAnnotations(false)
                             self:showMessage(T(
@@ -2935,9 +3141,9 @@ function Grimmlink:addToMainMenu(menu_items)
             },
             {
                 text_func = function()
-                    local pending_progress = self.db:getPendingProgressCount()
-                    local pending_sessions = self.db:getPendingSessionCount()
-                    local pending_annotations = self.db:getPendingAnnotationCount()
+                    local pending_progress = safeDbCount("getPendingProgressCount")
+                    local pending_sessions = safeDbCount("getPendingSessionCount")
+                    local pending_annotations = safeDbCount("getPendingAnnotationCount")
                     if pending_progress == 0 and pending_sessions == 0 and pending_annotations == 0 then
                         return _("Sync Pending Now")
                     end
@@ -2945,12 +3151,20 @@ function Grimmlink:addToMainMenu(menu_items)
                         pending_progress, pending_sessions, pending_annotations)
                 end,
                 callback = function()
+                    if not menuReady() then
+                        self:showMessage(_("GrimmLink is still starting up"), 2)
+                        return
+                    end
                     self:syncPendingNow(false)
                 end,
             },
             {
                 text = _("Show Local Cache Stats"),
                 callback = function()
+                    if not menuReady() then
+                        self:showMessage(_("GrimmLink is still starting up"), 2)
+                        return
+                    end
                     self:showPendingStats()
                 end,
             },
@@ -3000,6 +3214,7 @@ function Grimmlink:addToMainMenu(menu_items)
             },
         },
     }
+    menu_items.grimmlink = self:wrapUiSpec(menu_items.grimmlink, "GrimmLink Main Menu")
 end
 
 return Grimmlink

@@ -2,12 +2,16 @@ local stubs = require("test.helpers.stub_koreader")
 local restore_stubs = stubs.install()
 
 local Grimmlink = require("main")
+local UIManager = require("ui/uimanager")
 restore_stubs()
 
 describe("GrimmLink helper methods", function()
     local plugin
 
     before_each(function()
+        if UIManager.reset then
+            UIManager:reset()
+        end
         plugin = setmetatable({
             threshold_percent = 1.0,
             threshold_pages = 5,
@@ -149,5 +153,152 @@ describe("GrimmLink helper methods", function()
             "capture",
             "syncPendingNow:true",
         }, calls)
+    end)
+
+    it("registers the main menu after initialization is complete", function()
+        local menu_items = {}
+        plugin.ui = {
+            menu = {
+                registerToMainMenu = function(_, plugin_instance)
+                    plugin_instance:addToMainMenu(menu_items)
+                end,
+            },
+        }
+
+        local ok, err = pcall(function()
+            plugin:init()
+        end)
+
+        assert.is_true(ok, err)
+        assert.is_true(plugin._initialized)
+        assert.are.equal("GrimmLink", menu_items.grimmlink.text)
+        assert.are.equal("Enable Sync", menu_items.grimmlink.sub_item_table[1].text)
+    end)
+
+    it("keeps the main menu available before init completes", function()
+        local menu_items = {}
+
+        plugin._initialized = false
+        plugin.db = nil
+        plugin:addToMainMenu(menu_items)
+
+        assert.are.equal("GrimmLink", menu_items.grimmlink.text)
+        assert.are.equal("Enable Sync", menu_items.grimmlink.sub_item_table[1].text)
+        assert.is_false(plugin:saveSetting("enabled", false))
+
+        local annotation_sync = menu_items.grimmlink.sub_item_table[8]
+        local pending_sync = menu_items.grimmlink.sub_item_table[9]
+
+        local ok_annotations, text_annotations = pcall(annotation_sync.sub_item_table[7].text_func)
+        local ok_pending, text_pending = pcall(pending_sync.text_func)
+
+        assert.is_true(ok_annotations)
+        assert.is_true(ok_pending)
+        assert.is_not_nil(text_annotations)
+        assert.is_not_nil(text_pending)
+
+        local ok_enable = pcall(menu_items.grimmlink.sub_item_table[1].callback)
+        local ok_sync_pending = pcall(menu_items.grimmlink.sub_item_table[9].callback)
+
+        assert.is_true(ok_enable)
+        assert.is_true(ok_sync_pending)
+    end)
+
+    it("guards menu callbacks from bubbling errors", function()
+        local menu_items = {}
+        plugin._initialized = true
+        plugin.db = {
+            savePluginSetting = function()
+                error("boom")
+            end,
+        }
+        plugin.api = {
+            init = function() end,
+        }
+        plugin.enabled = true
+
+        plugin:addToMainMenu(menu_items)
+
+        local ok = pcall(menu_items.grimmlink.sub_item_table[1].callback)
+        assert.is_true(ok)
+    end)
+
+    it("selects a shelf without shadowing the gettext helper", function()
+        local saved = {}
+        plugin._initialized = true
+        plugin.enabled = true
+        plugin.server_url = "http://example.com"
+        plugin.username = "reader"
+        plugin.db = {}
+        plugin.api = {
+            getShelves = function()
+                return true, {
+                    { id = 7, name = "Favorites", bookCount = 12 },
+                }
+            end,
+        }
+        plugin.saveSetting = function(_, key, value)
+            saved[key] = value
+            return true
+        end
+        plugin.showMessage = function() end
+
+        local ok_open, err_open = pcall(function()
+            plugin:showShelfPicker()
+        end)
+        assert.is_true(ok_open, err_open)
+
+        local ok_select, err_select = pcall(function()
+            plugin._shelf_picker_dialog.buttons[1][1].callback()
+        end)
+        assert.is_true(ok_select, err_select)
+        assert.are.equal(7, saved.shelf_id)
+        assert.are.equal("Favorites", saved.shelf_name)
+    end)
+
+    it("enables two-way shelf delete sync through its confirmation dialog", function()
+        local menu_items = {}
+        local saved = {}
+        local refreshed = 0
+        local touchmenu_instance = {
+            updateItems = function()
+                refreshed = refreshed + 1
+            end,
+        }
+        plugin._initialized = true
+        plugin.enabled = true
+        plugin.two_way_shelf_delete_sync = false
+        plugin.db = {
+            savePluginSetting = function()
+                return true
+            end,
+        }
+        plugin.api = {
+            init = function() end,
+        }
+        plugin.saveSetting = function(_, key, value)
+            saved[key] = value
+            plugin[key] = value
+            return true
+        end
+
+        plugin:addToMainMenu(menu_items)
+
+        local ok_open, err_open = pcall(function()
+            menu_items.grimmlink.sub_item_table[5].sub_item_table[6].callback(touchmenu_instance)
+        end)
+        assert.is_true(ok_open, err_open)
+
+        local dialog = UIManager.getLastShown and UIManager:getLastShown() or nil
+        assert.is_not_nil(dialog)
+        assert.is_not_nil(dialog.ok_callback)
+
+        local ok_confirm, err_confirm = pcall(function()
+            dialog.ok_callback()
+        end)
+        assert.is_true(ok_confirm, err_confirm)
+        assert.is_true(saved.two_way_shelf_delete_sync)
+        assert.is_true(plugin.two_way_shelf_delete_sync)
+        assert.is_true(refreshed > 0)
     end)
 end)

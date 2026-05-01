@@ -41,6 +41,38 @@ local function normalizePathForCompare(path)
     return normalized
 end
 
+local function joinPath(base, child)
+    if not base or base == "" then
+        return child
+    end
+    local sep = base:sub(-1) == "/" and "" or "/"
+    return base .. sep .. child
+end
+
+local function ensureDirectory(path)
+    if not path or path == "" then
+        return false
+    end
+
+    local attr = lfs.attributes(path)
+    if attr and attr.mode == "directory" then
+        return true
+    end
+
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and parent ~= "" and not ensureDirectory(parent) then
+        return false
+    end
+
+    local ok, err = lfs.mkdir(path)
+    if ok then
+        return true
+    end
+
+    attr = lfs.attributes(path)
+    return attr and attr.mode == "directory" or false
+end
+
 local function isPathUnderDirectory(path, root_dir)
     local normalized_path = normalizePathForCompare(path)
     local normalized_root = normalizePathForCompare(root_dir)
@@ -82,7 +114,8 @@ function ShelfSync:resolveDownloadDir(setting_value)
         logger.warn("GrimmLink ShelfSync: configured download_dir not accessible:", setting_value)
     end
 
-    -- Auto-detect a sensible KOReader books directory
+    -- Auto-detect a sensible KOReader books directory, then dedicate a
+    -- subfolder to GrimmLink downloads so synced books stay grouped together.
     local data_dir = DataStorage:getDataDir()
     local candidates = {
         data_dir .. "/books",
@@ -91,11 +124,19 @@ function ShelfSync:resolveDownloadDir(setting_value)
     for _, dir in ipairs(candidates) do
         local attr = lfs.attributes(dir)
         if attr and attr.mode == "directory" then
+            local book_dir = joinPath(dir, "Book")
+            if ensureDirectory(book_dir) then
+                return book_dir
+            end
             return dir
         end
     end
 
     -- Last resort: settings dir
+    local fallback_dir = joinPath(DataStorage:getSettingsDir(), "Book")
+    if ensureDirectory(fallback_dir) then
+        return fallback_dir
+    end
     return DataStorage:getSettingsDir()
 end
 

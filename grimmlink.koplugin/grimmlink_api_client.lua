@@ -24,15 +24,36 @@ function APIClient:new(o)
     return o
 end
 
-function APIClient:init(server_url, username, auth_key, secure_logs)
+function APIClient:init(server_url, username, password, secure_logs)
     self.server_url = server_url or ""
     self.username = username or ""
-    self.auth_key = auth_key or ""
+    self.auth_key = password or ""
     self.secure_logs = secure_logs or false
 
     if self.server_url:sub(-1) == "/" then
         self.server_url = self.server_url:sub(1, -2)
     end
+end
+
+function APIClient:_looksLikeMd5(value)
+    return type(value) == "string" and value:match("^[a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9]$") ~= nil
+end
+
+function APIClient:_resolveAuthKey()
+    if not self.auth_key or self.auth_key == "" then
+        return ""
+    end
+
+    if self:_looksLikeMd5(self.auth_key) then
+        return self.auth_key:lower()
+    end
+
+    local ok, sha2 = pcall(require, "ffi/sha2")
+    if ok and sha2 and type(sha2.md5) == "function" then
+        return sha2.md5(self.auth_key)
+    end
+
+    return self.auth_key
 end
 
 function APIClient:log(level, ...)
@@ -134,9 +155,10 @@ function APIClient:request(method, path, body, extra_headers)
     local headers = extra_headers or {}
     headers["Accept"] = headers["Accept"] or "application/json"
 
-    if self.username ~= "" and self.auth_key ~= "" then
+    local resolved_auth_key = self:_resolveAuthKey()
+    if self.username ~= "" and resolved_auth_key ~= "" then
         headers["x-auth-user"] = self.username
-        headers["x-auth-key"] = self.auth_key
+        headers["x-auth-key"] = resolved_auth_key
     end
 
     local request_body = nil
@@ -188,7 +210,7 @@ function APIClient:testAuth()
         return false, "Username not configured"
     end
     if self.auth_key == "" then
-        return false, "Auth key not configured"
+        return false, "Password not configured"
     end
 
     local success, code, response = self:request("GET", "/api/koreader/users/auth")
@@ -277,7 +299,7 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec)
         method = "GET",
         headers = {
             ["x-auth-user"] = self.username,
-            ["x-auth-key"] = self.auth_key,
+            ["x-auth-key"] = self:_resolveAuthKey(),
         },
         sink = ltn12.sink.file(file),
     }

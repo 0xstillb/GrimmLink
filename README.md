@@ -36,7 +36,7 @@
 4. Open **Tools → GrimmLink** and configure:
    - Grimmory server URL
    - KOReader username
-   - `x-auth-key`
+   - KOReader password
    - device name / device ID
 5. Run **Test Connection** before turning on any optional sync features.
 

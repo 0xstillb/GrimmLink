@@ -327,6 +327,10 @@ function Database:init(db_name)
         self.conn:exec("PRAGMA journal_mode = TRUNCATE")
     end)
 
+    if not self:repairSchema() then
+        return false
+    end
+
     return self:runMigrations()
 end
 
@@ -398,8 +402,45 @@ function Database:runMigrations()
     return true
 end
 
+function Database:repairSchema()
+    if not self.conn then
+        return false
+    end
+
+    for version = 1, self.VERSION do
+        local migration = self.migrations[version]
+        if migration then
+            for _, sql in ipairs(migration) do
+                if self.conn:exec(sql) ~= SQ3.OK then
+                    logger.err("GrimmLink Database: schema repair", version, "failed:", self.conn:errmsg())
+                    return false
+                end
+            end
+        end
+    end
+
+    return true
+end
+
+function Database:prepareWithSchemaRepair(sql)
+    if not self.conn then
+        return nil
+    end
+
+    local stmt = self.conn:prepare(sql)
+    if stmt then
+        return stmt
+    end
+
+    if self:repairSchema() then
+        stmt = self.conn:prepare(sql)
+    end
+
+    return stmt
+end
+
 function Database:getPluginSetting(key)
-    local stmt = self.conn:prepare("SELECT value FROM plugin_settings WHERE key = ?")
+    local stmt = self:prepareWithSchemaRepair("SELECT value FROM plugin_settings WHERE key = ?")
     if not stmt then
         return nil
     end
@@ -411,7 +452,7 @@ function Database:getPluginSetting(key)
 end
 
 function Database:savePluginSetting(key, value)
-    local stmt = self.conn:prepare([[
+    local stmt = self:prepareWithSchemaRepair([[
         INSERT INTO plugin_settings (key, value, updated_at)
         VALUES (?, ?, CAST(strftime('%s', 'now') AS INTEGER))
         ON CONFLICT(key) DO UPDATE SET

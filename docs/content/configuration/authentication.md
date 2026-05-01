@@ -40,7 +40,7 @@ Trailing slashes are not required. The plugin will strip them automatically.
 
 ## KOReader credentials
 
-Tap **Configure KOReader Account** to set the username and password the plugin uses for its primary connection to BookLore.
+Tap **KOReader Username** and **Password** to set the credentials the plugin uses for its primary connection to Grimmory.
 
 These credentials are used for:
 - **Authentication test** (`GET /api/koreader/users/auth`)
@@ -49,7 +49,7 @@ These credentials are used for:
 
 The password is stored in plain text in the local settings database. When making requests to the KOReader sync endpoint, the plugin hashes it to MD5 on the fly and sends it as the `x-auth-key` header.
 
-The username and password should match your BookLore account credentials.
+The username and password should match your Grimmory account credentials.
 
 ---
 

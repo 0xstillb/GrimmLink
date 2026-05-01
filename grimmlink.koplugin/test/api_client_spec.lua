@@ -91,6 +91,14 @@ package.preload["json"] = function()
     }
 end
 
+package.preload["ffi/sha2"] = function()
+    return {
+        md5 = function(value)
+            return "md5:" .. tostring(value)
+        end,
+    }
+end
+
 local APIClient = require("grimmlink_api_client")
 
 describe("GrimmLink API client", function()
@@ -99,7 +107,7 @@ describe("GrimmLink API client", function()
     before_each(function()
         captured_request = nil
         client = APIClient:new()
-        client:init("http://example.com", "reader", "secret-md5", false)
+        client:init("http://example.com", "reader", "secret-password", false)
     end)
 
     it("encodes path values", function()
@@ -107,13 +115,23 @@ describe("GrimmLink API client", function()
         assert.are.equal("a%26b", client:_urlEncode("a&b"))
     end)
 
-    it("parses success JSON payloads", function()
+    it("hashes plain-text passwords into x-auth-key headers", function()
         local success, code, payload = client:request("GET", "/api/koreader/users/auth")
         assert.is_true(success)
         assert.are.equal(200, code)
         assert.are.equal("ok", payload.status)
         assert.are.equal("reader", captured_request.headers["x-auth-user"])
-        assert.are.equal("secret-md5", captured_request.headers["x-auth-key"])
+        assert.are.equal("md5:secret-password", captured_request.headers["x-auth-key"])
+    end)
+
+    it("keeps legacy md5 values unchanged", function()
+        client:init("http://example.com", "reader", "5f4dcc3b5aa765d61d8327deb882cf99", false)
+
+        local success, code, payload = client:request("GET", "/api/koreader/users/auth")
+        assert.is_true(success)
+        assert.are.equal(200, code)
+        assert.are.equal("ok", payload.status)
+        assert.are.equal("5f4dcc3b5aa765d61d8327deb882cf99", captured_request.headers["x-auth-key"])
     end)
 
     it("extracts fallback error messages", function()

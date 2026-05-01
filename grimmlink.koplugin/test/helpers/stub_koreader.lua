@@ -57,11 +57,33 @@ local function install()
     end
 
     package.preload["ui/uimanager"] = function()
+        local UIManager = {
+            last_shown = nil,
+            last_closed = nil,
+            dirty_calls = 0,
+        }
         return {
-            show = function() end,
-            close = function() end,
-            setDirty = function() end,
+            show = function(_, widget)
+                UIManager.last_shown = widget
+            end,
+            close = function(_, widget)
+                UIManager.last_closed = widget
+            end,
+            setDirty = function()
+                UIManager.dirty_calls = UIManager.dirty_calls + 1
+            end,
             askForRestart = function() end,
+            getLastShown = function()
+                return UIManager.last_shown
+            end,
+            getDirtyCalls = function()
+                return UIManager.dirty_calls
+            end,
+            reset = function()
+                UIManager.last_shown = nil
+                UIManager.last_closed = nil
+                UIManager.dirty_calls = 0
+            end,
         }
     end
 
