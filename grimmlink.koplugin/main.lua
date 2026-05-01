@@ -2516,8 +2516,6 @@ function Grimmlink:onExit()
     if FileManager and FileManager.removeFileDialogButtons then
         FileManager.removeFileDialogButtons(FileManager, "grimmlink_actions")
     end
-    if self.db then self.db:close() end
-    if self.file_logger then self.file_logger:close() end
 end
 
 function Grimmlink:registerDispatcherActions()
