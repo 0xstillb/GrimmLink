@@ -249,6 +249,8 @@ function Grimmlink:logDbg(...)
 end
 
 function Grimmlink:init()
+    self._initialized = false
+
     if self.ui and self.ui.menu and type(self.ui.menu.registerToMainMenu) == "function" then
         self.ui.menu:registerToMainMenu(self)
     end
@@ -368,6 +370,7 @@ function Grimmlink:init()
     self.last_auto_sync_time = 0
     self.last_sync_summary = nil
 
+    self._initialized = true
     self:logInfo("GrimmLink initialized")
 
     if FileManager and FileManager.addFileDialogButtons then
@@ -2602,6 +2605,21 @@ function Grimmlink:showGrimmLinkFileDialog(file)
 end
 
 function Grimmlink:addToMainMenu(menu_items)
+    if not self._initialized then
+        menu_items.grimmlink = {
+            text = _("GrimmLink"),
+            sorting_hint = "tools",
+            sub_item_table = {
+                {
+                    text = #_gl_load_errors > 0
+                        and ("Load error: " .. _gl_load_errors[1])
+                        or _("GrimmLink failed to initialize"),
+                    callback = function() end,
+                },
+            },
+        }
+        return
+    end
     menu_items.grimmlink = {
         text = _("GrimmLink"),
         sorting_hint = "tools",
