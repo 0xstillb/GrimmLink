@@ -249,16 +249,25 @@ function Grimmlink:logDbg(...)
 end
 
 function Grimmlink:init()
+    if self.ui and self.ui.menu and type(self.ui.menu.registerToMainMenu) == "function" then
+        self.ui.menu:registerToMainMenu(self)
+    end
+
     if #_gl_load_errors > 0 then
         logger.warn("GrimmLink: module load errors: " .. table.concat(_gl_load_errors, " | "))
         UIManager:show(InfoMessage:new{
             text = "GrimmLink load error:\n" .. _gl_load_errors[1],
             timeout = 8,
         })
+        return
     end
 
-    if self.ui and self.ui.menu and type(self.ui.menu.registerToMainMenu) == "function" then
-        self.ui.menu:registerToMainMenu(self)
+    if not Database or not Database.new then
+        UIManager:show(InfoMessage:new{
+            text = _("Failed to initialize GrimmLink database"),
+            timeout = 4,
+        })
+        return
     end
 
     self.db = Database:new()
