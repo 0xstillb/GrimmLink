@@ -1358,15 +1358,12 @@ function Database:enqueueAnnotation(book_id, kind, dedupe_key, payload_json)
         return result == SQ3.DONE or result == SQ3.OK
     end
 
-    -- annotation/bookmark — UPSERT by (book_id, kind, dedupe_key)
+    -- annotation/bookmark — UPSERT by (book_id, kind, dedupe_key).
+    -- ON CONFLICT(cols) DO UPDATE fails with partial unique indexes in SQLite,
+    -- so use INSERT OR REPLACE which works with any constraint type.
     local stmt = self.conn:prepare([[
-        INSERT INTO pending_annotations (book_id, kind, dedupe_key, payload_json, retry_count, created_at)
+        INSERT OR REPLACE INTO pending_annotations (book_id, kind, dedupe_key, payload_json, retry_count, created_at)
         VALUES (?, ?, ?, ?, 0, CAST(strftime('%s', 'now') AS INTEGER))
-        ON CONFLICT(book_id, kind, dedupe_key) DO UPDATE SET
-            payload_json = excluded.payload_json,
-            retry_count = 0,
-            last_retry_at = NULL,
-            last_error = NULL
     ]])
     if not stmt then return false end
     stmt:bind(tonumber(book_id), tostring(kind), tostring(dedupe_key or ""), tostring(payload_json))
