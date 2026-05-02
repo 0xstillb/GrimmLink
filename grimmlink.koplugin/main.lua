@@ -2353,9 +2353,24 @@ function Grimmlink:startSession()
     }
 
     self:logInfo("GrimmLink session started for", title, "hash:", file_hash or "nil")
-    self:maybePullRemoteProgress(file_hash, file_path, book_id)
-    self:maybePullWebReaderProgress(file_hash, file_path, book_id, true)
-    self:maybePullRemoteAnnotations(book_id)
+
+    -- Defer all network calls so they don't block the document render thread.
+    -- Blocking HTTP in onReaderReady corrupts KOReader's internal state and
+    -- causes a native crash, especially on EPUB/CRE documents.
+    local defer = UIManager and type(UIManager.scheduleIn) == "function"
+    local function doNetworkSync()
+        self:invokeSafely("session open sync", function()
+            self:maybePullRemoteProgress(file_hash, file_path, book_id)
+            self:maybePullWebReaderProgress(file_hash, file_path, book_id, true)
+            self:maybePullRemoteAnnotations(book_id)
+        end)
+    end
+
+    if defer then
+        UIManager:scheduleIn(0.5, doNetworkSync)
+    else
+        doNetworkSync()
+    end
 end
 
 function Grimmlink:endSession(options)
@@ -3000,7 +3015,16 @@ function Grimmlink:onReaderReady()
     self:invokeSafely("Reader Ready", function()
         self:logInfo("GrimmLink: reader ready")
         self:startSession()
-        self:maybeCheckForUpdatesOnStartup()
+        -- Defer update check — avoids blocking the document render on startup
+        if UIManager and type(UIManager.scheduleIn) == "function" then
+            UIManager:scheduleIn(1.5, function()
+                self:invokeSafely("startup update check", function()
+                    self:maybeCheckForUpdatesOnStartup()
+                end)
+            end)
+        else
+            self:maybeCheckForUpdatesOnStartup()
+        end
     end, {}, { silent = false })
     return false
 end
