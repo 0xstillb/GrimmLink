@@ -10,6 +10,8 @@ local logger = require("logger")
 local json = require("json")
 local bit = require("bit")
 local ffiutil = require("ffi/util")
+local _ok_event, Event = pcall(require, "ui/event")
+if not _ok_event then Event = nil end
 
 local _ok_dispatcher, Dispatcher = pcall(require, "dispatcher")
 if not _ok_dispatcher then Dispatcher = nil end
@@ -80,7 +82,7 @@ local DEFAULTS = {
     update_repo = "0xstillb/grimmlink",
     allow_prerelease_updates = false,
     -- Web Reader Bridge (Prompt 8)
-    web_reader_bridge_enabled = false,
+    web_reader_bridge_enabled = true,
     cfi_conversion_enabled = false,
 }
 
@@ -171,6 +173,23 @@ local function safeMethodCall(target, method, ...)
     return nil, false
 end
 
+local function safeDispatchEvent(ui, name, ...)
+    if not ui or type(ui.handleEvent) ~= "function" then
+        return nil, false
+    end
+
+    if not Event or type(Event.new) ~= "function" then
+        return nil, false
+    end
+
+    local ok, result = pcall(ui.handleEvent, ui, Event:new(name, ...))
+    if ok then
+        return result, true
+    end
+
+    return nil, false
+end
+
 local function tryReadSetting(doc_settings, key)
     if not doc_settings or type(doc_settings.readSetting) ~= "function" then
         return nil
@@ -248,6 +267,83 @@ function Grimmlink:logDbg(...)
     self:log("dbg", ...)
 end
 
+function Grimmlink:getLogFilePath()
+    return DataStorage:getDataDir() .. "/grimmlink.log"
+end
+
+function Grimmlink:ensureFileLogger()
+    if self.file_logger then
+        return true
+    end
+
+    self.file_logger = FileLogger:new()
+    if not self.file_logger:init() then
+        self.file_logger = nil
+        return false
+    end
+
+    return true
+end
+
+function Grimmlink:readRecentLogLines(max_lines)
+    local file = io.open(self:getLogFilePath(), "r")
+    if not file then
+        return nil
+    end
+
+    local content = file:read("*a")
+    file:close()
+    if not content or content == "" then
+        return {}
+    end
+
+    local lines = {}
+    for line in content:gmatch("[^\r\n]+") do
+        lines[#lines + 1] = line
+    end
+
+    local keep = tonumber(max_lines) or 12
+    if #lines <= keep then
+        return lines
+    end
+
+    local recent = {}
+    for index = #lines - keep + 1, #lines do
+        recent[#recent + 1] = lines[index]
+    end
+    return recent
+end
+
+function Grimmlink:showLogFileLocation()
+    local path = self:getLogFilePath()
+    self:showMessage(table.concat({
+        _("GrimmLink log file"),
+        path,
+        "",
+        T(_("Debug logging: %1"), self.debug_logging and _("enabled") or _("disabled")),
+        T(_("Write logs to file: %1"), self.log_to_file and _("enabled") or _("disabled")),
+    }, "\n"), 8)
+end
+
+function Grimmlink:showRecentLogLines()
+    local lines = self:readRecentLogLines(12)
+    if lines == nil then
+        self:showMessage(T(_("No GrimmLink log file found yet.\nExpected path:\n%1"), self:getLogFilePath()), 6)
+        return
+    end
+
+    if #lines == 0 then
+        self:showMessage(T(_("GrimmLink log file is empty.\nPath:\n%1"), self:getLogFilePath()), 6)
+        return
+    end
+
+    self:showMessage(table.concat({
+        T(_("Recent GrimmLink log lines\nPath: %1"), self:getLogFilePath()),
+        "",
+        table.concat(lines, "\n"),
+    }, "\n"), 10)
+end
+
 function Grimmlink:isReady(require_api)
     if not self or not self._initialized or not self.db then
         return false
@@ -256,6 +352,10 @@ function Grimmlink:isReady(require_api)
         return false
     end
     return true
+end
+
+function Grimmlink:isWebReaderSyncEnabled()
+    return self.enabled == true
 end
 
 function Grimmlink:requireReady(opts)
@@ -394,8 +494,7 @@ function Grimmlink:init()
     self.session_min_seconds = self:readSetting("session_min_seconds", DEFAULTS.session_min_seconds)
 
     if self.log_to_file then
-        self.file_logger = FileLogger:new()
-        if not self.file_logger:init() then
+        if not self:ensureFileLogger() then
             self.file_logger = nil
         end
     end
@@ -431,7 +530,11 @@ function Grimmlink:init()
         rating_sync_enabled = self.rating_sync_enabled,
     })
 
-    self.web_reader_bridge_enabled = self:readSetting("web_reader_bridge_enabled", DEFAULTS.web_reader_bridge_enabled)
+    local legacy_web_reader_bridge_enabled = self.db:getPluginSetting("web_reader_bridge_enabled")
+    if legacy_web_reader_bridge_enabled ~= nil then
+        self.db:savePluginSetting("web_reader_bridge_enabled", nil)
+    end
+    self.web_reader_bridge_enabled = nil
     self.cfi_conversion_enabled = self:readSetting("cfi_conversion_enabled", DEFAULTS.cfi_conversion_enabled)
     self.last_web_bridge_result = nil
 
@@ -512,6 +615,9 @@ function Grimmlink:saveSetting(key, value)
 
     self.db:savePluginSetting(key, value)
     self[key] = value
+    if key == "password" then
+        self.auth_key = value
+    end
 
     if key == "server_url" or key == "username" or key == "password" or key == "debug_logging" then
         if self.api and type(self.api.init) == "function" then
@@ -521,12 +627,22 @@ function Grimmlink:saveSetting(key, value)
 
     if key == "log_to_file" then
         if value and not self.file_logger then
-            self.file_logger = FileLogger:new()
-            if not self.file_logger:init() then
+            if not self:ensureFileLogger() then
                 self.file_logger = nil
             end
         elseif not value then
             self.file_logger = nil
+        end
+    end
+
+    if key == "debug_logging" and value and not self.log_to_file then
+        self.db:savePluginSetting("log_to_file", true)
+        self.log_to_file = true
+        if not self:ensureFileLogger() then
+            self.file_logger = nil
+            self:showMessage(_("Debug logging was enabled, but GrimmLink could not create the log file."), 5)
+        else
+            self:showMessage(T(_("Debug logging is enabled.\nLog file: %1"), self:getLogFilePath()), 5)
         end
     end
 
@@ -656,6 +772,45 @@ function Grimmlink:configurePassword()
     self:showTextInput(_("Password"), self.auth_key, _("Enter Grimmory password"), true, function(value)
         self:saveSetting("password", safeToString(value))
         self:showMessage(_("Password saved"), 2)
+    end)
+end
+
+function Grimmlink:promptTestConnectionAfterSetup()
+    local confirm_spec = self:wrapUiSpec({
+        text = _("Connection settings saved.\n\nTest connection now?"),
+        ok_text = _("Test now"),
+        ok_callback = function()
+            self:testConnection()
+        end,
+        cancel_text = _("Later"),
+    }, "GrimmLink Test Connection After Setup")
+    UIManager:show(ConfirmBox:new(confirm_spec))
+end
+
+function Grimmlink:saveConnectionSettings(server_url, username, password)
+    local normalized_url = safeToString(server_url):gsub("/$", "")
+    self:saveSetting("server_url", normalized_url)
+    self:saveSetting("username", safeToString(username))
+    self:saveSetting("password", safeToString(password))
+    self:promptTestConnectionAfterSetup()
+end
+
+function Grimmlink:configureConnection()
+    local pending = {
+        server_url = self.server_url or "",
+        username = self.username or "",
+        password = self.auth_key or "",
+    }
+
+    self:showTextInput(_("Grimmory Server URL"), pending.server_url, "http://192.168.1.100:6060", false, function(server_url)
+        pending.server_url = safeToString(server_url)
+        self:showTextInput(_("KOReader Username"), pending.username, _("Enter username"), false, function(username)
+            pending.username = safeToString(username)
+            self:showTextInput(_("Password"), pending.password, _("Enter Grimmory password"), true, function(password)
+                pending.password = safeToString(password)
+                self:saveConnectionSettings(pending.server_url, pending.username, pending.password)
+            end)
+        end)
     end)
 end
 
@@ -894,6 +1049,15 @@ function Grimmlink:looksLikeXPointer(value)
     return isNonEmpty(value) and tostring(value):sub(1, 1) == "/"
 end
 
+function Grimmlink:documentHasPages()
+    local document_info = self.ui and self.ui.document and self.ui.document.info
+    if document_info and document_info.has_pages ~= nil then
+        return document_info.has_pages and true or false
+    end
+
+    return self.ui and self.ui.paging ~= nil or false
+end
+
 function Grimmlink:normalizeWebBridgeProgress(remote_progress)
     if not remote_progress or type(remote_progress) ~= "table" then
         return nil
@@ -984,6 +1148,14 @@ function Grimmlink:compareOpenProgress(local_snapshot, remote_snapshot, state)
 
     local previous_local = self:buildStoredLocalSnapshot(state)
     local previous_remote = self:buildStoredRemoteSnapshot(state)
+    local remote_is_significantly_different = self:progressDifferenceExceeded(local_snapshot, remote_snapshot)
+
+    if not previous_local and not previous_remote then
+        if not remote_is_significantly_different then
+            return "same"
+        end
+        return "remote_newer"
+    end
 
     local local_changed = previous_local
         and self:progressDifferenceExceeded(local_snapshot, previous_local)
@@ -992,7 +1164,6 @@ function Grimmlink:compareOpenProgress(local_snapshot, remote_snapshot, state)
         and self:progressDifferenceExceeded(remote_snapshot, previous_remote)
         or (not previous_remote and self:hasMeaningfulProgress(remote_snapshot))
 
-    local remote_is_significantly_different = self:progressDifferenceExceeded(local_snapshot, remote_snapshot)
     if not remote_is_significantly_different then
         return "same"
     end
@@ -1159,20 +1330,53 @@ function Grimmlink:jumpToPage(page_number)
         return false
     end
 
+    local function pageReached(expected_page)
+        local current_page = select(1, self:getCurrentPageInfo())
+        if current_page == nil then
+            return false
+        end
+        return math.abs((tonumber(current_page) or 0) - expected_page) <= 1
+    end
+
+    if pageReached(page) then
+        self:logDbg("GrimmLink jumpToPage already at target", page)
+        return true
+    end
+
     local candidates = {
+        { self.ui and self.ui.paging, "onGotoPage" },
         { self.ui and self.ui.paging, "gotoPage" },
         { self.ui and self.ui.paging, "goToPage" },
+        { self.ui, "onGotoPage" },
         { self.ui and self.ui.document, "gotoPage" },
         { self.ui and self.ui.document, "goToPage" },
+        { self.ui and self.ui.rolling, "gotoPage" },
+        { self.ui and self.ui.rolling, "goToPage" },
     }
 
-    for _, candidate in ipairs(candidates) do
-        local result, ok = safeMethodCall(candidate[1], candidate[2], page)
-        if ok and result ~= false then
+    local page_values = { page }
+    if page > 1 then
+        page_values[#page_values + 1] = page - 1
+    end
+
+    for _, target_page in ipairs(page_values) do
+        safeMethodCall(self.ui and self.ui.link, "addCurrentLocationToStack")
+        local event_result, event_ok = safeDispatchEvent(self.ui, "GotoPage", target_page)
+        if event_ok and event_result ~= false and pageReached(page) then
+            self:logDbg("GrimmLink jumpToPage succeeded via event", "GotoPage", "target:", target_page, "resolved:", page)
             return true
+        end
+
+        for _, candidate in ipairs(candidates) do
+            local result, ok = safeMethodCall(candidate[1], candidate[2], target_page)
+            if ok and result ~= false and pageReached(page) then
+                self:logDbg("GrimmLink jumpToPage succeeded via", candidate[2], "target:", target_page, "resolved:", page)
+                return true
+            end
         end
     end
 
+    self:logWarn("GrimmLink jumpToPage failed for target page", page)
     return false
 end
 
@@ -1184,6 +1388,12 @@ function Grimmlink:jumpToLocation(location)
     local numeric_page = tonumber(location)
     if numeric_page then
         return self:jumpToPage(numeric_page)
+    end
+
+    safeMethodCall(self.ui and self.ui.link, "addCurrentLocationToStack")
+    local event_result, event_ok = safeDispatchEvent(self.ui, "GotoXPointer", tostring(location))
+    if event_ok and event_result ~= false then
+        return true
     end
 
     local candidates = {
@@ -1205,12 +1415,45 @@ function Grimmlink:jumpToLocation(location)
     return false
 end
 
+function Grimmlink:getRemotePageTarget(remote_snapshot)
+    if not remote_snapshot then
+        return nil
+    end
+
+    if remote_snapshot.currentPage then
+        return tonumber(remote_snapshot.currentPage)
+    end
+
+    local numeric_progress = isNonEmpty(remote_snapshot.progress) and tonumber(remote_snapshot.progress) or nil
+    if numeric_progress then
+        return numeric_progress
+    end
+
+    local numeric_location = isNonEmpty(remote_snapshot.location) and tonumber(remote_snapshot.location) or nil
+    if numeric_location then
+        return numeric_location
+    end
+
+    return nil
+end
+
 function Grimmlink:applyRemoteProgress(remote_snapshot)
     if not remote_snapshot then
         return false
     end
 
-    if isNonEmpty(remote_snapshot.location) and self:jumpToLocation(remote_snapshot.location) then
+    local is_paged_document = self:documentHasPages()
+    local target_page = self:getRemotePageTarget(remote_snapshot)
+
+    -- Match KOSync for paged documents such as PDFs: page number wins.
+    if is_paged_document and target_page and self:jumpToPage(target_page) then
+        return true
+    end
+
+    if isNonEmpty(remote_snapshot.location)
+        and (not is_paged_document or self:looksLikeXPointer(remote_snapshot.location))
+        and self:jumpToLocation(remote_snapshot.location)
+    then
         return true
     end
 
@@ -1260,19 +1503,170 @@ function Grimmlink:resolveLocalChoice(file_hash, local_snapshot, silent)
     self:pushProgressSnapshot(local_snapshot, "conflict-use-local", silent)
 end
 
-function Grimmlink:resolveRemoteChoice(file_hash, remote_snapshot)
-    local jumped = self:applyRemoteProgress(remote_snapshot)
-    if jumped then
-        remote_snapshot.timestamp = nowUtc()
-        self:rememberLocalSnapshot(file_hash, remote_snapshot, "conflict-use-remote")
-        self:showMessage(_("Jumped to remote progress"), 2)
-    else
-        self:showMessage(_("Remote progress found, but safe jump was not possible"), 4)
-        self:rememberRemoteSnapshot(file_hash, remote_snapshot, "remote-jump-unsafe")
+function Grimmlink:getExpectedRemotePage(remote_snapshot)
+    if not remote_snapshot then
+        return nil
+    end
+
+    local explicit_page = self:getRemotePageTarget(remote_snapshot)
+    if explicit_page then
+        return explicit_page
+    end
+
+    local _, total_pages = self:getCurrentPageInfo()
+    local resolved_total_pages = tonumber(remote_snapshot.totalPages) or tonumber(total_pages)
+    if remote_snapshot.percentage and resolved_total_pages and resolved_total_pages > 0 then
+        return math.max(1, math.floor((resolved_total_pages * remote_snapshot.percentage / 100) + 0.5))
+    end
+
+    return nil
+end
+
+function Grimmlink:isRemoteProgressApplied(remote_snapshot)
+    local expected_page = self:getExpectedRemotePage(remote_snapshot)
+    if expected_page then
+        local current_page = select(1, self:getCurrentPageInfo())
+        if current_page ~= nil and math.abs((tonumber(current_page) or 0) - expected_page) <= 1 then
+            return true
+        end
+    end
+
+    if self.ui and self.ui.document and self.ui.document.file and (isNonEmpty(remote_snapshot.location) or isNonEmpty(remote_snapshot.progress)) then
+        local current_snapshot = self:getCurrentProgressSnapshot(
+            remote_snapshot.bookHash,
+            tostring(self.ui.document.file),
+            remote_snapshot.bookId
+        )
+        if current_snapshot then
+            local current_location = isNonEmpty(current_snapshot.location) and tostring(current_snapshot.location) or nil
+            local current_progress = isNonEmpty(current_snapshot.progress) and tostring(current_snapshot.progress) or nil
+            local target_location = isNonEmpty(remote_snapshot.location) and tostring(remote_snapshot.location) or nil
+            local target_progress = isNonEmpty(remote_snapshot.progress) and tostring(remote_snapshot.progress) or nil
+            if (target_location and current_location == target_location)
+                or (target_progress and current_progress == target_progress)
+            then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+function Grimmlink:requestReaderRefresh()
+    if UIManager and type(UIManager.setDirty) == "function" then
+        UIManager:setDirty(nil, "all")
+    end
+
+    safeMethodCall(self.ui and self.ui.rolling, "redrawCurrentView")
+    safeMethodCall(self.ui and self.ui.rolling, "updatePos")
+    safeMethodCall(self.ui and self.ui.paging, "updatePageInfo")
+
+    if Event and self.ui and type(self.ui.handleEvent) == "function" and type(Event.new) == "function" then
+        pcall(self.ui.handleEvent, self.ui, Event:new("UpdatePos"))
     end
 end
 
+function Grimmlink:runAfterUiSettles(callback)
+    if type(callback) ~= "function" then
+        return
+    end
+
+    if UIManager and type(UIManager.scheduleIn) == "function" then
+        UIManager:scheduleIn(0.05, callback)
+    else
+        callback()
+    end
+end
+
+function Grimmlink:applyAndFinalizeRemoteProgress(file_hash, remote_snapshot, success_message, failure_message, success_action, failure_action)
+    self:runAfterUiSettles(function()
+        local jumped = self:applyRemoteProgress(remote_snapshot)
+        if jumped then
+            self:finalizeRemoteJump(
+                file_hash,
+                remote_snapshot,
+                success_message,
+                failure_message,
+                success_action,
+                failure_action
+            )
+        else
+            if failure_action then
+                failure_action(remote_snapshot)
+            end
+            self:showMessage(failure_message, 4)
+        end
+    end)
+end
+
+function Grimmlink:finalizeRemoteJump(file_hash, remote_snapshot, success_message, failure_message, success_action, failure_action)
+    local verify = function()
+        if self:isRemoteProgressApplied(remote_snapshot) then
+            local applied_snapshot = remote_snapshot
+            if self.ui and self.ui.document and self.ui.document.file then
+                applied_snapshot = self:getCurrentProgressSnapshot(
+                    file_hash or remote_snapshot.bookHash,
+                    tostring(self.ui.document.file),
+                    remote_snapshot.bookId
+                ) or remote_snapshot
+            end
+            applied_snapshot.bookHash = applied_snapshot.bookHash or file_hash or remote_snapshot.bookHash
+            applied_snapshot.bookId = applied_snapshot.bookId or remote_snapshot.bookId
+            applied_snapshot.timestamp = nowUtc()
+            if success_action then
+                success_action(applied_snapshot)
+            end
+            self:showMessage(success_message, 2)
+        else
+            if failure_action then
+                failure_action(remote_snapshot)
+            end
+            self:showMessage(failure_message, 4)
+        end
+    end
+
+    self:requestReaderRefresh()
+    if UIManager and type(UIManager.scheduleIn) == "function" then
+        UIManager:scheduleIn(0.2, verify)
+    else
+        verify()
+    end
+end
+
+function Grimmlink:resolveRemoteChoice(file_hash, remote_snapshot)
+    self:applyAndFinalizeRemoteProgress(
+        file_hash,
+        remote_snapshot,
+        _("Jumped to remote progress"),
+        _("Remote progress found, but safe jump was not possible"),
+        function(applied_snapshot)
+            self:rememberLocalSnapshot(file_hash, applied_snapshot, "conflict-use-remote")
+        end,
+        function(failed_snapshot)
+            self:rememberRemoteSnapshot(file_hash, failed_snapshot, "remote-jump-unsafe")
+        end
+    )
+end
+
+function Grimmlink:beginConflictDialog(kind)
+    if self._conflict_dialog_open then
+        self:logInfo("GrimmLink skipping", kind, "dialog because another conflict dialog is already open")
+        return false
+    end
+    self._conflict_dialog_open = kind or true
+    return true
+end
+
+function Grimmlink:endConflictDialog()
+    self._conflict_dialog_open = nil
+end
+
 function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, mode)
+    if not self:beginConflictDialog("progress") then
+        return
+    end
+
     local dialog
     dialog = ButtonDialog:new{
         title = self:buildConflictDialogText(local_snapshot, remote_snapshot),
@@ -1281,6 +1675,7 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
                 {
                     text = _("Use Local"),
                     callback = function()
+                        self:endConflictDialog()
                         UIManager:close(dialog)
                         self:logInfo("GrimmLink conflict decision: Use Local")
                         self:resolveLocalChoice(file_hash, local_snapshot, true)
@@ -1289,6 +1684,7 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
                 {
                     text = _("Use Remote"),
                     callback = function()
+                        self:endConflictDialog()
                         UIManager:close(dialog)
                         self:logInfo("GrimmLink conflict decision: Use Remote")
                         self:resolveRemoteChoice(file_hash, remote_snapshot)
@@ -1297,6 +1693,7 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
                 {
                     text = _("Ignore"),
                     callback = function()
+                        self:endConflictDialog()
                         UIManager:close(dialog)
                         self:logInfo("GrimmLink conflict decision: Ignore")
                         self:rememberRemoteSnapshot(file_hash, remote_snapshot, mode == "remote_newer" and "remote-ignored" or "conflict-ignored")
@@ -1467,6 +1864,39 @@ function Grimmlink:resolveBookByHash(file_path, file_hash, silent)
     return nil
 end
 
+function Grimmlink:resolveBookByFilePath(file_path)
+    if not self.db or not file_path or file_path == "" then
+        return nil
+    end
+
+    local cached = self.db:getBookByFilePath(file_path)
+    if cached and cached.book_id then
+        return cached
+    end
+
+    if type(self.db.getShelfSyncEntryByLocalPath) == "function" then
+        local shelf_entry = self.db:getShelfSyncEntryByLocalPath(file_path)
+        if shelf_entry and shelf_entry.book_id then
+            self.db:saveBookCache(
+                file_path,
+                cached and cached.file_hash or "",
+                shelf_entry.book_id,
+                shelf_entry.remote_title or sanitizeTitle(file_path),
+                shelf_entry.remote_author
+            )
+            return {
+                file_path = file_path,
+                file_hash = cached and cached.file_hash or nil,
+                book_id = tonumber(shelf_entry.book_id),
+                title = shelf_entry.remote_title,
+                author = shelf_entry.remote_author,
+            }
+        end
+    end
+
+    return cached
+end
+
 function Grimmlink:shouldPushProgress(current_snapshot, state, reason)
     if reason == "manual" or reason == "close" or reason == "suspend" then
         return true
@@ -1533,7 +1963,12 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id)
         return
     end
 
-    if decision == "remote_newer" or decision == "conflict" then
+    if decision == "remote_newer" then
+        self:resolveRemoteChoice(file_hash, remote_snapshot)
+        return
+    end
+
+    if decision == "conflict" then
         self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, decision)
     end
 end
@@ -1589,7 +2024,7 @@ end
 
 function Grimmlink:pushWebReaderBridgeSnapshot(snapshot, opts)
     opts = opts or {}
-    if not self.web_reader_bridge_enabled or not snapshot or not snapshot.bookHash or not snapshot.bookId then
+    if not self:isWebReaderSyncEnabled() or not snapshot or not snapshot.bookHash or not snapshot.bookId then
         return { ok = false, skipped = true, reason = "disabled_or_unmatched" }
     end
 
@@ -1659,6 +2094,10 @@ function Grimmlink:pushWebReaderBridgeSnapshot(snapshot, opts)
 end
 
 function Grimmlink:showWebBridgeConflictDialog(file_hash, local_snapshot, remote_snapshot, mode)
+    if not self:beginConflictDialog("web-bridge") then
+        return
+    end
+
     local dialog
     dialog = ButtonDialog:new{
         title = self:buildWebBridgeConflictDialogText(local_snapshot, remote_snapshot),
@@ -1667,6 +2106,7 @@ function Grimmlink:showWebBridgeConflictDialog(file_hash, local_snapshot, remote
                 {
                     text = _("Use KOReader"),
                     callback = function()
+                        self:endConflictDialog()
                         UIManager:close(dialog)
                         local result = self:pushWebReaderBridgeSnapshot(local_snapshot, {
                             reason = mode == "remote_newer" and "web-bridge-use-local-remote-newer" or "web-bridge-use-local-conflict",
@@ -1684,24 +2124,27 @@ function Grimmlink:showWebBridgeConflictDialog(file_hash, local_snapshot, remote
                 {
                     text = _("Use Web Reader"),
                     callback = function()
+                        self:endConflictDialog()
                         UIManager:close(dialog)
-                        local jumped = self:applyRemoteProgress(remote_snapshot)
-                        if jumped then
-                            local applied = self:getCurrentProgressSnapshot(file_hash,
-                                self.ui and self.ui.document and tostring(self.ui.document.file) or nil,
-                                remote_snapshot.bookId or local_snapshot.bookId)
-                            self:rememberLocalWebBridgeSnapshot(file_hash, applied, "web-bridge-use-remote")
-                            self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-use-remote")
-                            self:showMessage(_("Jumped to Web Reader progress"), 3)
-                        else
-                            self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-remote-jump-unsafe")
-                            self:showMessage(_("Web Reader progress found, but a safe jump was not possible"), 4)
-                        end
+                        self:applyAndFinalizeRemoteProgress(
+                            file_hash,
+                            remote_snapshot,
+                            _("Jumped to Web Reader progress"),
+                            _("Web Reader progress found, but a safe jump was not possible"),
+                            function(applied_snapshot)
+                                self:rememberLocalWebBridgeSnapshot(file_hash, applied_snapshot, "web-bridge-use-remote")
+                                self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-use-remote")
+                            end,
+                            function(failed_snapshot)
+                                self:rememberRemoteWebBridgeSnapshot(file_hash, failed_snapshot, "web-bridge-remote-jump-unsafe")
+                            end
+                        )
                     end,
                 },
                 {
                     text = _("Ignore"),
                     callback = function()
+                        self:endConflictDialog()
                         UIManager:close(dialog)
                         self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot,
                             mode == "remote_newer" and "web-bridge-remote-ignored" or "web-bridge-conflict-ignored")
@@ -1714,7 +2157,7 @@ function Grimmlink:showWebBridgeConflictDialog(file_hash, local_snapshot, remote
 end
 
 function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, silent)
-    if not self.web_reader_bridge_enabled or not file_hash or file_hash == "" or not book_id then
+    if not self:isWebReaderSyncEnabled() or not file_hash or file_hash == "" or not book_id then
         return nil
     end
     if not self:isOnline() then
@@ -1820,9 +2263,9 @@ function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, sil
 end
 
 function Grimmlink:syncWebReaderBridgeNow(silent)
-    if not self.web_reader_bridge_enabled then
+    if not self:isWebReaderSyncEnabled() then
         if not silent then
-            self:showMessage(_("Web Reader Bridge is disabled."), 3)
+            self:showMessage(_("Reading Sync is disabled."), 3)
         end
         return nil
     end
@@ -1834,8 +2277,8 @@ function Grimmlink:syncWebReaderBridgeNow(silent)
     end
 
     local file_path = tostring(self.ui.document.file)
-    local cached = self.db:getBookByFilePath(file_path)
-    local file_hash = cached and cached.file_hash or self:calculateBookHash(file_path)
+    local cached = self:resolveBookByFilePath(file_path)
+    local file_hash = cached and isNonEmpty(cached.file_hash) and cached.file_hash or self:calculateBookHash(file_path)
     local matched = self:resolveBookByHash(file_path, file_hash, true)
     local book_id = matched and matched.book_id or (cached and cached.book_id or nil)
     if not book_id then
@@ -1844,6 +2287,9 @@ function Grimmlink:syncWebReaderBridgeNow(silent)
         end
         return nil
     end
+
+    local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
+    self:pushProgressSnapshot(local_snapshot, "manual", true)
 
     return self:maybePullWebReaderProgress(file_hash, file_path, book_id, silent)
 end
@@ -1865,7 +2311,7 @@ function Grimmlink:startSession()
     end
 
     local file_path = tostring(self.ui.document.file)
-    local cached = self.db:getBookByFilePath(file_path)
+    local cached = self:resolveBookByFilePath(file_path)
     local file_hash = cached and cached.file_hash or nil
     if not file_hash or file_hash == "" then
         file_hash = self:calculateBookHash(file_path)
@@ -1947,6 +2393,25 @@ function Grimmlink:endSession(options)
     return true
 end
 
+function Grimmlink:buildSingleSessionPayload(group, item)
+    return {
+        bookId = group.bookId,
+        bookHash = group.bookHash,
+        bookType = group.bookType,
+        startTime = item.startTime,
+        endTime = item.endTime,
+        durationSeconds = item.durationSeconds,
+        durationFormatted = item.durationFormatted,
+        startProgress = item.startProgress,
+        endProgress = item.endProgress,
+        progressDelta = item.progressDelta,
+        startLocation = item.startLocation,
+        endLocation = item.endLocation,
+        device = group.device,
+        deviceId = group.deviceId,
+    }
+end
+
 function Grimmlink:syncPendingSessions(silent)
     local synced = 0
     local failed = 0
@@ -1971,11 +2436,19 @@ function Grimmlink:syncPendingSessions(silent)
                 session.bookId = cached.book_id
                 self.db:updatePendingSessionBookId(session.id, cached.book_id)
             else
-                local ok_lookup, book = self.api:getBookByHash(session.bookHash)
-                if ok_lookup and book and book.id then
-                    session.bookId = tonumber(book.id)
+                local state = self.db:getProgressState(session.bookHash)
+                local by_path = state and state.file_path and self:resolveBookByFilePath(state.file_path) or nil
+                if by_path and by_path.book_id then
+                    session.bookId = tonumber(by_path.book_id)
                     self.db:updateBookId(session.bookHash, session.bookId)
                     self.db:updatePendingSessionBookId(session.id, session.bookId)
+                else
+                    local ok_lookup, book = self.api:getBookByHash(session.bookHash)
+                    if ok_lookup and book and book.id then
+                        session.bookId = tonumber(book.id)
+                        self.db:updateBookId(session.bookHash, session.bookId)
+                        self.db:updatePendingSessionBookId(session.id, session.bookId)
+                    end
                 end
             end
         end
@@ -2023,25 +2496,11 @@ function Grimmlink:syncPendingSessions(silent)
         end
 
         local success = false
+        local handled_individually = false
         if #items == 1 then
-            success = self.api:submitSession({
-                bookId = group.bookId,
-                bookHash = group.bookHash,
-                bookType = group.bookType,
-                startTime = items[1].startTime,
-                endTime = items[1].endTime,
-                durationSeconds = items[1].durationSeconds,
-                durationFormatted = items[1].durationFormatted,
-                startProgress = items[1].startProgress,
-                endProgress = items[1].endProgress,
-                progressDelta = items[1].progressDelta,
-                startLocation = items[1].startLocation,
-                endLocation = items[1].endLocation,
-                device = group.device,
-                deviceId = group.deviceId,
-            })
+            success = self.api:submitSession(self:buildSingleSessionPayload(group, items[1]))
         else
-            success = self.api:submitSessionBatch(
+            local batch_ok, batch_response, batch_code = self.api:submitSessionBatch(
                 group.bookId,
                 group.bookHash,
                 group.bookType,
@@ -2049,9 +2508,44 @@ function Grimmlink:syncPendingSessions(silent)
                 group.deviceId,
                 items
             )
+            if batch_ok then
+                success = true
+            else
+                self:logWarn(
+                    "GrimmLink batch session sync failed; falling back to individual uploads:",
+                    batch_response or ("HTTP " .. tostring(batch_code or "?"))
+                )
+
+                local group_success = true
+                handled_individually = true
+                for index, session in ipairs(group.sessions) do
+                    local single_ok = self.api:submitSession(self:buildSingleSessionPayload(group, items[index]))
+                    if single_ok then
+                        self.db:deletePendingSession(session.id)
+                        synced = synced + 1
+                    else
+                        self.db:incrementSessionRetryCount(session.id)
+                        failed = failed + 1
+                        group_success = false
+                    end
+                end
+                success = group_success
+            end
         end
 
-        if success then
+        if handled_individually then
+            -- Results were already applied in the fallback loop above.
+        elseif success and #items > 1 then
+            for _, session in ipairs(group.sessions) do
+                self.db:deletePendingSession(session.id)
+                synced = synced + 1
+            end
+        elseif not success and #items > 1 then
+            for _, session in ipairs(group.sessions) do
+                self.db:incrementSessionRetryCount(session.id)
+                failed = failed + 1
+            end
+        elseif success then
             for _, session in ipairs(group.sessions) do
                 self.db:deletePendingSession(session.id)
                 synced = synced + 1
@@ -2135,12 +2629,12 @@ function Grimmlink:resolveCurrentDocumentBookId(preferred_book_id)
     end
 
     local file_path = tostring(self.ui.document.file)
-    local cached = self.db:getBookByFilePath(file_path)
+    local cached = self:resolveBookByFilePath(file_path)
     if cached and cached.book_id then
         return tonumber(cached.book_id)
     end
 
-    local file_hash = cached and cached.file_hash or self:calculateBookHash(file_path)
+    local file_hash = cached and isNonEmpty(cached.file_hash) and cached.file_hash or self:calculateBookHash(file_path)
     local matched = self:resolveBookByHash(file_path, file_hash, true)
     return matched and matched.book_id or nil
 end
@@ -2477,9 +2971,9 @@ function Grimmlink:showAbout()
         T(_("Release repo: %1"), self.update_repo or DEFAULTS.update_repo),
         _("Updates always require confirmation before download/install."),
         _("Updating GrimmLink preserves settings, database, cache, downloaded books, and .sdr files."),
-        T(_("Web Reader Bridge: %1"), self.web_reader_bridge_enabled and _("enabled") or _("disabled")),
+        T(_("Web Reader sync: %1"), self:isWebReaderSyncEnabled() and _("linked to Reading Sync") or _("disabled")),
         T(_("EPUB CFI conversion: %1"), self.cfi_conversion_enabled and _("enabled") or _("disabled")),
-        _("Prompt 8 keeps Web Reader Bridge optional and preserves native KOReader sync separately."),
+        _("Web Reader progress now follows Reading Sync so KOReader and Web Reader share the same progress source."),
     }, "\n"), 8)
 end
 
@@ -2826,48 +3320,120 @@ function Grimmlink:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Connection"),
+                text = _("Settings"),
                 sub_item_table = {
                     {
-                        text = _("Grimmory Server URL"),
-                        callback = function()
-                            self:configureServerUrl()
-                        end,
+                        text = _("Connection"),
+                        sub_item_table = {
+                            {
+                                text = _("Configure Connection"),
+                                callback = function()
+                                    self:configureConnection()
+                                end,
+                            },
+                            {
+                                text = _("Test Connection"),
+                                callback = function()
+                                    self:testConnection()
+                                end,
+                            },
+                        },
                     },
                     {
-                        text = _("KOReader Username"),
-                        callback = function()
-                            self:configureUsername()
-                        end,
+                        text = _("Device"),
+                        sub_item_table = {
+                            {
+                                text = _("Device Name"),
+                                callback = function()
+                                    self:configureDeviceName()
+                                end,
+                            },
+                            {
+                                text = _("Device ID"),
+                                callback = function()
+                                    self:configureDeviceId()
+                                end,
+                            },
+                        },
                     },
                     {
-                        text = _("Password"),
-                        callback = function()
-                            self:configurePassword()
-                        end,
+                        text = _("Debug Logging"),
+                        sub_item_table = {
+                            {
+                                text = _("Debug logging"),
+                                checked_func = function()
+                                    return self.debug_logging
+                                end,
+                                callback = function()
+                                    self:saveSetting("debug_logging", not self.debug_logging)
+                                end,
+                            },
+                            {
+                                text = _("Write logs to file"),
+                                checked_func = function()
+                                    return self.log_to_file
+                                end,
+                                callback = function()
+                                    self:saveSetting("log_to_file", not self.log_to_file)
+                                end,
+                            },
+                            {
+                                text = _("Show log file location"),
+                                callback = function()
+                                    self:showLogFileLocation()
+                                end,
+                            },
+                            {
+                                text = _("Show recent log lines"),
+                                callback = function()
+                                    self:showRecentLogLines()
+                                end,
+                            },
+                        },
                     },
                     {
-                        text = _("Test Connection"),
-                        callback = function()
-                            self:testConnection()
-                        end,
-                    },
-                },
-            },
-            {
-                text = _("Device"),
-                sub_item_table = {
-                    {
-                        text = _("Device Name"),
-                        callback = function()
-                            self:configureDeviceName()
-                        end,
-                    },
-                    {
-                        text = _("Device ID"),
-                        callback = function()
-                            self:configureDeviceId()
-                        end,
+                        text = _("About & Updates"),
+                        sub_item_table = {
+                            {
+                                text = _("Check for Updates"),
+                                callback = function()
+                                    self:checkForUpdates(false)
+                                end,
+                            },
+                            {
+                                text = _("Auto Update Enabled"),
+                                checked_func = function()
+                                    return self.auto_update_enabled
+                                end,
+                                callback = function()
+                                    self:toggleAutoUpdateEnabled()
+                                end,
+                            },
+                            {
+                                text = _("Check on Startup"),
+                                checked_func = function()
+                                    return self.check_update_on_startup
+                                end,
+                                callback = function()
+                                    self:toggleStartupUpdateChecks()
+                                end,
+                            },
+                            {
+                                text = _("Allow Pre-release Updates"),
+                                checked_func = function()
+                                    return self.allow_prerelease_updates
+                                end,
+                                callback = function()
+                                    self:togglePrereleaseUpdates()
+                                end,
+                            },
+                            {
+                                text = _("About GrimmLink"),
+                                callback = function()
+                                    self:showAbout()
+                                end,
+                            },
+                        },
                     },
                 },
             },
@@ -2902,25 +3468,7 @@ function Grimmlink:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = _("Debug logging"),
-                        checked_func = function()
-                            return self.debug_logging
-                        end,
-                        callback = function()
-                            self:saveSetting("debug_logging", not self.debug_logging)
-                        end,
-                    },
-                    {
-                        text = _("Web Reader Bridge"),
-                        checked_func = function()
-                            return self.web_reader_bridge_enabled
-                        end,
-                        callback = function()
-                            self:saveSetting("web_reader_bridge_enabled", not self.web_reader_bridge_enabled)
-                        end,
-                    },
-                    {
-                        text = _("EPUB CFI Conversion"),
+                        text = _("Exact Web Reader position (EPUB only)"),
                         checked_func = function()
                             return self.cfi_conversion_enabled
                         end,
@@ -2929,27 +3477,42 @@ function Grimmlink:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = _("Progress threshold (%)"),
-                        callback = function()
-                            self:showNumberInput(_("Progress threshold (%)"), self.threshold_percent, "1.0", function(value)
-                                self:saveSetting("threshold_percent", value)
-                            end)
-                        end,
+                        text = _("Thresholds"),
+                        sub_item_table = {
+                            {
+                                text = _("Progress threshold (%)"),
+                                callback = function()
+                                    self:showNumberInput(_("Progress threshold (%)"), self.threshold_percent, "1.0", function(value)
+                                        self:saveSetting("threshold_percent", value)
+                                    end)
+                                end,
+                            },
+                            {
+                                text = _("Time threshold (minutes)"),
+                                callback = function()
+                                    self:showNumberInput(_("Time threshold (minutes)"), self.threshold_minutes, "5", function(value)
+                                        self:saveSetting("threshold_minutes", value)
+                                    end)
+                                end,
+                            },
+                            {
+                                text = _("Page threshold"),
+                                callback = function()
+                                    self:showNumberInput(_("Page threshold"), self.threshold_pages, "5", function(value)
+                                        self:saveSetting("threshold_pages", value)
+                                    end)
+                                end,
+                            },
+                        },
                     },
                     {
-                        text = _("Time threshold (minutes)"),
-                        callback = function()
-                            self:showNumberInput(_("Time threshold (minutes)"), self.threshold_minutes, "5", function(value)
-                                self:saveSetting("threshold_minutes", value)
-                            end)
+                        text_func = function()
+                            return self:isWebReaderSyncEnabled()
+                                and _("Shared reading progress is active")
+                                or _("Shared reading progress is off because Reading Sync is disabled")
                         end,
-                    },
-                    {
-                        text = _("Page threshold"),
                         callback = function()
-                            self:showNumberInput(_("Page threshold"), self.threshold_pages, "5", function(value)
-                                self:saveSetting("threshold_pages", value)
-                            end)
+                            self:showMessage(_("Web Reader progress now follows Reading Sync automatically."), 4)
                         end,
                     },
                 },
@@ -3042,7 +3605,7 @@ function Grimmlink:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Sync Web Reader Progress Now"),
+                text = _("Sync Shared Reading Progress Now"),
                 callback = function()
                     self:syncWebReaderBridgeNow(false)
                 end,
@@ -3167,50 +3730,6 @@ function Grimmlink:addToMainMenu(menu_items)
                     end
                     self:showPendingStats()
                 end,
-            },
-            {
-                text = _("About & Updates"),
-                sub_item_table = {
-                    {
-                        text = _("Check for Updates"),
-                        callback = function()
-                            self:checkForUpdates(false)
-                        end,
-                    },
-                    {
-                        text = _("Auto Update Enabled"),
-                        checked_func = function()
-                            return self.auto_update_enabled
-                        end,
-                        callback = function()
-                            self:toggleAutoUpdateEnabled()
-                        end,
-                    },
-                    {
-                        text = _("Check on Startup"),
-                        checked_func = function()
-                            return self.check_update_on_startup
-                        end,
-                        callback = function()
-                            self:toggleStartupUpdateChecks()
-                        end,
-                    },
-                    {
-                        text = _("Allow Pre-release Updates"),
-                        checked_func = function()
-                            return self.allow_prerelease_updates
-                        end,
-                        callback = function()
-                            self:togglePrereleaseUpdates()
-                        end,
-                    },
-                    {
-                        text = _("About GrimmLink"),
-                        callback = function()
-                            self:showAbout()
-                        end,
-                    },
-                },
             },
         },
     }

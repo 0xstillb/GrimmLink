@@ -93,11 +93,27 @@ function Updater:init(plugin_dir, db, options)
     self.db = db
     self.allow_prerelease = options.allow_prerelease == true
     self.update_repo = self:normalizeRepo(options.update_repo)
+    self.command_runner = options.command_runner
+    self.command_reader = options.command_reader
     self.backup_dir = DataStorage:getDataDir() .. "/grimmlink-backups"
     self.temp_dir = DataStorage:getDataDir() .. "/grimmlink-update-" .. tostring(os.time())
 
-    runCommand("mkdir -p " .. shellQuote(self.backup_dir))
+    self:_runCommand("mkdir -p " .. shellQuote(self.backup_dir))
     return true
+end
+
+function Updater:_runCommand(command)
+    if type(self.command_runner) == "function" then
+        return self.command_runner(command)
+    end
+    return runCommand(command)
+end
+
+function Updater:_readCommand(command)
+    if type(self.command_reader) == "function" then
+        return self.command_reader(command)
+    end
+    return readCommand(command)
 end
 
 function Updater:setAllowPrerelease(allowed)
@@ -440,7 +456,7 @@ function Updater:checkForUpdates(use_cache)
 end
 
 function Updater:downloadReleaseAsset(url, progress_callback)
-    runCommand("mkdir -p " .. shellQuote(self.temp_dir))
+    self:_runCommand("mkdir -p " .. shellQuote(self.temp_dir))
     local zip_path = self.temp_dir .. "/grimmlink-update.zip"
     local file, err = io.open(zip_path, "wb")
     if not file then
@@ -455,7 +471,7 @@ function Updater:downloadReleaseAsset(url, progress_callback)
         })
         if not success then
             file:close()
-            runCommand("rm -f " .. shellQuote(zip_path))
+            self:_runCommand("rm -f " .. shellQuote(zip_path))
             return false, resolved_url
         end
         file:write(response_text)
@@ -493,7 +509,7 @@ function Updater:downloadReleaseAsset(url, progress_callback)
     file:close()
 
     if type(code) ~= "number" or code < 200 or code >= 300 then
-        runCommand("rm -f " .. shellQuote(zip_path))
+        self:_runCommand("rm -f " .. shellQuote(zip_path))
         return false, "download failed: HTTP " .. tostring(code)
     end
 
@@ -501,7 +517,7 @@ function Updater:downloadReleaseAsset(url, progress_callback)
 end
 
 function Updater:_validateZipStructure(zip_path)
-    local success, output = readCommand("unzip -l " .. shellQuote(zip_path) .. " 2>&1")
+    local success, output = self:_readCommand("unzip -l " .. shellQuote(zip_path) .. " 2>&1")
     if not success then
         return false, "failed to inspect ZIP archive"
     end
@@ -516,8 +532,8 @@ function Updater:_validateZipStructure(zip_path)
 end
 
 function Updater:_extractZip(zip_path, extract_dir)
-    runCommand("mkdir -p " .. shellQuote(extract_dir))
-    local ok = runCommand("unzip -q -o " .. shellQuote(zip_path) .. " -d " .. shellQuote(extract_dir))
+    self:_runCommand("mkdir -p " .. shellQuote(extract_dir))
+    local ok = self:_runCommand("unzip -q -o " .. shellQuote(zip_path) .. " -d " .. shellQuote(extract_dir))
     if not ok then
         return false, "failed to extract update archive"
     end
@@ -525,11 +541,11 @@ function Updater:_extractZip(zip_path, extract_dir)
 end
 
 function Updater:backupCurrentVersion()
-    runCommand("mkdir -p " .. shellQuote(self.backup_dir))
+    self:_runCommand("mkdir -p " .. shellQuote(self.backup_dir))
     local version = self:getCurrentVersion().version or "unknown"
     local backup_name = string.format("grimmlink-%s-%s", version, os.date("%Y%m%d-%H%M%S"))
     local backup_path = self.backup_dir .. "/" .. backup_name
-    local ok = runCommand("cp -R " .. shellQuote(self.plugin_dir) .. " " .. shellQuote(backup_path))
+    local ok = self:_runCommand("cp -R " .. shellQuote(self.plugin_dir) .. " " .. shellQuote(backup_path))
     if not ok then
         return false, "failed to create plugin backup"
     end
@@ -539,7 +555,7 @@ end
 
 function Updater:cleanupOldBackups(keep_count)
     keep_count = tonumber(keep_count) or self.BACKUP_KEEP_COUNT
-    local ok, output = readCommand("ls -t " .. shellQuote(self.backup_dir) .. " 2>&1")
+    local ok, output = self:_readCommand("ls -t " .. shellQuote(self.backup_dir) .. " 2>&1")
     if not ok then
         return 0
     end
@@ -554,7 +570,7 @@ function Updater:cleanupOldBackups(keep_count)
     local removed = 0
     for index = keep_count + 1, #backups do
         local path = self.backup_dir .. "/" .. backups[index]
-        if runCommand("rm -rf " .. shellQuote(path)) then
+        if self:_runCommand("rm -rf " .. shellQuote(path)) then
             removed = removed + 1
         end
     end
@@ -563,13 +579,13 @@ end
 
 function Updater:cleanupTempFiles()
     if self.temp_dir and self.temp_dir ~= "" then
-        runCommand("rm -rf " .. shellQuote(self.temp_dir))
+        self:_runCommand("rm -rf " .. shellQuote(self.temp_dir))
     end
     return true
 end
 
 function Updater:rollbackToLatestBackup()
-    local ok, output = readCommand("ls -t " .. shellQuote(self.backup_dir) .. " 2>&1")
+    local ok, output = self:_readCommand("ls -t " .. shellQuote(self.backup_dir) .. " 2>&1")
     if not ok then
         return false, "failed to list backups"
     end
@@ -586,8 +602,8 @@ function Updater:rollbackToLatestBackup()
     end
 
     local backup_path = self.backup_dir .. "/" .. latest_backup
-    runCommand("rm -rf " .. shellQuote(self.plugin_dir))
-    local restored = runCommand("cp -R " .. shellQuote(backup_path) .. " " .. shellQuote(self.plugin_dir))
+    self:_runCommand("rm -rf " .. shellQuote(self.plugin_dir))
+    local restored = self:_runCommand("cp -R " .. shellQuote(backup_path) .. " " .. shellQuote(self.plugin_dir))
     if not restored then
         return false, "failed to restore latest backup"
     end
@@ -619,20 +635,20 @@ function Updater:installDownloadedUpdate(zip_path)
     end
 
     local rollback_dir = self.temp_dir .. "/rollback-current"
-    runCommand("rm -rf " .. shellQuote(rollback_dir))
+    self:_runCommand("rm -rf " .. shellQuote(rollback_dir))
 
-    local moved_old = runCommand("mv " .. shellQuote(self.plugin_dir) .. " " .. shellQuote(rollback_dir))
+    local moved_old = self:_runCommand("mv " .. shellQuote(self.plugin_dir) .. " " .. shellQuote(rollback_dir))
     if not moved_old then
         return false, "failed to stage current plugin for replacement"
     end
 
-    local moved_new = runCommand("mv " .. shellQuote(extracted_plugin_dir) .. " " .. shellQuote(self.plugin_dir))
+    local moved_new = self:_runCommand("mv " .. shellQuote(extracted_plugin_dir) .. " " .. shellQuote(self.plugin_dir))
     if not moved_new then
-        runCommand("mv " .. shellQuote(rollback_dir) .. " " .. shellQuote(self.plugin_dir))
+        self:_runCommand("mv " .. shellQuote(rollback_dir) .. " " .. shellQuote(self.plugin_dir))
         return false, "failed to install updated grimmlink.koplugin package"
     end
 
-    runCommand("rm -rf " .. shellQuote(rollback_dir))
+    self:_runCommand("rm -rf " .. shellQuote(rollback_dir))
     self:cleanupTempFiles()
     return true, backup_result
 end

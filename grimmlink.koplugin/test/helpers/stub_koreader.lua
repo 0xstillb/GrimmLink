@@ -8,6 +8,7 @@ local STUB_KEYS = {
     "ui/widget/confirmbox",
     "ui/widget/buttondialog",
     "ui/network/manager",
+    "ui/event",
     "gettext",
     "ffi/util",
     "json",
@@ -72,6 +73,11 @@ local function install()
             setDirty = function()
                 UIManager.dirty_calls = UIManager.dirty_calls + 1
             end,
+            scheduleIn = function(_, _delay, callback)
+                if type(callback) == "function" then
+                    callback()
+                end
+            end,
             askForRestart = function() end,
             getLastShown = function()
                 return UIManager.last_shown
@@ -118,6 +124,20 @@ local function install()
             isConnected = function() return false end,
             isOnline = function() return false end,
         }
+    end
+
+    package.preload["ui/event"] = function()
+        local Event = {}
+        function Event:new(name, ...)
+            local o = {
+                handler = "on" .. name,
+                args = table.pack(...),
+            }
+            setmetatable(o, self)
+            self.__index = self
+            return o
+        end
+        return Event
     end
 
     package.preload["gettext"] = function()

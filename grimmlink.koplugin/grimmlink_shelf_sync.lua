@@ -167,21 +167,56 @@ local function uniquePath(dir, filename)
     return full -- give up; let the download overwrite
 end
 
--- Delete a .sdr sidecar directory if it exists.
-local function deleteSdr(local_path)
-    local sdr_path = local_path .. ".sdr"
-    local attr = lfs.attributes(sdr_path)
-    if not attr or attr.mode ~= "directory" then return end
+local function deletePathRecursive(path)
+    local attr = lfs.attributes(path)
+    if not attr then
+        return true
+    end
 
-    -- Remove contents first, then the directory
-    for entry in lfs.dir(sdr_path) do
+    if attr.mode == "file" then
+        return os.remove(path) and true or false
+    end
+
+    if attr.mode ~= "directory" then
+        return false
+    end
+
+    for entry in lfs.dir(path) do
         if entry ~= "." and entry ~= ".." then
-            local ep = sdr_path .. "/" .. entry
-            os.remove(ep)
+            local child = path .. "/" .. entry
+            if not deletePathRecursive(child) then
+                return false
+            end
         end
     end
-    lfs.rmdir(sdr_path)
-    logger.info("GrimmLink ShelfSync: removed .sdr sidecar:", sdr_path)
+
+    return lfs.rmdir(path) and true or false
+end
+
+local function getSdrCandidatePaths(local_path)
+    local candidates = { local_path .. ".sdr" }
+    local base_path = local_path:match("^(.*)%.([^/\\]+)$")
+    if base_path then
+        local legacy_path = base_path .. ".sdr"
+        if legacy_path ~= candidates[1] then
+            candidates[#candidates + 1] = legacy_path
+        end
+    end
+    return candidates
+end
+
+-- Delete a .sdr sidecar directory if it exists.
+local function deleteSdr(local_path)
+    for _, sdr_path in ipairs(getSdrCandidatePaths(local_path)) do
+        local attr = lfs.attributes(sdr_path)
+        if attr and attr.mode == "directory" then
+            if deletePathRecursive(sdr_path) then
+                logger.info("GrimmLink ShelfSync: removed .sdr sidecar:", sdr_path)
+            else
+                logger.warn("GrimmLink ShelfSync: failed to remove .sdr sidecar:", sdr_path)
+            end
+        end
+    end
 end
 
 -- Safely delete a tracked book and optionally its .sdr sidecar.
@@ -371,6 +406,9 @@ function ShelfSync:syncShelf(opts)
                     last_seen_in_shelf_at = sync_start,
                     downloaded_by_grimmlink = 1,
                 })
+                if self.db.saveBookCache then
+                    self.db:saveBookCache(dest_path, "", book_id, book.title, book.author)
+                end
                 result.synced = result.synced + 1
                 logger.info("GrimmLink ShelfSync: downloaded bookId=" .. tostring(book_id) .. " to " .. dest_path)
             else

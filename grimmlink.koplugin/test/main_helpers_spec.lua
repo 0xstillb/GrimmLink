@@ -1,9 +1,41 @@
 local stubs = require("test.helpers.stub_koreader")
 local restore_stubs = stubs.install()
 
+package.loaded["main"] = nil
+package.loaded["grimmlink_updater"] = nil
+package.loaded["grimmlink_database"] = nil
+package.loaded["grimmlink_shelf_sync"] = nil
+package.loaded["datastorage"] = nil
+package.loaded["json"] = nil
+package.loaded["logger"] = nil
 local Grimmlink = require("main")
 local UIManager = require("ui/uimanager")
 restore_stubs()
+
+local function getMenuItemText(item)
+    if not item then
+        return nil
+    end
+    if item.text ~= nil then
+        return item.text
+    end
+    if type(item.text_func) == "function" then
+        local ok, value = pcall(item.text_func)
+        if ok then
+            return value
+        end
+    end
+    return nil
+end
+
+local function findMenuItem(items, expected_text)
+    for _, item in ipairs(items or {}) do
+        if getMenuItemText(item) == expected_text then
+            return item
+        end
+    end
+    return nil
+end
 
 describe("GrimmLink helper methods", function()
     local plugin
@@ -92,6 +124,16 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("conflict", decision)
     end)
 
+    it("prefers remote on first open when there is no prior sync state", function()
+        local decision = plugin:compareOpenProgress(
+            { percentage = 5.4, currentPage = 36, location = "36", timestamp = 500 },
+            { percentage = 8.4, currentPage = 56, location = "56", timestamp = 490 },
+            nil
+        )
+
+        assert.are.equal("remote_newer", decision)
+    end)
+
     it("does not treat backend raw native fields as a web jump target", function()
         local normalized = plugin:normalizeWebBridgeProgress({
             percentage = 61.2,
@@ -103,6 +145,251 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(61.2, normalized.percentage)
         assert.is_nil(normalized.location)
         assert.are.equal("WEB_READER", normalized.source)
+    end)
+
+    it("prefers page-based jumps for paged documents like PDFs", function()
+        local jumped_page
+        plugin.ui = {
+            document = {
+                info = {
+                    has_pages = true,
+                },
+            },
+        }
+        plugin.jumpToPage = function(_, page)
+            jumped_page = page
+            return true
+        end
+        plugin.jumpToLocation = function()
+            error("paged documents should not try xpointer-style jumps first")
+        end
+
+        local ok = plugin:applyRemoteProgress({
+            currentPage = 40,
+            progress = "40",
+            location = "/body/DocFragment[7]",
+        })
+
+        assert.is_true(ok)
+        assert.are.equal(40, jumped_page)
+    end)
+
+    it("keeps xpointer jumps for rolling documents", function()
+        local jumped_location
+        plugin.ui = {
+            document = {
+                info = {
+                    has_pages = false,
+                },
+            },
+        }
+        plugin.jumpToPage = function()
+            error("rolling documents should not prefer page jumps")
+        end
+        plugin.jumpToLocation = function(_, location)
+            jumped_location = location
+            return true
+        end
+
+        local ok = plugin:applyRemoteProgress({
+            currentPage = 40,
+            location = "/body/DocFragment[7]",
+        })
+
+        assert.is_true(ok)
+        assert.are.equal("/body/DocFragment[7]", jumped_location)
+    end)
+
+    it("falls back to zero-based page navigation when direct page jumps fail", function()
+        local current_page = 18
+        plugin.ui = {
+            paging = {
+                gotoPage = function(_, page)
+                    if page == 39 then
+                        current_page = 40
+                        return true
+                    end
+                    return false
+                end,
+            },
+        }
+        plugin.getCurrentPageInfo = function()
+            return current_page, 663
+        end
+        plugin.logDbg = function() end
+        plugin.logWarn = function() end
+
+        local ok = plugin:jumpToPage(40)
+
+        assert.is_true(ok)
+    end)
+
+    it("prefers KOReader GotoPage events when the reader UI exposes them", function()
+        local current_page = 18
+        plugin.ui = {
+            document = {
+                file = "/books/title.epub",
+            },
+            link = {
+                addCurrentLocationToStack = function() end,
+            },
+            handleEvent = function(_, event)
+                if event and event.handler == "onGotoPage" and event.args then
+                    current_page = tonumber(event.args[1]) or 40
+                    return true
+                end
+                return false
+            end,
+        }
+        plugin.getCurrentPageInfo = function()
+            return current_page, 663
+        end
+        plugin.logDbg = function() end
+        plugin.logWarn = function() end
+
+        local ok = plugin:jumpToPage(40)
+
+        assert.is_true(ok)
+    end)
+
+    it("does not report success when a page jump method returns true without moving", function()
+        local current_page = 18
+        plugin.ui = {
+            paging = {
+                gotoPage = function()
+                    return true
+                end,
+            },
+        }
+        plugin.getCurrentPageInfo = function()
+            return current_page, 663
+        end
+        plugin.logDbg = function() end
+        plugin.logWarn = function() end
+
+        local ok = plugin:jumpToPage(40)
+
+        assert.is_false(ok)
+    end)
+
+    it("verifies the page after a remote jump before reporting success", function()
+        local current_page = 18
+        local messages = {}
+        plugin.ui = {
+            document = {
+                file = "/books/title.epub",
+            },
+        }
+        plugin.getCurrentPageInfo = function()
+            return current_page, 663
+        end
+        plugin.getCurrentProgressSnapshot = function(_, file_hash, file_path, book_id)
+            return {
+                bookHash = file_hash,
+                bookId = book_id,
+                file_path = file_path,
+                currentPage = current_page,
+                totalPages = 663,
+                percentage = 100 * current_page / 663,
+                progress = tostring(current_page),
+                location = tostring(current_page),
+            }
+        end
+        plugin.rememberLocalSnapshot = function(_, _, snapshot)
+            assert.are.equal(40, snapshot.currentPage)
+        end
+        plugin.rememberRemoteSnapshot = function()
+            error("should not mark the remote jump as unsafe when the page really changed")
+        end
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+        plugin.requestReaderRefresh = function() end
+        plugin.applyRemoteProgress = function()
+            current_page = 40
+            return true
+        end
+
+        plugin:resolveRemoteChoice("hash-1", {
+            bookHash = "hash-1",
+            bookId = 42,
+            currentPage = 40,
+            totalPages = 663,
+            percentage = 6.0,
+            progress = "40",
+            location = "40",
+        })
+
+        assert.are.same({ "Jumped to remote progress" }, messages)
+    end)
+
+    it("waits for the UI to settle before reporting a remote jump success", function()
+        local current_page = 18
+        local messages = {}
+        local scheduled = {}
+        local original_schedule_in = UIManager.scheduleIn
+
+        UIManager.scheduleIn = function(_, _delay, callback)
+            scheduled[#scheduled + 1] = callback
+        end
+
+        plugin.ui = {
+            document = {
+                file = "/books/title.epub",
+            },
+        }
+        plugin.getCurrentPageInfo = function()
+            return current_page, 663
+        end
+        plugin.getCurrentProgressSnapshot = function(_, file_hash, file_path, book_id)
+            return {
+                bookHash = file_hash,
+                bookId = book_id,
+                file_path = file_path,
+                currentPage = current_page,
+                totalPages = 663,
+                percentage = 100 * current_page / 663,
+                progress = tostring(current_page),
+                location = tostring(current_page),
+            }
+        end
+        plugin.rememberLocalSnapshot = function(_, _, snapshot)
+            assert.are.equal(40, snapshot.currentPage)
+        end
+        plugin.rememberRemoteSnapshot = function()
+            error("should not mark the remote jump as unsafe when the page really changed")
+        end
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+        plugin.requestReaderRefresh = function() end
+        plugin.applyRemoteProgress = function()
+            current_page = 40
+            return true
+        end
+
+        plugin:resolveRemoteChoice("hash-1", {
+            bookHash = "hash-1",
+            bookId = 42,
+            currentPage = 40,
+            totalPages = 663,
+            percentage = 6.0,
+            progress = "40",
+            location = "40",
+        })
+
+        assert.are.equal(1, #scheduled)
+        assert.are.same({}, messages)
+
+        scheduled[1]()
+
+        assert.are.equal(2, #scheduled)
+        assert.are.same({}, messages)
+
+        scheduled[2]()
+
+        UIManager.scheduleIn = original_schedule_in
+        assert.are.same({ "Jumped to remote progress" }, messages)
     end)
 
     it("builds a percentage-first web bridge payload when CFI conversion is disabled", function()
@@ -186,8 +473,8 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("Enable Sync", menu_items.grimmlink.sub_item_table[1].text)
         assert.is_false(plugin:saveSetting("enabled", false))
 
-        local annotation_sync = menu_items.grimmlink.sub_item_table[8]
-        local pending_sync = menu_items.grimmlink.sub_item_table[9]
+        local annotation_sync = findMenuItem(menu_items.grimmlink.sub_item_table, "Annotation Sync")
+        local pending_sync = findMenuItem(menu_items.grimmlink.sub_item_table, "Sync Pending Now")
 
         local ok_annotations, text_annotations = pcall(annotation_sync.sub_item_table[7].text_func)
         local ok_pending, text_pending = pcall(pending_sync.text_func)
@@ -198,7 +485,7 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(text_pending)
 
         local ok_enable = pcall(menu_items.grimmlink.sub_item_table[1].callback)
-        local ok_sync_pending = pcall(menu_items.grimmlink.sub_item_table[9].callback)
+        local ok_sync_pending = pcall(pending_sync.callback)
 
         assert.is_true(ok_enable)
         assert.is_true(ok_sync_pending)
@@ -221,6 +508,605 @@ describe("GrimmLink helper methods", function()
 
         local ok = pcall(menu_items.grimmlink.sub_item_table[1].callback)
         assert.is_true(ok)
+    end)
+
+    it("does not open a second conflict dialog while one is already visible", function()
+        plugin._initialized = true
+        plugin.logInfo = function() end
+
+        plugin:showProgressConflictDialog(
+            "hash-1",
+            { percentage = 2.7, currentPage = 18, totalPages = 663, timestamp = 100 },
+            { percentage = 6.0, currentPage = 40, totalPages = 663, timestamp = 200, device = "device-a" },
+            "conflict"
+        )
+
+        local first_dialog = UIManager.getLastShown and UIManager:getLastShown() or nil
+        assert.is_not_nil(first_dialog)
+
+        plugin:showWebBridgeConflictDialog(
+            "hash-1",
+            { percentage = 2.7, currentPage = 18, totalPages = 663, timestamp = 100 },
+            { percentage = 6.0, currentPage = 40, totalPages = 663, timestamp = 200, source = "WEB_READER" },
+            "conflict"
+        )
+
+        local second_dialog = UIManager.getLastShown and UIManager:getLastShown() or nil
+        assert.are.equal(first_dialog, second_dialog)
+    end)
+
+    it("updates the runtime password immediately when settings change", function()
+        local init_calls = {}
+        plugin._initialized = true
+        plugin.db = {
+            savePluginSetting = function()
+                return true
+            end,
+        }
+        plugin.api = {
+            init = function(_, server_url, username, auth_key, debug_logging)
+                init_calls[#init_calls + 1] = {
+                    server_url = server_url,
+                    username = username,
+                    auth_key = auth_key,
+                    debug_logging = debug_logging,
+                }
+            end,
+        }
+        plugin.server_url = "http://example.com"
+        plugin.username = "reader"
+        plugin.auth_key = "old-password"
+        plugin.debug_logging = false
+
+        local ok = plugin:saveSetting("password", "new-password")
+
+        assert.is_true(ok)
+        assert.are.equal("new-password", plugin.auth_key)
+        assert.are.equal("new-password", init_calls[#init_calls].auth_key)
+    end)
+
+    it("collects URL, username, and password in one connection setup flow", function()
+        local prompts = {}
+        local saved = nil
+
+        plugin.server_url = "http://old.example"
+        plugin.username = "old-user"
+        plugin.auth_key = "old-password"
+        plugin.showTextInput = function(_, title, current_value, _hint, secret, on_save)
+            prompts[#prompts + 1] = {
+                title = title,
+                current_value = current_value,
+                secret = secret == true,
+            }
+
+            if title == "Grimmory Server URL" then
+                on_save("http://new.example/")
+            elseif title == "KOReader Username" then
+                on_save("reader")
+            elseif title == "Password" then
+                on_save("secret-password")
+            else
+                error("unexpected prompt: " .. tostring(title))
+            end
+        end
+        plugin.saveConnectionSettings = function(_, server_url, username, password)
+            saved = {
+                server_url = server_url,
+                username = username,
+                password = password,
+            }
+        end
+
+        plugin:configureConnection()
+
+        assert.are.same({
+            { title = "Grimmory Server URL", current_value = "http://old.example", secret = false },
+            { title = "KOReader Username", current_value = "old-user", secret = false },
+            { title = "Password", current_value = "old-password", secret = true },
+        }, prompts)
+        assert.are.same({
+            server_url = "http://new.example/",
+            username = "reader",
+            password = "secret-password",
+        }, saved)
+    end)
+
+    it("prompts to test the connection after saving connection settings", function()
+        local saved = {}
+        local tested = 0
+
+        plugin.db = {
+            savePluginSetting = function(_, key, value)
+                saved[key] = value
+                return true
+            end,
+        }
+        plugin._initialized = true
+        plugin.api = {
+            init = function() end,
+            testAuth = function()
+                tested = tested + 1
+                return true, {}
+            end,
+        }
+        plugin.server_url = ""
+        plugin.username = ""
+        plugin.auth_key = ""
+        plugin.showMessage = function() end
+        plugin.logInfo = function() end
+
+        local ok_save, err_save = pcall(function()
+            plugin:saveConnectionSettings("http://new.example/", "reader", "secret-password")
+        end)
+        assert.is_true(ok_save, err_save)
+
+        assert.are.equal("http://new.example", saved.server_url)
+        assert.are.equal("reader", saved.username)
+        assert.are.equal("secret-password", saved.password)
+
+        local dialog = UIManager.getLastShown and UIManager:getLastShown() or nil
+        assert.is_not_nil(dialog)
+        assert.is_true(dialog.text:find("Test connection now", 1, true) ~= nil)
+        assert.is_not_nil(dialog.ok_callback)
+
+        local ok_test, err_test = pcall(function()
+            dialog.ok_callback()
+        end)
+        assert.is_true(ok_test, err_test)
+        assert.are.equal(1, tested)
+    end)
+
+    it("enables file logging automatically when debug logging is turned on", function()
+        local saved = {}
+        local messages = {}
+
+        plugin._initialized = true
+        plugin.log_to_file = false
+        plugin.file_logger = nil
+        plugin.db = {
+            savePluginSetting = function(_, key, value)
+                saved[key] = value
+                return true
+            end,
+        }
+        plugin.api = {
+            init = function() end,
+        }
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+
+        local ok = plugin:saveSetting("debug_logging", true)
+
+        assert.is_true(ok)
+        assert.is_true(plugin.debug_logging)
+        assert.is_true(plugin.log_to_file)
+        assert.are.equal(true, saved.debug_logging)
+        assert.are.equal(true, saved.log_to_file)
+        assert.is_true(type(messages[#messages]) == "string" and messages[#messages]:find("grimmlink.log", 1, true) ~= nil)
+    end)
+
+    it("shows recent log lines from the GrimmLink log file", function()
+        local original_io_open = io.open
+        local messages = {}
+
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+
+        io.open = function(path, mode)
+            if path == "/tmp/grimmlink.log" and mode == "r" then
+                return {
+                    read = function()
+                        return table.concat({
+                            "[2026-05-02T10:00:00Z] [INFO] start",
+                            "[2026-05-02T10:00:01Z] [WARN] warn",
+                            "[2026-05-02T10:00:02Z] [ERR] boom",
+                        }, "\n")
+                    end,
+                    close = function()
+                        return true
+                    end,
+                }
+            end
+            return original_io_open(path, mode)
+        end
+
+        local ok, err = pcall(function()
+            plugin:showRecentLogLines()
+        end)
+        io.open = original_io_open
+
+        assert.is_true(ok, err)
+        assert.is_true(type(messages[#messages]) == "string" and messages[#messages]:find("Recent GrimmLink log lines", 1, true) ~= nil)
+        assert.is_true(messages[#messages]:find("%[ERR%] boom") ~= nil)
+    end)
+
+    it("falls back to individual session uploads when batch sync fails", function()
+        local deleted_ids = {}
+        local init_calls = 0
+        local batch_calls = 0
+        local single_calls = 0
+
+        plugin._initialized = true
+        plugin.server_url = "http://example.com"
+        plugin.username = "reader"
+        plugin.auth_key = "secret"
+        plugin.debug_logging = false
+        plugin.requireReady = function()
+            return true
+        end
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.logWarn = function() end
+        plugin.db = {
+            getPendingSessions = function()
+                return {
+                    {
+                        id = 1,
+                        bookId = 42,
+                        bookHash = "hash-1",
+                        bookType = "PDF",
+                        device = "KOReader",
+                        deviceId = "device-1",
+                        startTime = "2026-05-01T10:00:00Z",
+                        endTime = "2026-05-01T10:30:00Z",
+                        durationSeconds = 1800,
+                        startProgress = 10.0,
+                        endProgress = 20.0,
+                        progressDelta = 10.0,
+                        startLocation = "10",
+                        endLocation = "20",
+                    },
+                    {
+                        id = 2,
+                        bookId = 42,
+                        bookHash = "hash-1",
+                        bookType = "PDF",
+                        device = "KOReader",
+                        deviceId = "device-1",
+                        startTime = "2026-05-01T11:00:00Z",
+                        endTime = "2026-05-01T11:15:00Z",
+                        durationSeconds = 900,
+                        startProgress = 20.0,
+                        endProgress = 28.0,
+                        progressDelta = 8.0,
+                        startLocation = "20",
+                        endLocation = "28",
+                    },
+                }
+            end,
+            deletePendingSession = function(_, id)
+                deleted_ids[#deleted_ids + 1] = id
+                return true
+            end,
+            incrementSessionRetryCount = function()
+                error("should not retry when single-session fallback succeeds")
+            end,
+        }
+        plugin.api = {
+            init = function()
+                init_calls = init_calls + 1
+            end,
+            submitSessionBatch = function(_, ...)
+                batch_calls = batch_calls + 1
+                return false, "HTTP 404", 404
+            end,
+            submitSession = function(_, payload)
+                single_calls = single_calls + 1
+                return payload.bookId == 42
+            end,
+        }
+
+        local synced, failed = plugin:syncPendingSessions(true)
+
+        assert.are.equal(1, init_calls)
+        assert.are.equal(1, batch_calls)
+        assert.are.equal(2, single_calls)
+        assert.are.equal(2, synced)
+        assert.are.equal(0, failed)
+        assert.are.same({ 1, 2 }, deleted_ids)
+    end)
+
+    it("resolves pending session book ids from progress state file paths", function()
+        local deleted_ids = {}
+        plugin._initialized = true
+        plugin.server_url = "http://example.com"
+        plugin.username = "reader"
+        plugin.auth_key = "secret"
+        plugin.debug_logging = false
+        plugin.requireReady = function()
+            return true
+        end
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.resolveBookByFilePath = function(_, file_path)
+            if file_path == "/books/Book/title.pdf" then
+                return { book_id = 66, file_path = file_path, file_hash = "hash-66" }
+            end
+            return nil
+        end
+        plugin.db = {
+            getPendingSessions = function()
+                return {
+                    {
+                        id = 10,
+                        bookId = nil,
+                        bookHash = "hash-66",
+                        bookType = "PDF",
+                        device = "KOReader",
+                        deviceId = "device-1",
+                        startTime = "2026-05-01T10:00:00Z",
+                        endTime = "2026-05-01T10:15:00Z",
+                        durationSeconds = 900,
+                        startProgress = 10.0,
+                        endProgress = 18.0,
+                        progressDelta = 8.0,
+                        startLocation = "10",
+                        endLocation = "18",
+                    },
+                }
+            end,
+            getBookByHash = function()
+                return nil
+            end,
+            getProgressState = function(_, file_hash)
+                if file_hash == "hash-66" then
+                    return { file_path = "/books/Book/title.pdf" }
+                end
+                return nil
+            end,
+            updateBookId = function() return true end,
+            updatePendingSessionBookId = function(_, id, book_id)
+                assert.are.equal(10, id)
+                assert.are.equal(66, book_id)
+                return true
+            end,
+            deletePendingSession = function(_, id)
+                deleted_ids[#deleted_ids + 1] = id
+                return true
+            end,
+            incrementSessionRetryCount = function()
+                error("should not retry when progress-state path resolution succeeds")
+            end,
+        }
+        plugin.api = {
+            init = function() end,
+            submitSession = function(_, payload)
+                return payload.bookId == 66
+            end,
+        }
+
+        local synced, failed = plugin:syncPendingSessions(true)
+
+        assert.are.equal(1, synced)
+        assert.are.equal(0, failed)
+        assert.are.same({ 10 }, deleted_ids)
+    end)
+
+    it("resolves current document book id from shelf sync local path", function()
+        plugin.db = {
+            getBookByFilePath = function()
+                return nil
+            end,
+            getShelfSyncEntryByLocalPath = function(_, path)
+                if path == "/books/Book/title.pdf" then
+                    return {
+                        book_id = 55,
+                        remote_title = "Synced Title",
+                        remote_author = "Author",
+                    }
+                end
+                return nil
+            end,
+            saveBookCache = function() end,
+        }
+        plugin.ui = {
+            document = {
+                file = "/books/Book/title.pdf",
+            },
+        }
+
+        local book_id = plugin:resolveCurrentDocumentBookId()
+
+        assert.are.equal(55, book_id)
+    end)
+
+    it("syncs the web reader bridge using a shelf-synced local path book id", function()
+        local calls = {}
+        plugin._initialized = true
+        plugin.enabled = true
+        plugin.web_reader_bridge_enabled = true
+        plugin.requireReady = function()
+            return true
+        end
+        plugin.resolveBookByFilePath = function(_, file_path)
+            calls[#calls + 1] = "resolve:" .. file_path
+            return {
+                file_path = file_path,
+                file_hash = "",
+                book_id = 77,
+            }
+        end
+        plugin.calculateBookHash = function(_, file_path)
+            calls[#calls + 1] = "hash:" .. file_path
+            return "hash-77"
+        end
+        plugin.getCurrentProgressSnapshot = function(_, file_hash, file_path, book_id)
+            calls[#calls + 1] = "snapshot:" .. tostring(file_hash) .. ":" .. tostring(book_id)
+            return {
+                bookHash = file_hash,
+                bookId = book_id,
+                file_path = file_path,
+                percentage = 50,
+                progress = "50",
+                location = "50",
+                currentPage = 50,
+                totalPages = 100,
+                timestamp = 123,
+                device = "KOReader",
+                deviceId = "device-1",
+                fileFormat = "PDF",
+            }
+        end
+        plugin.pushProgressSnapshot = function(_, snapshot, reason, silent)
+            calls[#calls + 1] = "push-progress:" .. tostring(snapshot.bookHash) .. ":" .. tostring(reason) .. ":" .. tostring(silent)
+            return true
+        end
+        plugin.resolveBookByHash = function(_, file_path, file_hash)
+            calls[#calls + 1] = "resolve-hash:" .. file_hash
+            return nil
+        end
+        plugin.maybePullWebReaderProgress = function(_, file_hash, file_path, book_id, silent)
+            calls[#calls + 1] = table.concat({
+                "pull",
+                tostring(file_hash),
+                tostring(file_path),
+                tostring(book_id),
+                tostring(silent),
+            }, ":")
+            return true
+        end
+        plugin.ui = {
+            document = {
+                file = "/books/Book/title.pdf",
+            },
+        }
+
+        local ok = plugin:syncWebReaderBridgeNow(true)
+
+        assert.is_true(ok)
+        assert.are.same({
+            "resolve:/books/Book/title.pdf",
+            "hash:/books/Book/title.pdf",
+            "resolve-hash:hash-77",
+            "snapshot:hash-77:77",
+            "push-progress:hash-77:manual:true",
+            "pull:hash-77:/books/Book/title.pdf:77:true",
+        }, calls)
+    end)
+
+    it("keeps Web Reader sync active when Reading Sync is enabled even if the legacy bridge flag is false", function()
+        local calls = {}
+        plugin._initialized = true
+        plugin.enabled = true
+        plugin.web_reader_bridge_enabled = false
+        plugin.requireReady = function()
+            return true
+        end
+        plugin.resolveBookByFilePath = function(_, file_path)
+            return {
+                file_path = file_path,
+                file_hash = "",
+                book_id = 77,
+            }
+        end
+        plugin.calculateBookHash = function()
+            return "hash-77"
+        end
+        plugin.getCurrentProgressSnapshot = function(_, file_hash, file_path, book_id)
+            return {
+                bookHash = file_hash,
+                bookId = book_id,
+                file_path = file_path,
+                percentage = 50,
+                progress = "50",
+                location = "50",
+                currentPage = 50,
+                totalPages = 100,
+                timestamp = 123,
+                fileFormat = "PDF",
+            }
+        end
+        plugin.pushProgressSnapshot = function()
+            return true
+        end
+        plugin.resolveBookByHash = function()
+            return nil
+        end
+        plugin.maybePullWebReaderProgress = function(_, file_hash, file_path, book_id, silent)
+            calls[#calls + 1] = table.concat({
+                tostring(file_hash),
+                tostring(file_path),
+                tostring(book_id),
+                tostring(silent),
+            }, ":")
+            return true
+        end
+        plugin.ui = {
+            document = {
+                file = "/books/Book/title.pdf",
+            },
+        }
+
+        local ok = plugin:syncWebReaderBridgeNow(true)
+
+        assert.is_true(ok)
+        assert.are.same({ "hash-77:/books/Book/title.pdf:77:true" }, calls)
+    end)
+
+    it("auto-applies remote progress when the remote side is newer on open", function()
+        local calls = {}
+        plugin.auto_pull_on_open = true
+        plugin.server_url = "http://example.com"
+        plugin.username = "reader"
+        plugin.auth_key = "secret"
+        plugin.debug_logging = false
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.api = {
+            init = function() end,
+            getProgress = function()
+                return true, {
+                    percentage = 8.4,
+                    currentPage = 56,
+                    totalPages = 663,
+                    progress = "56",
+                    location = "56",
+                    timestamp = 490,
+                }
+            end,
+        }
+        plugin.db = {
+            getProgressState = function()
+                return nil
+            end,
+            upsertLocalProgressState = function() end,
+            upsertRemoteProgressState = function() end,
+        }
+        plugin.getCurrentProgressSnapshot = function()
+            return {
+                percentage = 5.4,
+                currentPage = 36,
+                totalPages = 663,
+                progress = "36",
+                location = "36",
+                timestamp = 500,
+            }
+        end
+        plugin.resolveRemoteChoice = function(_, file_hash, remote_snapshot)
+            calls[#calls + 1] = {
+                file_hash = file_hash,
+                currentPage = remote_snapshot.currentPage,
+                percentage = remote_snapshot.percentage,
+            }
+        end
+        plugin.showProgressConflictDialog = function()
+            error("should not show a conflict dialog when remote is clearly newer")
+        end
+        plugin.logInfo = function() end
+        plugin.rememberLocalSnapshot = function() end
+        plugin.rememberRemoteSnapshot = function() end
+
+        plugin:maybePullRemoteProgress("hash-remote", "/books/title.epub", 42)
+
+        assert.are.equal(1, #calls)
+        assert.are.equal("hash-remote", calls[1].file_hash)
+        assert.are.equal(56, calls[1].currentPage)
+        assert.are.equal(8.4, calls[1].percentage)
     end)
 
     it("selects a shelf without shadowing the gettext helper", function()
@@ -284,8 +1170,13 @@ describe("GrimmLink helper methods", function()
 
         plugin:addToMainMenu(menu_items)
 
+        local shelf_sync_menu = findMenuItem(menu_items.grimmlink.sub_item_table, "Shelf Sync")
+        assert.is_not_nil(shelf_sync_menu)
+        local two_way_item = findMenuItem(shelf_sync_menu.sub_item_table, "Two-way Shelf Delete Sync")
+        assert.is_not_nil(two_way_item)
+
         local ok_open, err_open = pcall(function()
-            menu_items.grimmlink.sub_item_table[5].sub_item_table[6].callback(touchmenu_instance)
+            two_way_item.callback(touchmenu_instance)
         end)
         assert.is_true(ok_open, err_open)
 
@@ -300,5 +1191,92 @@ describe("GrimmLink helper methods", function()
         assert.is_true(saved.two_way_shelf_delete_sync)
         assert.is_true(plugin.two_way_shelf_delete_sync)
         assert.is_true(refreshed > 0)
+    end)
+
+    it("routes the Check for Updates menu action through the update confirmation flow", function()
+        local menu_items = {}
+        local messages = {}
+        local install_target = nil
+
+        plugin._initialized = true
+        plugin.enabled = true
+        plugin.auto_update_enabled = true
+        plugin.check_update_on_startup = true
+        plugin.allow_prerelease_updates = false
+        plugin.update_repo = "0xstillb/grimmlink"
+        plugin.updater = {
+            checkForUpdates = function(_, use_cache)
+                assert.is_false(use_cache)
+                return {
+                    available = true,
+                    current_version = "v1.2.2",
+                    latest_version = "v1.2.3",
+                    release_info = {
+                        version = "v1.2.3",
+                        asset_name = "grimmlink.koplugin.zip",
+                        size = 16384,
+                        prerelease = false,
+                        download_url = "https://example.invalid/grimmlink.koplugin.zip",
+                    },
+                }, nil
+            end,
+            formatBytes = function(_, bytes)
+                assert.are.equal(16384, bytes)
+                return "16.0 KB"
+            end,
+        }
+        plugin.requireReady = function()
+            return true
+        end
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.saveSetting = function(_, key, value)
+            plugin[key] = value
+            return true
+        end
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+        plugin.installUpdate = function(_, release_info)
+            install_target = release_info
+        end
+        plugin.logWarn = function() end
+
+        plugin:addToMainMenu(menu_items)
+
+        local settings_menu = findMenuItem(menu_items.grimmlink.sub_item_table, "Settings")
+        assert.is_not_nil(settings_menu)
+        local updates_menu = findMenuItem(settings_menu.sub_item_table, "About & Updates")
+
+        assert.is_not_nil(updates_menu)
+        local ok_open, err_open = pcall(function()
+            updates_menu.sub_item_table[1].callback()
+        end)
+        assert.is_true(ok_open, err_open)
+
+        assert.are.equal("Checking GrimmLink updates...", messages[1])
+        assert.is_true(plugin.update_available)
+        assert.is_true(type(plugin.last_update_check) == "number" and plugin.last_update_check > 0)
+
+        local dialog = UIManager.getLastShown and UIManager:getLastShown() or nil
+        assert.is_not_nil(dialog)
+        assert.is_true(dialog.text:find("GrimmLink update available", 1, true) ~= nil)
+        assert.is_true(dialog.text:find("Current version: v1.2.2", 1, true) ~= nil)
+        assert.is_true(dialog.text:find("Latest version: v1.2.3", 1, true) ~= nil)
+        assert.is_true(dialog.text:find("Size: 16.0 KB", 1, true) ~= nil)
+        assert.is_not_nil(dialog.ok_callback)
+
+        local ok_install, err_install = pcall(function()
+            dialog.ok_callback()
+        end)
+        assert.is_true(ok_install, err_install)
+        assert.are.same({
+            version = "v1.2.3",
+            asset_name = "grimmlink.koplugin.zip",
+            size = 16384,
+            prerelease = false,
+            download_url = "https://example.invalid/grimmlink.koplugin.zip",
+        }, install_target)
     end)
 end)

@@ -1135,6 +1135,37 @@ function Database:getShelfSyncEntry(book_id)
     end)
 end
 
+function Database:getShelfSyncEntryByLocalPath(local_path)
+    local stmt = self.conn:prepare([[
+        SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
+               remote_format, remote_file_size_kb, local_path,
+               downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink
+        FROM shelf_sync_map
+        WHERE local_path = ?
+        ORDER BY id DESC
+        LIMIT 1
+    ]])
+    if not stmt then return nil end
+    stmt:bind(tostring(local_path))
+
+    return firstRow(stmt, function(row)
+        return {
+            id = tonumber(row[1]),
+            book_id = tonumber(row[2]),
+            shelf_id = tonumber(row[3]),
+            remote_filename = row[4] and tostring(row[4]) or nil,
+            remote_title = row[5] and tostring(row[5]) or nil,
+            remote_author = row[6] and tostring(row[6]) or nil,
+            remote_format = row[7] and tostring(row[7]) or nil,
+            remote_file_size_kb = row[8] and tonumber(row[8]) or nil,
+            local_path = row[9] and tostring(row[9]) or nil,
+            downloaded_at = row[10] and tonumber(row[10]) or nil,
+            last_seen_in_shelf_at = row[11] and tonumber(row[11]) or nil,
+            downloaded_by_grimmlink = row[12] and tonumber(row[12]) or 1,
+        }
+    end)
+end
+
 function Database:upsertShelfSyncEntry(entry)
     local stmt = self.conn:prepare([[
         INSERT INTO shelf_sync_map (
