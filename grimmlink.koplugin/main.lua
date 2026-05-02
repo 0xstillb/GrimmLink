@@ -976,12 +976,18 @@ function Grimmlink:getCurrentProgressSnapshot(file_hash, file_path, book_id)
     local document = self.ui and self.ui.document or nil
 
     if document then
-        raw_location = safeMethodCall(document, "getCurrentPos")
-        if raw_location == nil then
-            raw_location = safeMethodCall(document, "getCurrentLocation")
-        end
-        if raw_location == nil then
-            raw_location = safeMethodCall(document, "getXPointer")
+        -- Prefer XPointer for EPUB (needed for CFI conversion); fall back to numeric pos
+        local xpointer = safeMethodCall(document, "getXPointer")
+        if xpointer and tostring(xpointer):sub(1, 1) == "/" then
+            raw_location = xpointer
+        else
+            raw_location = safeMethodCall(document, "getCurrentPos")
+            if raw_location == nil then
+                raw_location = safeMethodCall(document, "getCurrentLocation")
+            end
+            if raw_location == nil then
+                raw_location = xpointer
+            end
         end
     end
 
