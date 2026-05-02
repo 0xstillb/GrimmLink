@@ -6,7 +6,7 @@ local logger = require("logger")
 local unpackValues = table.unpack or unpack
 
 local APIClient = {
-    timeout = 10,
+    timeout = 25,
     secure_logs = false,
 }
 
