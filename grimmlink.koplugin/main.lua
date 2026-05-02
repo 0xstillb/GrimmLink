@@ -1560,16 +1560,13 @@ function Grimmlink:isRemoteProgressApplied(remote_snapshot)
 end
 
 function Grimmlink:requestReaderRefresh()
+    -- KOReader handles its own repaint after GotoXPointer/GotoPage events.
+    -- Calling internal rendering methods (redrawCurrentView, updatePos,
+    -- updatePageInfo) directly from a plugin can trigger C-level crashes
+    -- (SIGSEGV) when the document is mid-navigation. Only schedule a soft
+    -- setDirty hint; do not poke the rendering pipeline directly.
     if UIManager and type(UIManager.setDirty) == "function" then
-        UIManager:setDirty(nil, "all")
-    end
-
-    safeMethodCall(self.ui and self.ui.rolling, "redrawCurrentView")
-    safeMethodCall(self.ui and self.ui.rolling, "updatePos")
-    safeMethodCall(self.ui and self.ui.paging, "updatePageInfo")
-
-    if Event and self.ui and type(self.ui.handleEvent) == "function" and type(Event.new) == "function" then
-        pcall(self.ui.handleEvent, self.ui, Event:new("UpdatePos"))
+        pcall(UIManager.setDirty, UIManager, nil, "ui")
     end
 end
 
@@ -1587,22 +1584,24 @@ end
 
 function Grimmlink:applyAndFinalizeRemoteProgress(file_hash, remote_snapshot, success_message, failure_message, success_action, failure_action)
     self:runAfterUiSettles(function()
-        local jumped = self:applyRemoteProgress(remote_snapshot)
-        if jumped then
-            self:finalizeRemoteJump(
-                file_hash,
-                remote_snapshot,
-                success_message,
-                failure_message,
-                success_action,
-                failure_action
-            )
-        else
-            if failure_action then
-                failure_action(remote_snapshot)
+        self:invokeSafely("apply remote progress", function()
+            local jumped = self:applyRemoteProgress(remote_snapshot)
+            if jumped then
+                self:finalizeRemoteJump(
+                    file_hash,
+                    remote_snapshot,
+                    success_message,
+                    failure_message,
+                    success_action,
+                    failure_action
+                )
+            else
+                if failure_action then
+                    failure_action(remote_snapshot)
+                end
+                self:showMessage(failure_message, 4)
             end
-            self:showMessage(failure_message, 4)
-        end
+        end)
     end)
 end
 
@@ -1634,9 +1633,11 @@ function Grimmlink:finalizeRemoteJump(file_hash, remote_snapshot, success_messag
 
     self:requestReaderRefresh()
     if UIManager and type(UIManager.scheduleIn) == "function" then
-        UIManager:scheduleIn(0.2, verify)
+        UIManager:scheduleIn(0.2, function()
+            self:invokeSafely("finalize jump verify", verify)
+        end)
     else
-        verify()
+        self:invokeSafely("finalize jump verify", verify)
     end
 end
 
@@ -1681,28 +1682,34 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
                 {
                     text = _("Use Local"),
                     callback = function()
-                        self:endConflictDialog()
-                        UIManager:close(dialog)
-                        self:logInfo("GrimmLink conflict decision: Use Local")
-                        self:resolveLocalChoice(file_hash, local_snapshot, true)
+                        self:invokeSafely("conflict use-local", function()
+                            self:endConflictDialog()
+                            UIManager:close(dialog)
+                            self:logInfo("GrimmLink conflict decision: Use Local")
+                            self:resolveLocalChoice(file_hash, local_snapshot, true)
+                        end)
                     end,
                 },
                 {
                     text = _("Use Remote"),
                     callback = function()
-                        self:endConflictDialog()
-                        UIManager:close(dialog)
-                        self:logInfo("GrimmLink conflict decision: Use Remote")
-                        self:resolveRemoteChoice(file_hash, remote_snapshot)
+                        self:invokeSafely("conflict use-remote", function()
+                            self:endConflictDialog()
+                            UIManager:close(dialog)
+                            self:logInfo("GrimmLink conflict decision: Use Remote")
+                            self:resolveRemoteChoice(file_hash, remote_snapshot)
+                        end)
                     end,
                 },
                 {
                     text = _("Ignore"),
                     callback = function()
-                        self:endConflictDialog()
-                        UIManager:close(dialog)
-                        self:logInfo("GrimmLink conflict decision: Ignore")
-                        self:rememberRemoteSnapshot(file_hash, remote_snapshot, mode == "remote_newer" and "remote-ignored" or "conflict-ignored")
+                        self:invokeSafely("conflict ignore", function()
+                            self:endConflictDialog()
+                            UIManager:close(dialog)
+                            self:logInfo("GrimmLink conflict decision: Ignore")
+                            self:rememberRemoteSnapshot(file_hash, remote_snapshot, mode == "remote_newer" and "remote-ignored" or "conflict-ignored")
+                        end)
                     end,
                 },
             },
@@ -2112,48 +2119,54 @@ function Grimmlink:showWebBridgeConflictDialog(file_hash, local_snapshot, remote
                 {
                     text = _("Use KOReader"),
                     callback = function()
-                        self:endConflictDialog()
-                        UIManager:close(dialog)
-                        local result = self:pushWebReaderBridgeSnapshot(local_snapshot, {
-                            reason = mode == "remote_newer" and "web-bridge-use-local-remote-newer" or "web-bridge-use-local-conflict",
-                            force = true,
-                        })
-                        if result.ok then
-                            self:showMessage(_("Updated Web Reader progress from KOReader"), 3)
-                        elseif result.conflict then
-                            self:showMessage(_("Web Reader changed again; keeping the remote position."), 4)
-                        else
-                            self:showMessage(_("Web Reader bridge push failed, but KOReader reading continues normally."), 4)
-                        end
+                        self:invokeSafely("web-bridge use-koreader", function()
+                            self:endConflictDialog()
+                            UIManager:close(dialog)
+                            local result = self:pushWebReaderBridgeSnapshot(local_snapshot, {
+                                reason = mode == "remote_newer" and "web-bridge-use-local-remote-newer" or "web-bridge-use-local-conflict",
+                                force = true,
+                            })
+                            if result.ok then
+                                self:showMessage(_("Updated Web Reader progress from KOReader"), 3)
+                            elseif result.conflict then
+                                self:showMessage(_("Web Reader changed again; keeping the remote position."), 4)
+                            else
+                                self:showMessage(_("Web Reader bridge push failed, but KOReader reading continues normally."), 4)
+                            end
+                        end)
                     end,
                 },
                 {
                     text = _("Use Web Reader"),
                     callback = function()
-                        self:endConflictDialog()
-                        UIManager:close(dialog)
-                        self:applyAndFinalizeRemoteProgress(
-                            file_hash,
-                            remote_snapshot,
-                            _("Jumped to Web Reader progress"),
-                            _("Web Reader progress found, but a safe jump was not possible"),
-                            function(applied_snapshot)
-                                self:rememberLocalWebBridgeSnapshot(file_hash, applied_snapshot, "web-bridge-use-remote")
-                                self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-use-remote")
-                            end,
-                            function(failed_snapshot)
-                                self:rememberRemoteWebBridgeSnapshot(file_hash, failed_snapshot, "web-bridge-remote-jump-unsafe")
-                            end
-                        )
+                        self:invokeSafely("web-bridge use-web", function()
+                            self:endConflictDialog()
+                            UIManager:close(dialog)
+                            self:applyAndFinalizeRemoteProgress(
+                                file_hash,
+                                remote_snapshot,
+                                _("Jumped to Web Reader progress"),
+                                _("Web Reader progress found, but a safe jump was not possible"),
+                                function(applied_snapshot)
+                                    self:rememberLocalWebBridgeSnapshot(file_hash, applied_snapshot, "web-bridge-use-remote")
+                                    self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-use-remote")
+                                end,
+                                function(failed_snapshot)
+                                    self:rememberRemoteWebBridgeSnapshot(file_hash, failed_snapshot, "web-bridge-remote-jump-unsafe")
+                                end
+                            )
+                        end)
                     end,
                 },
                 {
                     text = _("Ignore"),
                     callback = function()
-                        self:endConflictDialog()
-                        UIManager:close(dialog)
-                        self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot,
-                            mode == "remote_newer" and "web-bridge-remote-ignored" or "web-bridge-conflict-ignored")
+                        self:invokeSafely("web-bridge ignore", function()
+                            self:endConflictDialog()
+                            UIManager:close(dialog)
+                            self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot,
+                                mode == "remote_newer" and "web-bridge-remote-ignored" or "web-bridge-conflict-ignored")
+                        end)
                     end,
                 },
             },
