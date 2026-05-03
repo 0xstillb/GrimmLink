@@ -2359,6 +2359,10 @@ function Grimmlink:startSession()
     -- causes a native crash, especially on EPUB/CRE documents.
     local defer = UIManager and type(UIManager.scheduleIn) == "function"
     local function doNetworkSync()
+        -- Guard: skip if user switched books before the deferred sync fired
+        if not self.current_session or self.current_session.file_hash ~= file_hash then
+            return
+        end
         self:invokeSafely("session open sync", function()
             self:maybePullRemoteProgress(file_hash, file_path, book_id)
             self:maybePullWebReaderProgress(file_hash, file_path, book_id, true)
