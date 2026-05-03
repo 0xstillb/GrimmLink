@@ -2467,25 +2467,45 @@ function Grimmlink:syncPendingSessions(silent)
         return synced, failed
     end
 
+    -- Resolve bookId for sessions that are missing it.
+    -- hash_resolved[h] = bookId (integer) if found, false if definitively 404.
+    -- At most one API call per unique hash to avoid N calls for N queued sessions.
+    local hash_resolved = {}
+    local hash_not_found = {}
+
     for _, session in ipairs(pending) do
         if not session.bookId and session.bookHash and session.bookHash ~= "" then
-            local cached = self.db:getBookByHash(session.bookHash)
-            if cached and cached.book_id then
-                session.bookId = cached.book_id
-                self.db:updatePendingSessionBookId(session.id, cached.book_id)
-            else
-                local state = self.db:getProgressState(session.bookHash)
-                local by_path = state and state.file_path and self:resolveBookByFilePath(state.file_path) or nil
-                if by_path and by_path.book_id then
-                    session.bookId = tonumber(by_path.book_id)
-                    self.db:updateBookId(session.bookHash, session.bookId)
-                    self.db:updatePendingSessionBookId(session.id, session.bookId)
+            local h = session.bookHash
+            if hash_resolved[h] then
+                session.bookId = hash_resolved[h]
+                self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
+            elseif hash_resolved[h] == nil and not hash_not_found[h] then
+                local cached = self.db:getBookByHash(h)
+                if cached and cached.book_id then
+                    hash_resolved[h] = cached.book_id
+                    session.bookId = cached.book_id
+                    self.db:updatePendingSessionBookId(session.id, cached.book_id)
                 else
-                    local ok_lookup, book = self.api:getBookByHash(session.bookHash)
-                    if ok_lookup and book and book.id then
-                        session.bookId = tonumber(book.id)
-                        self.db:updateBookId(session.bookHash, session.bookId)
-                        self.db:updatePendingSessionBookId(session.id, session.bookId)
+                    local state = self.db:getProgressState(h)
+                    local by_path = state and state.file_path and self:resolveBookByFilePath(state.file_path) or nil
+                    if by_path and by_path.book_id then
+                        hash_resolved[h] = tonumber(by_path.book_id)
+                        session.bookId = hash_resolved[h]
+                        self.db:updateBookId(h, hash_resolved[h])
+                        self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
+                    else
+                        local ok_lookup, book, lookup_code = self.api:getBookByHash(h)
+                        if ok_lookup and book and book.id then
+                            hash_resolved[h] = tonumber(book.id)
+                            session.bookId = hash_resolved[h]
+                            self.db:updateBookId(h, hash_resolved[h])
+                            self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
+                        elseif lookup_code == 404 then
+                            hash_not_found[h] = true
+                            hash_resolved[h] = false
+                        else
+                            hash_resolved[h] = false
+                        end
                     end
                 end
             end
@@ -2495,7 +2515,12 @@ function Grimmlink:syncPendingSessions(silent)
     local groups = {}
     for _, session in ipairs(pending) do
         if not session.bookId then
-            self.db:incrementSessionRetryCount(session.id)
+            if hash_not_found[session.bookHash] then
+                self.db:deletePendingSession(session.id)
+                logger.warn("GrimmLink: dropped session for hash not in Grimmory:", session.bookHash)
+            else
+                self.db:incrementSessionRetryCount(session.id)
+            end
             failed = failed + 1
         else
             local group_key = table.concat({

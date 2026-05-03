@@ -228,7 +228,7 @@ function APIClient:getBookByHash(book_hash)
     if success and type(response) == "table" then
         return true, response
     end
-    return false, response or ("HTTP " .. tostring(code or "?"))
+    return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
 function APIClient:getProgress(book_hash)
