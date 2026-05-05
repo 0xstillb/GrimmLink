@@ -82,7 +82,7 @@ local DEFAULTS = {
     update_repo = "0xstillb/grimmlink",
     allow_prerelease_updates = false,
     -- Web Reader Bridge (Prompt 8)
-    web_reader_bridge_enabled = true,
+    web_reader_bridge_enabled = false,
     cfi_conversion_enabled = false,
 }
 
@@ -344,6 +344,369 @@ function Grimmlink:showRecentLogLines()
     }, "\n"), 10)
 end
 
+function Grimmlink:safeDbCall(method_name, fallback, ...)
+    if not self.db or type(self.db[method_name]) ~= "function" then
+        return fallback
+    end
+
+    local ok, result = pcall(self.db[method_name], self.db, ...)
+    if not ok then
+        return fallback
+    end
+
+    return result
+end
+
+function Grimmlink:formatDebugFields(fields, preferred_order)
+    if type(fields) ~= "table" then
+        return ""
+    end
+
+    local order = preferred_order or {
+        "bookId",
+        "bookFileId",
+        "bookHash",
+        "fileFormat",
+        "source",
+        "direction",
+        "currentPage",
+        "totalPages",
+        "percent",
+        "koreaderRawProgress",
+        "koreaderRawLocation",
+        "koreaderRawXPointer",
+        "epubCfi",
+        "positionHref",
+        "conversionStatus",
+        "conversionConfidence",
+        "apiStatus",
+        "apiErrorClass",
+        "retryCount",
+        "reason",
+        "action",
+    }
+
+    local seen = {}
+    local parts = {}
+
+    local function add_field(key)
+        local value = fields[key]
+        if value == nil or value == "" then
+            return
+        end
+        seen[key] = true
+        parts[#parts + 1] = key .. "=" .. tostring(value)
+    end
+
+    for _, key in ipairs(order) do
+        add_field(key)
+    end
+
+    for key, _ in pairs(fields) do
+        if not seen[key] then
+            add_field(key)
+        end
+    end
+
+    return table.concat(parts, " ")
+end
+
+function Grimmlink:classifyApiOutcome(code, response)
+    local numeric_code = tonumber(code)
+    local response_text = tostring(response or "")
+
+    if numeric_code == nil then
+        local lowered = response_text:lower()
+        if lowered:find("timeout", 1, true) then
+            return "timeout", "transient_timeout"
+        end
+        if lowered:find("connection", 1, true) or lowered:find("offline", 1, true) then
+            return "offline", "transient_network"
+        end
+        return "error", "unknown"
+    end
+
+    if numeric_code == 404 then
+        return "http_404", "permanent_not_found"
+    end
+    if numeric_code == 400 then
+        return "http_400", "permanent_bad_request"
+    end
+    if numeric_code == 401 or numeric_code == 403 then
+        return "http_" .. tostring(numeric_code), "permanent_auth"
+    end
+    if numeric_code == 408 then
+        return "http_408", "transient_timeout"
+    end
+    if numeric_code == 429 then
+        return "http_429", "transient_rate_limited"
+    end
+    if numeric_code >= 500 then
+        return "http_" .. tostring(numeric_code), "transient_server"
+    end
+
+    return "http_" .. tostring(numeric_code), "unknown"
+end
+
+function Grimmlink:buildProgressDebugFields(snapshot, extra)
+    snapshot = type(snapshot) == "table" and snapshot or {}
+    extra = type(extra) == "table" and extra or {}
+
+    return {
+        bookId = extra.bookId or snapshot.bookId,
+        bookFileId = extra.bookFileId or snapshot.bookFileId,
+        bookHash = snapshot.bookHash or extra.bookHash,
+        fileFormat = snapshot.fileFormat or extra.fileFormat,
+        source = extra.source or snapshot.source or "koreader",
+        direction = extra.direction,
+        currentPage = snapshot.currentPage or extra.currentPage,
+        totalPages = snapshot.totalPages or extra.totalPages,
+        percent = snapshot.percentage or snapshot.percent or extra.percent,
+        koreaderRawProgress = snapshot.rawKoreaderProgress or snapshot.progress or extra.koreaderRawProgress,
+        koreaderRawLocation = snapshot.rawKoreaderLocation or snapshot.location or extra.koreaderRawLocation,
+        koreaderRawXPointer = snapshot.rawKoreaderXPointer or extra.koreaderRawXPointer,
+        epubCfi = snapshot.epubCfi or extra.epubCfi,
+        positionHref = snapshot.positionHref or snapshot.href or extra.positionHref,
+        conversionStatus = snapshot.conversionStatus or extra.conversionStatus,
+        conversionConfidence = snapshot.conversionConfidence or extra.conversionConfidence,
+        apiStatus = extra.apiStatus,
+        apiErrorClass = extra.apiErrorClass,
+        retryCount = extra.retryCount,
+        reason = extra.reason,
+        action = extra.action,
+    }
+end
+
+function Grimmlink:logProgressEvent(level, action, fields)
+    local message = self:formatDebugFields(fields)
+    if message == "" then
+        self:log(level or "info", "GrimmLink", action)
+    else
+        self:log(level or "info", "GrimmLink", action, message)
+    end
+end
+
+function Grimmlink:recordNotFoundHash(entry)
+    if not self.db or type(self.db.upsertNotFoundHash) ~= "function" then
+        return false
+    end
+
+    entry = entry or {}
+    local file_hash = entry.file_hash and tostring(entry.file_hash) or nil
+    self._not_found_hashes = self._not_found_hashes or {}
+    self._not_found_logged = self._not_found_logged or {}
+
+    if file_hash and file_hash ~= "" then
+        self._not_found_hashes[file_hash] = true
+    end
+
+    local ok = self.db:upsertNotFoundHash(entry)
+    if file_hash and file_hash ~= "" and type(self.db.deletePendingProgressByHash) == "function" then
+        self.db:deletePendingProgressByHash(file_hash)
+    end
+
+    if file_hash and file_hash ~= "" and not self._not_found_logged[file_hash] then
+        self._not_found_logged[file_hash] = true
+        logger.warn("GrimmLink: hash not in Grimmory, sync disabled for this book")
+    end
+
+    return ok
+end
+
+function Grimmlink:isHashMarkedNotFound(file_hash)
+    if not file_hash or file_hash == "" then
+        return false
+    end
+
+    self._not_found_hashes = self._not_found_hashes or {}
+    if self._not_found_hashes[file_hash] then
+        return true
+    end
+
+    if self.db and type(self.db.hasNotFoundHash) == "function" then
+        local ok, result = pcall(self.db.hasNotFoundHash, self.db, file_hash)
+        if ok and result then
+            self._not_found_hashes[file_hash] = true
+            return true
+        end
+    end
+
+    return false
+end
+
+function Grimmlink:hasMatchedCurrentDocument()
+    if not self.db or not self.ui or not self.ui.document or not self.ui.document.file then
+        return false
+    end
+
+    local file_path = tostring(self.ui.document.file)
+    local cached = self:resolveBookByFilePath(file_path)
+    if cached and cached.book_id then
+        return true
+    end
+
+    if type(self.db.getShelfSyncEntryByLocalPath) == "function" then
+        local shelf_entry = self.db:getShelfSyncEntryByLocalPath(file_path)
+        return shelf_entry ~= nil and shelf_entry.book_id ~= nil
+    end
+
+    return false
+end
+
+function Grimmlink:buildDebugSummaryLines(sample_limit)
+    local limit = tonumber(sample_limit) or 3
+    local cache_stats = self:safeDbCall("getBookCacheStats", { total = 0, matched = 0, unmatched = 0 })
+    local shelf_stats = self:safeDbCall("getShelfSyncStats", { total = 0 })
+    local pending_progress = self:safeDbCall("getPendingProgressCount", 0)
+    local pending_sessions = self:safeDbCall("getPendingSessionCount", 0)
+    local pending_annotations = self:safeDbCall("getPendingAnnotationCount", 0)
+    local not_found_count = self:safeDbCall("getNotFoundHashCount", 0)
+    local stale_count = self:safeDbCall("getStaleCacheCount", 0)
+    local not_found_items = self:safeDbCall("getNotFoundHashes", {}, limit) or {}
+    local stale_items = self:safeDbCall("getStaleCacheEntries", {}, limit) or {}
+
+    local lines = {
+        T(_("Books cached: total=%1 matched=%2 unmatched=%3"),
+            cache_stats.total or 0, cache_stats.matched or 0, cache_stats.unmatched or 0),
+        T(_("Shelf cache entries: %1"), shelf_stats.total or 0),
+        T(_("Pending queues: progress=%1 sessions=%2 annotations=%3"),
+            pending_progress or 0, pending_sessions or 0, pending_annotations or 0),
+        T(_("Stale cache entries: %1"), stale_count or 0),
+        T(_("Not found hashes: %1"), not_found_count or 0),
+        T(_("Non-shelf cached books: %1"), math.max((cache_stats.total or 0) - (shelf_stats.total or 0), 0)),
+    }
+
+    if #stale_items > 0 then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = _("Recent stale cache rows:")
+        for index, entry in ipairs(stale_items) do
+            lines[#lines + 1] = T(_("- %1 id=%2 hash=%3 path=%4"),
+                tostring(entry.table_name or "?"),
+                tostring(entry.id or "?"),
+                entry.file_hash or "-",
+                entry.file_path or "-")
+        end
+    end
+
+    if #not_found_items > 0 then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = _("Recent not found hashes:")
+        for index, entry in ipairs(not_found_items) do
+            lines[#lines + 1] = T(_("- %1 book=%2 format=%3 source=%4 reason=%5"),
+                entry.file_hash or "-",
+                entry.book_id and tostring(entry.book_id) or "-",
+                entry.file_format or "-",
+                entry.source or "-",
+                entry.reason or "-")
+        end
+    end
+
+    return lines
+end
+
+function Grimmlink:showDetailedCacheStats()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
+    self:showMessage(table.concat({
+        _("GrimmLink debug status"),
+        table.concat(self:buildDebugSummaryLines(3), "\n"),
+    }, "\n"), 8)
+end
+
+function Grimmlink:showLocalDbSummary()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
+    self:showMessage(table.concat({
+        _("GrimmLink local DB summary"),
+        table.concat(self:buildDebugSummaryLines(5), "\n"),
+    }, "\n"), 10)
+end
+
+function Grimmlink:clearPendingProgressQueue()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
+    local count = self:safeDbCall("getPendingProgressCount", 0)
+    local ok = self:safeDbCall("deleteAllPendingProgress", false)
+    if ok then
+        self:showMessage(T(_("Cleared %1 pending progress entries."), count or 0), 3)
+    else
+        self:showMessage(_("Failed to clear pending progress entries."), 4)
+    end
+end
+
+function Grimmlink:clearStaleCacheEntries()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
+    local stale_count = self:safeDbCall("getStaleCacheCount", 0)
+    local deleted = self:safeDbCall("clearStaleCache", nil)
+    if type(deleted) == "table" then
+        self:showMessage(table.concat({
+            _("Cleared stale cache entries."),
+            T(_("book_cache=%1 progress_state=%2 web_bridge_state=%3"),
+                deleted.book_cache or 0,
+                deleted.progress_state or 0,
+                deleted.web_bridge_state or 0),
+        }, "\n"), 4)
+    elseif deleted then
+        self:showMessage(T(_("Cleared %1 stale cache entries."), stale_count or 0), 4)
+    else
+        self:showMessage(_("Failed to clear stale cache entries."), 4)
+    end
+end
+
+function Grimmlink:clearNotFoundHashes()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
+    local count = self:safeDbCall("getNotFoundHashCount", 0)
+    local ok = self:safeDbCall("clearNotFoundHashes", false)
+    if ok then
+        self:showMessage(T(_("Cleared %1 not found hashes."), count or 0), 3)
+    else
+        self:showMessage(_("Failed to clear not found hashes."), 4)
+    end
+end
+
+function Grimmlink:exportDebugLog()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
+    local export_path = DataStorage:getDataDir() .. string.format("/grimmlink-debug-%s.txt", os.date("!%Y%m%d-%H%M%SZ"))
+    local file = io.open(export_path, "w")
+    if not file then
+        self:showMessage(_("Failed to create debug export file."), 4)
+        return
+    end
+
+    local summary_lines = self:buildDebugSummaryLines(5)
+    file:write("[GrimmLink Debug Export]\n")
+    file:write("Generated: " .. os.date("!%Y-%m-%dT%H:%M:%SZ") .. "\n\n")
+    file:write("Summary:\n")
+    file:write(table.concat(summary_lines, "\n"))
+    file:write("\n\nRecent log lines:\n")
+
+    local log_lines = self:readRecentLogLines(200) or {}
+    if #log_lines > 0 then
+        file:write(table.concat(log_lines, "\n"))
+        file:write("\n")
+    else
+        file:write("(no log lines available)\n")
+    end
+
+    file:close()
+    self:showMessage(T(_("Debug export written to:\n%1"), export_path), 5)
+end
+
 function Grimmlink:isReady(require_api)
     if not self or not self._initialized or not self.db then
         return false
@@ -355,7 +718,7 @@ function Grimmlink:isReady(require_api)
 end
 
 function Grimmlink:isWebReaderSyncEnabled()
-    return self.enabled == true
+    return self.enabled == true and self.web_reader_bridge_enabled == true
 end
 
 function Grimmlink:requireReady(opts)
@@ -530,11 +893,7 @@ function Grimmlink:init()
         rating_sync_enabled = self.rating_sync_enabled,
     })
 
-    local legacy_web_reader_bridge_enabled = self.db:getPluginSetting("web_reader_bridge_enabled")
-    if legacy_web_reader_bridge_enabled ~= nil then
-        self.db:savePluginSetting("web_reader_bridge_enabled", nil)
-    end
-    self.web_reader_bridge_enabled = nil
+    self.web_reader_bridge_enabled = self:readSetting("web_reader_bridge_enabled", DEFAULTS.web_reader_bridge_enabled)
     self.cfi_conversion_enabled = self:readSetting("cfi_conversion_enabled", DEFAULTS.cfi_conversion_enabled)
     self.last_web_bridge_result = nil
 
@@ -1070,6 +1429,7 @@ function Grimmlink:normalizeWebBridgeProgress(remote_progress)
     end
 
     local normalized = self:normalizeRemoteProgress(remote_progress) or cloneTable(remote_progress)
+    normalized.bookFileId = maybeNumber(remote_progress.bookFileId)
     normalized.epubCfi = remote_progress.epubCfi
     normalized.positionHref = remote_progress.positionHref
     normalized.contentSourceProgressPercent = normalizePercent(remote_progress.contentSourceProgressPercent)
@@ -1648,6 +2008,14 @@ function Grimmlink:resolveRemoteChoice(file_hash, remote_snapshot)
         _("Jumped to remote progress"),
         _("Remote progress found, but safe jump was not possible"),
         function(applied_snapshot)
+            self:logProgressEvent("info", "remote progress applied", self:buildProgressDebugFields(applied_snapshot, {
+                bookHash = file_hash,
+                source = "koreader",
+                direction = "pull",
+                apiStatus = "ok",
+                apiErrorClass = "none",
+                action = "remote_newer",
+            }))
             self:rememberLocalSnapshot(file_hash, applied_snapshot, "conflict-use-remote")
         end,
         function(failed_snapshot)
@@ -1739,6 +2107,9 @@ function Grimmlink:queueProgressSnapshot(snapshot)
     if not self.offline_queue_enabled or not snapshot or not snapshot.bookHash then
         return false
     end
+    if self:isHashMarkedNotFound(snapshot.bookHash) then
+        return false
+    end
 
     local ok, encoded = pcall(json.encode, self:prepareProgressPayload(snapshot))
     if not ok then
@@ -1746,6 +2117,12 @@ function Grimmlink:queueProgressSnapshot(snapshot)
         return false
     end
     self.db:upsertPendingProgress(snapshot.bookHash, encoded)
+    self:logProgressEvent("info", "progress queued", self:buildProgressDebugFields(snapshot, {
+        direction = "push",
+        source = "koreader",
+        apiStatus = "queued",
+        apiErrorClass = "offline_queue",
+    }))
     self:logInfo("GrimmLink queued progress for hash", snapshot.bookHash)
     return true
 end
@@ -1754,10 +2131,20 @@ function Grimmlink:pushProgressSnapshot(snapshot, reason, silent)
     if not snapshot or not snapshot.bookHash then
         return false
     end
+    if self:isHashMarkedNotFound(snapshot.bookHash) then
+        return false
+    end
 
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
 
     if not self:isOnline() then
+        self:logProgressEvent("warn", "progress push offline", self:buildProgressDebugFields(snapshot, {
+            direction = "push",
+            source = "koreader",
+            apiStatus = "offline",
+            apiErrorClass = "transient_network",
+            reason = "offline",
+        }))
         self:queueProgressSnapshot(snapshot)
         if not silent then
             self:showMessage(_("Saved progress to offline queue"), 2)
@@ -1765,17 +2152,44 @@ function Grimmlink:pushProgressSnapshot(snapshot, reason, silent)
         return false
     end
 
-    local success, response = self.api:updateProgress(self:prepareProgressPayload(snapshot))
+    local success, response, code = self.api:updateProgress(self:prepareProgressPayload(snapshot))
     if success then
         self:rememberLocalSnapshot(snapshot.bookHash, snapshot, reason or "progress-push")
         self:rememberRemoteSnapshot(snapshot.bookHash, snapshot, reason or "progress-push")
         self.db:setProgressLastAction(snapshot.bookHash, reason or "progress-push")
+        self:logProgressEvent("info", "progress push ok", self:buildProgressDebugFields(snapshot, {
+            direction = "push",
+            source = "koreader",
+            apiStatus = "ok",
+            apiErrorClass = "none",
+            action = reason or "progress-push",
+        }))
         self:logInfo("GrimmLink pushed progress for hash", snapshot.bookHash)
         return true
     end
 
+    local api_status, api_error_class = self:classifyApiOutcome(code, response)
+    self:logProgressEvent("warn", "progress push failed", self:buildProgressDebugFields(snapshot, {
+        direction = "push",
+        source = "koreader",
+        apiStatus = api_status,
+        apiErrorClass = api_error_class,
+        reason = safeToString(response),
+        action = reason or "progress-push",
+    }))
     self:logWarn("GrimmLink progress push failed:", response)
-    self:queueProgressSnapshot(snapshot)
+    if api_error_class == "permanent_not_found" then
+        self:recordNotFoundHash({
+            file_hash = snapshot.bookHash,
+            book_id = snapshot.bookId,
+            file_path = snapshot.file_path,
+            file_format = snapshot.fileFormat,
+            source = "koreader",
+            reason = safeToString(response),
+        })
+    else
+        self:queueProgressSnapshot(snapshot)
+    end
     if not silent then
         self:showMessage(T(_("Progress sync failed:\n%1"), safeToString(response)), 4)
     end
@@ -1792,45 +2206,129 @@ function Grimmlink:syncPendingProgress(silent)
 
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
     local pending = self.db:getPendingProgress(100)
+    local retry_cap = 20
+    local base_backoff_seconds = 30
+    local max_backoff_seconds = 60 * 60
+    local now = nowUtc()
+
+    local function retryDelaySeconds(retry_count)
+        local count = tonumber(retry_count) or 0
+        local delay = base_backoff_seconds * (2 ^ math.min(count, 5))
+        if delay > max_backoff_seconds then
+            delay = max_backoff_seconds
+        end
+        return delay
+    end
 
     for _, item in ipairs(pending) do
-        local ok, payload = pcall(json.decode, item.payload_json)
-        if not ok or type(payload) ~= "table" then
+        if self:isHashMarkedNotFound(item.file_hash) then
             self.db:deletePendingProgress(item.id)
+            self:logProgressEvent("warn", "pending progress dropped", self:buildProgressDebugFields({
+                bookHash = item.file_hash,
+            }, {
+                direction = "push",
+                source = "koreader",
+                apiStatus = "http_404",
+                apiErrorClass = "permanent_not_found",
+                retryCount = item.retry_count,
+                reason = "book not found",
+            }))
             failed = failed + 1
+        elseif (tonumber(item.retry_count) or 0) >= retry_cap then
+            self:logProgressEvent("warn", "pending progress retry cap reached", self:buildProgressDebugFields({
+                bookHash = item.file_hash,
+            }, {
+                direction = "push",
+                source = "koreader",
+                apiStatus = "retry_cap",
+                apiErrorClass = "transient_retry_cap",
+                retryCount = item.retry_count,
+            }))
+        elseif item.last_retry_at and (now - tonumber(item.last_retry_at)) < retryDelaySeconds(item.retry_count) then
+            self:logProgressEvent("dbg", "pending progress backoff", self:buildProgressDebugFields({
+                bookHash = item.file_hash,
+            }, {
+                direction = "push",
+                source = "koreader",
+                apiStatus = "backoff",
+                apiErrorClass = "transient_backoff",
+                retryCount = item.retry_count,
+            }))
         else
-            local success = self.api:updateProgress(payload)
-            if success then
+            local ok, payload = pcall(json.decode, item.payload_json)
+            if ok and type(payload) == "table" then
+                self:logProgressEvent("dbg", "pending progress item", self:buildProgressDebugFields(payload, {
+                    direction = "push",
+                    source = "koreader",
+                    apiStatus = "pending",
+                    retryCount = item.retry_count,
+                }))
+            end
+            if not ok or type(payload) ~= "table" then
                 self.db:deletePendingProgress(item.id)
-                self:rememberLocalSnapshot(item.file_hash, {
-                    file_path = nil,
-                    bookId = payload.bookId,
-                    document = payload.document,
-                    fileFormat = payload.fileFormat,
-                    progress = payload.progress,
-                    location = payload.location,
-                    percentage = normalizePercent(payload.percentage),
-                    currentPage = payload.currentPage,
-                    totalPages = payload.totalPages,
-                    timestamp = payload.timestamp or nowUtc(),
-                }, "queued-progress-pushed")
-                self:rememberRemoteSnapshot(item.file_hash, {
-                    bookId = payload.bookId,
-                    document = payload.document,
-                    fileFormat = payload.fileFormat,
-                    progress = payload.progress,
-                    location = payload.location,
-                    percentage = normalizePercent(payload.percentage),
-                    currentPage = payload.currentPage,
-                    totalPages = payload.totalPages,
-                    device = payload.device,
-                    deviceId = payload.deviceId or payload.device_id,
-                    timestamp = payload.timestamp or nowUtc(),
-                }, "queued-progress-pushed")
-                synced = synced + 1
-            else
-                self.db:incrementPendingProgressRetry(item.id)
                 failed = failed + 1
+            else
+                local success, response, code = self.api:updateProgress(payload)
+                if success then
+                    self.db:deletePendingProgress(item.id)
+                    self:rememberLocalSnapshot(item.file_hash, {
+                        file_path = nil,
+                        bookId = payload.bookId,
+                        document = payload.document,
+                        fileFormat = payload.fileFormat,
+                        progress = payload.progress,
+                        location = payload.location,
+                        percentage = normalizePercent(payload.percentage),
+                        currentPage = payload.currentPage,
+                        totalPages = payload.totalPages,
+                        timestamp = payload.timestamp or nowUtc(),
+                    }, "queued-progress-pushed")
+                    self:rememberRemoteSnapshot(item.file_hash, {
+                        bookId = payload.bookId,
+                        document = payload.document,
+                        fileFormat = payload.fileFormat,
+                        progress = payload.progress,
+                        location = payload.location,
+                        percentage = normalizePercent(payload.percentage),
+                        currentPage = payload.currentPage,
+                        totalPages = payload.totalPages,
+                        device = payload.device,
+                        deviceId = payload.deviceId or payload.device_id,
+                        timestamp = payload.timestamp or nowUtc(),
+                    }, "queued-progress-pushed")
+                    self:logProgressEvent("info", "pending progress push ok", self:buildProgressDebugFields(payload, {
+                        direction = "push",
+                        source = "koreader",
+                        apiStatus = "ok",
+                        apiErrorClass = "none",
+                        retryCount = item.retry_count,
+                    }))
+                    synced = synced + 1
+                else
+                    local api_status, api_error_class = self:classifyApiOutcome(code, response)
+                    self:logProgressEvent("warn", "pending progress push failed", self:buildProgressDebugFields(payload, {
+                        direction = "push",
+                        source = "koreader",
+                        apiStatus = api_status,
+                        apiErrorClass = api_error_class,
+                        retryCount = item.retry_count,
+                        reason = safeToString(response),
+                    }))
+                    if api_error_class == "permanent_not_found" then
+                        self.db:deletePendingProgress(item.id)
+                        self:recordNotFoundHash({
+                            file_hash = item.file_hash or payload.bookHash,
+                            book_id = payload.bookId,
+                            file_path = payload.file_path,
+                            file_format = payload.fileFormat,
+                            source = "koreader",
+                            reason = safeToString(response),
+                        })
+                    else
+                        self.db:incrementPendingProgressRetry(item.id)
+                    end
+                    failed = failed + 1
+                end
             end
         end
     end
@@ -1839,6 +2337,14 @@ function Grimmlink:syncPendingProgress(silent)
         self:showMessage(T(_("Pending progress sync\nSynced: %1\nFailed: %2"), synced, failed), 3)
     end
 
+    self:logProgressEvent("info", "pending progress summary", {
+        source = "koreader",
+        direction = "push",
+        apiStatus = "complete",
+        retryCount = failed,
+        reason = T(_("synced=%1 failed=%2"), synced, failed),
+    })
+
     return synced, failed
 end
 
@@ -1846,9 +2352,19 @@ function Grimmlink:resolveBookByHash(file_path, file_hash, silent)
     if not file_hash then
         return nil
     end
+    if self:isHashMarkedNotFound(file_hash) then
+        return nil
+    end
 
     local cached = self.db:getBookByHash(file_hash)
     if cached and cached.book_id then
+        self:logProgressEvent("dbg", "book hash cache hit", {
+            bookId = cached.book_id,
+            bookHash = file_hash,
+            source = "koreader",
+            direction = "pull",
+            apiStatus = "cache",
+        })
         return cached
     end
 
@@ -1858,9 +2374,17 @@ function Grimmlink:resolveBookByHash(file_path, file_hash, silent)
     end
 
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
-    local success, book = self.api:getBookByHash(file_hash)
+    local success, book, code = self.api:getBookByHash(file_hash)
     if success and book and book.id then
         self.db:saveBookCache(file_path, file_hash, tonumber(book.id), book.title, book.author)
+        self:logProgressEvent("info", "book hash matched", {
+            bookId = tonumber(book.id),
+            bookHash = file_hash,
+            source = "koreader",
+            direction = "pull",
+            apiStatus = "ok",
+            apiErrorClass = "none",
+        })
         return {
             file_path = file_path,
             file_hash = file_hash,
@@ -1871,6 +2395,23 @@ function Grimmlink:resolveBookByHash(file_path, file_hash, silent)
     end
 
     self.db:saveBookCache(file_path, file_hash, nil, sanitizeTitle(file_path), nil)
+    local api_status, api_error_class = self:classifyApiOutcome(code, book)
+    self:logProgressEvent("warn", "book hash missing", {
+        bookHash = file_hash,
+        source = "koreader",
+        direction = "pull",
+        apiStatus = api_status,
+        apiErrorClass = api_error_class,
+        reason = safeToString(book),
+    })
+    if api_error_class == "permanent_not_found" then
+        self:recordNotFoundHash({
+            file_hash = file_hash,
+            file_path = file_path,
+            source = "koreader",
+            reason = safeToString(book),
+        })
+    end
     if not silent then
         self:showMessage(_("No Grimmory match found for this book hash"), 4)
     end
@@ -1939,7 +2480,10 @@ function Grimmlink:shouldPushProgress(current_snapshot, state, reason)
 end
 
 function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id)
-    if not self.auto_pull_on_open or not file_hash or file_hash == "" then
+    if not self.auto_pull_on_open or not file_hash or file_hash == "" or not book_id then
+        return
+    end
+    if self:isHashMarkedNotFound(file_hash) then
         return
     end
     if not self:isOnline() then
@@ -1949,8 +2493,33 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id)
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
     local state = self.db:getProgressState(file_hash)
     local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
-    local success, remote = self.api:getProgress(file_hash)
+    self:logProgressEvent("dbg", "progress pull request", self:buildProgressDebugFields(local_snapshot, {
+        bookId = book_id,
+        direction = "pull",
+        source = "koreader",
+        apiStatus = "request",
+    }))
+    local success, remote, code = self.api:getProgress(file_hash)
     if not success then
+        local api_status, api_error_class = self:classifyApiOutcome(code, remote)
+        self:logProgressEvent("warn", "progress pull failed", self:buildProgressDebugFields(local_snapshot, {
+            bookId = book_id,
+            direction = "pull",
+            source = "koreader",
+            apiStatus = api_status,
+            apiErrorClass = api_error_class,
+            reason = safeToString(remote),
+        }))
+        if api_error_class == "permanent_not_found" then
+            self:recordNotFoundHash({
+                file_hash = file_hash,
+                book_id = book_id,
+                file_path = file_path,
+                file_format = local_snapshot and local_snapshot.fileFormat or self:getBookType(file_path),
+                source = "koreader",
+                reason = safeToString(remote),
+            })
+        end
         self:logWarn("GrimmLink remote progress pull failed:", remote)
         self:rememberLocalSnapshot(file_hash, local_snapshot, "open-local")
         return
@@ -1960,10 +2529,18 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id)
     if remote_snapshot then
         remote_snapshot.bookHash = file_hash
         remote_snapshot.bookId = remote_snapshot.bookId or book_id
-        remote_snapshot.fileFormat = remote_snapshot.fileFormat or self:getBookType(file_path)
-        remote_snapshot.document = remote_snapshot.document or file_hash
-        remote_snapshot.file_path = file_path
-    end
+      remote_snapshot.fileFormat = remote_snapshot.fileFormat or self:getBookType(file_path)
+      remote_snapshot.document = remote_snapshot.document or file_hash
+      remote_snapshot.file_path = file_path
+      end
+
+    self:logProgressEvent("info", "progress pull response", self:buildProgressDebugFields(remote_snapshot or remote, {
+        bookId = book_id,
+        direction = "pull",
+        source = "koreader",
+        apiStatus = "ok",
+        apiErrorClass = "none",
+    }))
 
     self:rememberLocalSnapshot(file_hash, local_snapshot, "open-local")
     self:rememberRemoteSnapshot(file_hash, remote_snapshot, "open-remote")
@@ -1972,11 +2549,27 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id)
     self:logInfo("GrimmLink open sync decision:", decision or "nil")
 
     if decision == "local_newer" then
+        self:logProgressEvent("info", "progress pull kept local", self:buildProgressDebugFields(local_snapshot, {
+            bookId = book_id,
+            direction = "pull",
+            source = "koreader",
+            apiStatus = "ok",
+            apiErrorClass = "none",
+            action = "local_newer",
+        }))
         self:pushProgressSnapshot(local_snapshot, "open-local-newer", true)
         return
     end
 
     if decision == "remote_newer" then
+        self:logProgressEvent("info", "progress pull applying remote", self:buildProgressDebugFields(remote_snapshot, {
+            bookId = book_id,
+            direction = "pull",
+            source = "koreader",
+            apiStatus = "ok",
+            apiErrorClass = "none",
+            action = "remote_newer",
+        }))
         self:resolveRemoteChoice(file_hash, remote_snapshot)
         return
     end
@@ -1992,11 +2585,44 @@ function Grimmlink:resolveBridgeConversion(book_id, payload)
     end
 
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
+    self:logProgressEvent("dbg", "bridge conversion request", self:buildProgressDebugFields(payload, {
+        bookId = book_id,
+        bookFileId = payload.bookFileId,
+        bookHash = payload.bookHash,
+        fileFormat = payload.fileFormat,
+        source = "web",
+        direction = "bridge",
+        currentPage = payload.currentPage,
+        totalPages = payload.totalPages,
+        percent = payload.percentage,
+        koreaderRawLocation = payload.rawKoreaderLocation,
+        koreaderRawXPointer = payload.rawKoreaderXPointer,
+        epubCfi = payload.epubCfi,
+    }))
     local success, response = self.api:resolveBridgeCfi(book_id, payload)
     if success and type(response) == "table" then
+        self:logProgressEvent("info", "bridge conversion response", self:buildProgressDebugFields(response, {
+            bookId = book_id,
+            bookFileId = response.bookFileId,
+            bookHash = response.bookHash,
+            fileFormat = response.fileFormat,
+            source = "web",
+            direction = "bridge",
+            apiStatus = "ok",
+            apiErrorClass = "none",
+        }))
         return response
     end
 
+    local api_status, api_error_class = self:classifyApiOutcome(nil, response)
+    self:logProgressEvent("warn", "bridge conversion failed", self:buildProgressDebugFields(payload, {
+        bookId = book_id,
+        source = "web",
+        direction = "bridge",
+        apiStatus = api_status,
+        apiErrorClass = api_error_class,
+        reason = safeToString(response),
+    }))
     self:logWarn("GrimmLink Web Reader bridge conversion failed:", response)
     return nil
 end
@@ -2006,8 +2632,12 @@ function Grimmlink:buildWebBridgePayload(snapshot, bridge_state, force_update)
     local raw_xpointer = self:looksLikeXPointer(snapshot.location) and tostring(snapshot.location)
         or (self:looksLikeXPointer(snapshot.progress) and tostring(snapshot.progress) or nil)
 
-    if self.cfi_conversion_enabled and raw_xpointer and snapshot.bookId then
+    local file_format = snapshot.fileFormat and tostring(snapshot.fileFormat):upper() or nil
+    if self.cfi_conversion_enabled and file_format == "EPUB" and raw_xpointer and snapshot.bookId then
         conversion = self:resolveBridgeConversion(snapshot.bookId, {
+            bookHash = snapshot.bookHash,
+            bookFileId = snapshot.bookFileId,
+            fileFormat = snapshot.fileFormat,
             rawKoreaderLocation = snapshot.location,
             rawKoreaderXPointer = raw_xpointer,
             currentPage = snapshot.currentPage,
@@ -2016,12 +2646,32 @@ function Grimmlink:buildWebBridgePayload(snapshot, bridge_state, force_update)
         })
     end
 
+    self:logProgressEvent("dbg", "bridge payload build", self:buildProgressDebugFields(snapshot, {
+        bookId = snapshot.bookId,
+        source = "web",
+        direction = "bridge",
+        currentPage = snapshot.currentPage,
+        totalPages = snapshot.totalPages,
+        percent = snapshot.percentage,
+        koreaderRawProgress = snapshot.progress,
+        koreaderRawLocation = snapshot.location,
+        koreaderRawXPointer = raw_xpointer,
+        epubCfi = conversion and conversion.epubCfi or nil,
+        positionHref = conversion and conversion.converted and conversion.positionHref or nil,
+        conversionStatus = conversion and conversion.conversionStatus or nil,
+        conversionConfidence = conversion and conversion.conversionConfidence or nil,
+    }))
+
     return {
+        bookId = snapshot.bookId,
+        bookFileId = snapshot.bookFileId,
+        bookHash = snapshot.bookHash,
+        fileFormat = snapshot.fileFormat,
         percentage = snapshot.percentage,
         currentPage = snapshot.currentPage,
         totalPages = snapshot.totalPages,
         epubCfi = conversion and conversion.converted and conversion.epubCfi or nil,
-        positionHref = conversion and conversion.positionHref or nil,
+        positionHref = conversion and conversion.converted and conversion.positionHref or nil,
         contentSourceProgressPercent = conversion and conversion.contentSourceProgressPercent or nil,
         rawKoreaderLocation = snapshot.location,
         rawKoreaderProgress = snapshot.progress,
@@ -2042,6 +2692,14 @@ function Grimmlink:pushWebReaderBridgeSnapshot(snapshot, opts)
     end
 
     if not self:isOnline() then
+        self:logProgressEvent("warn", "web bridge push offline", self:buildProgressDebugFields(snapshot, {
+            bookId = snapshot.bookId,
+            direction = "bridge",
+            source = "web",
+            apiStatus = "offline",
+            apiErrorClass = "transient_network",
+            reason = "offline",
+        }))
         return { ok = false, skipped = true, reason = "offline" }
     end
 
@@ -2049,8 +2707,17 @@ function Grimmlink:pushWebReaderBridgeSnapshot(snapshot, opts)
     local payload, conversion = self:buildWebBridgePayload(snapshot, bridge_state, opts.force)
 
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
-    local success, response = self.api:updateWebProgress(snapshot.bookId, payload)
+    local success, response, code = self.api:updateWebProgress(snapshot.bookId, payload)
     if not success then
+        local api_status, api_error_class = self:classifyApiOutcome(code, response)
+        self:logProgressEvent("warn", "web bridge push failed", self:buildProgressDebugFields(snapshot, {
+            bookId = snapshot.bookId,
+            direction = "bridge",
+            source = "web",
+            apiStatus = api_status,
+            apiErrorClass = api_error_class,
+            reason = safeToString(response),
+        }))
         self.last_web_bridge_result = {
             ok = false,
             reason = tostring(response),
@@ -2069,6 +2736,14 @@ function Grimmlink:pushWebReaderBridgeSnapshot(snapshot, opts)
     end
 
     if response and response.conflictDetected then
+        self:logProgressEvent("warn", "web bridge push conflict", self:buildProgressDebugFields(remote_snapshot or snapshot, {
+            bookId = snapshot.bookId,
+            direction = "bridge",
+            source = "web",
+            apiStatus = "conflict",
+            apiErrorClass = "remote_newer",
+            reason = response.message or "remote_newer",
+        }))
         if remote_snapshot then
             self:rememberRemoteWebBridgeSnapshot(snapshot.bookHash, remote_snapshot, opts.reason or "web-bridge-conflict")
         end
@@ -2092,6 +2767,15 @@ function Grimmlink:pushWebReaderBridgeSnapshot(snapshot, opts)
         self:rememberRemoteWebBridgeSnapshot(snapshot.bookHash, remote_snapshot, opts.reason or "web-bridge-push")
         self.db:setWebBridgeLastAction(snapshot.bookHash, opts.reason or "web-bridge-push")
     end
+    self:logProgressEvent("info", "web bridge push ok", self:buildProgressDebugFields(snapshot, {
+        bookId = snapshot.bookId,
+        direction = "bridge",
+        source = "web",
+        apiStatus = "ok",
+        apiErrorClass = "none",
+        conversionStatus = conversion and conversion.conversionStatus or nil,
+        conversionConfidence = conversion and conversion.conversionConfidence or nil,
+    }))
 
     self.last_web_bridge_result = {
         ok = true,
@@ -2142,17 +2826,25 @@ function Grimmlink:showWebBridgeConflictDialog(file_hash, local_snapshot, remote
                         self:invokeSafely("web-bridge use-web", function()
                             self:endConflictDialog()
                             UIManager:close(dialog)
-                            self:applyAndFinalizeRemoteProgress(
-                                file_hash,
-                                remote_snapshot,
-                                _("Jumped to Web Reader progress"),
-                                _("Web Reader progress found, but a safe jump was not possible"),
-                                function(applied_snapshot)
-                                    self:rememberLocalWebBridgeSnapshot(file_hash, applied_snapshot, "web-bridge-use-remote")
-                                    self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-use-remote")
-                                end,
-                                function(failed_snapshot)
-                                    self:rememberRemoteWebBridgeSnapshot(file_hash, failed_snapshot, "web-bridge-remote-jump-unsafe")
+                              self:applyAndFinalizeRemoteProgress(
+                                  file_hash,
+                                  remote_snapshot,
+                                  _("Jumped to Web Reader progress"),
+                                  _("Web Reader progress found, but a safe jump was not possible"),
+                                  function(applied_snapshot)
+                                      self:logProgressEvent("info", "web bridge progress applied", self:buildProgressDebugFields(applied_snapshot, {
+                                          bookHash = file_hash,
+                                          source = "web",
+                                          direction = "bridge",
+                                          apiStatus = "ok",
+                                          apiErrorClass = "none",
+                                          action = "remote_newer",
+                                      }))
+                                      self:rememberLocalWebBridgeSnapshot(file_hash, applied_snapshot, "web-bridge-use-remote")
+                                      self:rememberRemoteWebBridgeSnapshot(file_hash, remote_snapshot, "web-bridge-use-remote")
+                                  end,
+                                  function(failed_snapshot)
+                                      self:rememberRemoteWebBridgeSnapshot(file_hash, failed_snapshot, "web-bridge-remote-jump-unsafe")
                                 end
                             )
                         end)
@@ -2186,8 +2878,33 @@ function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, sil
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
     local bridge_state = self.db:getWebBridgeState(file_hash)
     local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
-    local success, remote = self.api:getWebProgress(book_id)
+    self:logProgressEvent("dbg", "web bridge pull request", self:buildProgressDebugFields(local_snapshot, {
+        bookId = book_id,
+        direction = "bridge",
+        source = "web",
+        apiStatus = "request",
+    }))
+    local success, remote, code = self.api:getWebProgress(book_id)
     if not success then
+        local api_status, api_error_class = self:classifyApiOutcome(code, remote)
+        self:logProgressEvent("warn", "web bridge pull failed", self:buildProgressDebugFields(local_snapshot, {
+            bookId = book_id,
+            direction = "bridge",
+            source = "web",
+            apiStatus = api_status,
+            apiErrorClass = api_error_class,
+            reason = safeToString(remote),
+        }))
+        if api_error_class == "permanent_not_found" then
+            self:recordNotFoundHash({
+                file_hash = file_hash,
+                book_id = book_id,
+                file_path = file_path,
+                file_format = local_snapshot and local_snapshot.fileFormat or self:getBookType(file_path),
+                source = "web",
+                reason = safeToString(remote),
+            })
+        end
         self:logWarn("GrimmLink Web Reader bridge pull failed:", remote)
         self:rememberLocalWebBridgeSnapshot(file_hash, local_snapshot, "web-bridge-open-local")
         return { decision = "error", reason = remote }
@@ -2201,6 +2918,14 @@ function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, sil
         remote_snapshot.document = file_hash
         remote_snapshot.file_path = file_path
     end
+
+    self:logProgressEvent("info", "web bridge pull response", self:buildProgressDebugFields(remote_snapshot or remote, {
+        bookId = book_id,
+        direction = "bridge",
+        source = "web",
+        apiStatus = "ok",
+        apiErrorClass = "none",
+    }))
 
     if remote_snapshot and self.cfi_conversion_enabled and isNonEmpty(remote_snapshot.epubCfi) then
         local resolved = self:resolveBridgeConversion(book_id, {
@@ -2284,7 +3009,11 @@ end
 function Grimmlink:syncWebReaderBridgeNow(silent)
     if not self:isWebReaderSyncEnabled() then
         if not silent then
-            self:showMessage(_("Reading Sync is disabled."), 3)
+            if not self.enabled then
+                self:showMessage(_("GrimmLink sync is disabled."), 3)
+            else
+                self:showMessage(_("Web Reader bridge is disabled."), 3)
+            end
         end
         return nil
     end
@@ -2308,9 +3037,31 @@ function Grimmlink:syncWebReaderBridgeNow(silent)
     end
 
     local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
+    self:logProgressEvent("info", "web bridge sync start", self:buildProgressDebugFields(local_snapshot, {
+        bookId = book_id,
+        direction = "bridge",
+        source = "web",
+        apiStatus = "request",
+        action = "manual",
+    }))
     self:pushProgressSnapshot(local_snapshot, "manual", true)
 
-    return self:maybePullWebReaderProgress(file_hash, file_path, book_id, silent)
+    local result = self:maybePullWebReaderProgress(file_hash, file_path, book_id, silent)
+    local result_status = "ok"
+    local result_error_class = "none"
+    if not result or type(result) ~= "table" or result.decision == "error" then
+        result_status = "error"
+        result_error_class = "unknown"
+    end
+    self:logProgressEvent("info", "web bridge sync complete", self:buildProgressDebugFields(result or local_snapshot, {
+        bookId = book_id,
+        direction = "bridge",
+        source = "web",
+        apiStatus = result_status,
+        apiErrorClass = result_error_class,
+        action = "manual",
+    }))
+    return result
 end
 
 function Grimmlink:validateSession(duration_seconds, progress_delta, start_page, end_page)
@@ -2462,10 +3213,17 @@ function Grimmlink:syncPendingSessions(silent)
     end
 
     self.api:init(self.server_url, self.username, self.auth_key, self.debug_logging)
-    local pending = self.db:getPendingSessions(500)
-    if #pending == 0 then
-        return synced, failed
-    end
+      local pending = self.db:getPendingSessions(500)
+      if #pending == 0 then
+          return synced, failed
+      end
+
+      self:logProgressEvent("dbg", "pending session batch start", {
+          source = "koreader",
+          direction = "push",
+          apiStatus = "pending",
+          retryCount = #pending,
+      })
 
     -- Resolve bookId for sessions that are missing it.
     -- hash_resolved[h] = bookId (integer) if found, false if definitively 404.
@@ -2473,11 +3231,11 @@ function Grimmlink:syncPendingSessions(silent)
     local hash_resolved = {}
     local hash_not_found = {}
 
-    for _, session in ipairs(pending) do
-        if not session.bookId and session.bookHash and session.bookHash ~= "" then
-            local h = session.bookHash
-            if hash_resolved[h] then
-                session.bookId = hash_resolved[h]
+      for _, session in ipairs(pending) do
+          if not session.bookId and session.bookHash and session.bookHash ~= "" then
+              local h = session.bookHash
+              if hash_resolved[h] then
+                  session.bookId = hash_resolved[h]
                 self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
             elseif hash_resolved[h] == nil and not hash_not_found[h] then
                 local cached = self.db:getBookByHash(h)
@@ -2495,36 +3253,68 @@ function Grimmlink:syncPendingSessions(silent)
                         self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
                     else
                         local ok_lookup, book, lookup_code = self.api:getBookByHash(h)
-                        if ok_lookup and book and book.id then
-                            hash_resolved[h] = tonumber(book.id)
-                            session.bookId = hash_resolved[h]
-                            self.db:updateBookId(h, hash_resolved[h])
-                            self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
-                        elseif lookup_code == 404 then
-                            hash_not_found[h] = true
-                            hash_resolved[h] = false
-                        else
-                            hash_resolved[h] = false
-                        end
-                    end
-                end
+                          if ok_lookup and book and book.id then
+                              hash_resolved[h] = tonumber(book.id)
+                              session.bookId = hash_resolved[h]
+                              self.db:updateBookId(h, hash_resolved[h])
+                              self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
+                              self:logProgressEvent("info", "pending session hash matched", {
+                                  bookId = hash_resolved[h],
+                                  bookHash = h,
+                                  source = "koreader",
+                                  direction = "push",
+                                  apiStatus = "ok",
+                                  apiErrorClass = "none",
+                              })
+                          elseif lookup_code == 404 then
+                              hash_not_found[h] = true
+                              hash_resolved[h] = false
+                              self:recordNotFoundHash({
+                                  file_hash = h,
+                                  book_id = session.bookId,
+                                  file_format = session.bookType,
+                                  source = "koreader",
+                                  reason = "book not found",
+                              })
+                          else
+                              hash_resolved[h] = false
+                          end
+                      end
+                  end
             end
         end
     end
 
     local groups = {}
-    for _, session in ipairs(pending) do
-        if not session.bookId then
-            if hash_not_found[session.bookHash] then
-                self.db:deletePendingSession(session.id)
-                logger.warn("GrimmLink: dropped session for hash not in Grimmory:", session.bookHash)
-            else
-                self.db:incrementSessionRetryCount(session.id)
-            end
-            failed = failed + 1
-        else
-            local group_key = table.concat({
-                tostring(session.bookId),
+      for _, session in ipairs(pending) do
+          if not session.bookId then
+              if hash_not_found[session.bookHash] then
+                  self.db:deletePendingSession(session.id)
+                  logger.warn("GrimmLink: dropped session for hash not in Grimmory:", session.bookHash)
+                  self:logProgressEvent("warn", "pending session dropped", {
+                      bookHash = session.bookHash,
+                      fileFormat = session.bookType,
+                      source = "koreader",
+                      direction = "push",
+                      apiStatus = "http_404",
+                      apiErrorClass = "permanent_not_found",
+                  })
+              else
+                  self.db:incrementSessionRetryCount(session.id)
+                  self:logProgressEvent("warn", "pending session retry", {
+                      bookHash = session.bookHash,
+                      fileFormat = session.bookType,
+                      source = "koreader",
+                      direction = "push",
+                      apiStatus = "retry",
+                      apiErrorClass = "transient_unknown",
+                      retryCount = session.retry_count,
+                  })
+              end
+              failed = failed + 1
+          else
+              local group_key = table.concat({
+                  tostring(session.bookId),
                 session.bookHash or "",
                 session.bookType or "EPUB",
                 session.device or "",
@@ -2538,15 +3328,15 @@ function Grimmlink:syncPendingSessions(silent)
                 deviceId = session.deviceId,
                 sessions = {},
             }
-            groups[group_key].sessions[#groups[group_key].sessions + 1] = session
-        end
-    end
+              groups[group_key].sessions[#groups[group_key].sessions + 1] = session
+          end
+      end
 
-    for _, group in pairs(groups) do
-        local items = {}
-        for _, session in ipairs(group.sessions) do
-            items[#items + 1] = {
-                startTime = session.startTime,
+      for _, group in pairs(groups) do
+          local items = {}
+          for _, session in ipairs(group.sessions) do
+              items[#items + 1] = {
+                  startTime = session.startTime,
                 endTime = session.endTime,
                 durationSeconds = session.durationSeconds,
                 durationFormatted = self:formatDuration(session.durationSeconds),
@@ -2554,15 +3344,25 @@ function Grimmlink:syncPendingSessions(silent)
                 endProgress = roundToSingleDecimal(session.endProgress),
                 progressDelta = roundToSingleDecimal(session.progressDelta),
                 startLocation = session.startLocation,
-                endLocation = session.endLocation,
-            }
-        end
+                  endLocation = session.endLocation,
+              }
+          end
 
-        local success = false
-        local handled_individually = false
-        if #items == 1 then
-            success = self.api:submitSession(self:buildSingleSessionPayload(group, items[1]))
-        else
+          self:logProgressEvent("dbg", "pending session group request", {
+              bookId = group.bookId,
+              bookHash = group.bookHash,
+              fileFormat = group.bookType,
+              source = "koreader",
+              direction = "push",
+              apiStatus = "request",
+              retryCount = #group.sessions,
+          })
+
+          local success = false
+          local handled_individually = false
+          if #items == 1 then
+              success = self.api:submitSession(self:buildSingleSessionPayload(group, items[1]))
+          else
             local batch_ok, batch_response, batch_code = self.api:submitSessionBatch(
                 group.bookId,
                 group.bookHash,
@@ -2570,31 +3370,63 @@ function Grimmlink:syncPendingSessions(silent)
                 group.device,
                 group.deviceId,
                 items
-            )
-            if batch_ok then
-                success = true
-            else
-                self:logWarn(
-                    "GrimmLink batch session sync failed; falling back to individual uploads:",
-                    batch_response or ("HTTP " .. tostring(batch_code or "?"))
-                )
+              )
+              if batch_ok then
+                  success = true
+                  self:logProgressEvent("info", "pending session group ok", {
+                      bookId = group.bookId,
+                      bookHash = group.bookHash,
+                      fileFormat = group.bookType,
+                      source = "koreader",
+                      direction = "push",
+                      apiStatus = "ok",
+                      apiErrorClass = "none",
+                      retryCount = #group.sessions,
+                  })
+              else
+                  local api_status, api_error_class = self:classifyApiOutcome(batch_code, batch_response)
+                  self:logProgressEvent("warn", "pending session group failed", {
+                      bookId = group.bookId,
+                      bookHash = group.bookHash,
+                      fileFormat = group.bookType,
+                      source = "koreader",
+                      direction = "push",
+                      apiStatus = api_status,
+                      apiErrorClass = api_error_class,
+                      reason = safeToString(batch_response),
+                      retryCount = #group.sessions,
+                  })
+                  self:logWarn(
+                      "GrimmLink batch session sync failed; falling back to individual uploads:",
+                      batch_response or ("HTTP " .. tostring(batch_code or "?"))
+                  )
 
                 local group_success = true
                 handled_individually = true
                 for index, session in ipairs(group.sessions) do
                     local single_ok = self.api:submitSession(self:buildSingleSessionPayload(group, items[index]))
-                    if single_ok then
-                        self.db:deletePendingSession(session.id)
-                        synced = synced + 1
-                    else
-                        self.db:incrementSessionRetryCount(session.id)
-                        failed = failed + 1
-                        group_success = false
-                    end
-                end
-                success = group_success
-            end
-        end
+                      if single_ok then
+                          self.db:deletePendingSession(session.id)
+                          synced = synced + 1
+                      else
+                          self.db:incrementSessionRetryCount(session.id)
+                          failed = failed + 1
+                          group_success = false
+                          self:logProgressEvent("warn", "pending session item failed", {
+                              bookId = session.bookId,
+                              bookHash = session.bookHash,
+                              fileFormat = session.bookType,
+                              source = "koreader",
+                              direction = "push",
+                              apiStatus = "retry",
+                              apiErrorClass = "transient_unknown",
+                              retryCount = session.retry_count,
+                          })
+                      end
+                  end
+                  success = group_success
+              end
+          end
 
         if handled_individually then
             -- Results were already applied in the fallback loop above.
@@ -2603,23 +3435,63 @@ function Grimmlink:syncPendingSessions(silent)
                 self.db:deletePendingSession(session.id)
                 synced = synced + 1
             end
+            self:logProgressEvent("info", "pending session group applied", {
+                bookId = group.bookId,
+                bookHash = group.bookHash,
+                fileFormat = group.bookType,
+                source = "koreader",
+                direction = "push",
+                apiStatus = "ok",
+                apiErrorClass = "none",
+                retryCount = #group.sessions,
+            })
         elseif not success and #items > 1 then
             for _, session in ipairs(group.sessions) do
                 self.db:incrementSessionRetryCount(session.id)
                 failed = failed + 1
             end
+            self:logProgressEvent("warn", "pending session group retry", {
+                bookId = group.bookId,
+                bookHash = group.bookHash,
+                fileFormat = group.bookType,
+                source = "koreader",
+                direction = "push",
+                apiStatus = "retry",
+                apiErrorClass = "transient_unknown",
+                retryCount = #group.sessions,
+            })
         elseif success then
             for _, session in ipairs(group.sessions) do
                 self.db:deletePendingSession(session.id)
                 synced = synced + 1
             end
+            self:logProgressEvent("info", "pending session item ok", {
+                bookId = group.bookId,
+                bookHash = group.bookHash,
+                fileFormat = group.bookType,
+                source = "koreader",
+                direction = "push",
+                apiStatus = "ok",
+                apiErrorClass = "none",
+                retryCount = #group.sessions,
+            })
         else
             for _, session in ipairs(group.sessions) do
                 self.db:incrementSessionRetryCount(session.id)
                 failed = failed + 1
             end
+            self:logProgressEvent("warn", "pending session item retry", {
+                bookId = group.bookId,
+                bookHash = group.bookHash,
+                fileFormat = group.bookType,
+                source = "koreader",
+                direction = "push",
+                apiStatus = "retry",
+                apiErrorClass = "transient_unknown",
+                retryCount = #group.sessions,
+            })
         end
-    end
+      end
 
     if not silent and (synced > 0 or failed > 0) then
         self:showMessage(T(_("Pending session sync\nSynced: %1\nFailed: %2"), synced, failed), 3)
@@ -2636,6 +3508,17 @@ function Grimmlink:syncPendingNow(silent)
     local progress_synced, progress_failed = self:syncPendingProgress(true)
     local sessions_synced, sessions_failed = self:syncPendingSessions(true)
     local annot_result = self:syncPendingAnnotations(true)
+
+    self:logProgressEvent("info", "pending sync summary", {
+        source = "koreader",
+        direction = "push",
+        apiStatus = "complete",
+        retryCount = progress_failed + sessions_failed + (annot_result.failed or 0),
+        reason = T(_("progress=%1/%2 sessions=%3/%4 annotations=%5/%6"),
+            progress_synced, progress_failed,
+            sessions_synced, sessions_failed,
+            annot_result.posted, annot_result.failed),
+    })
 
     self.last_sync_summary = {
         progress_synced = progress_synced,
@@ -2809,18 +3692,10 @@ function Grimmlink:showPendingStats()
         return
     end
 
-    local stats = self.db:getBookCacheStats()
-    local pending_progress = self.db:getPendingProgressCount()
-    local pending_sessions = self.db:getPendingSessionCount()
-
-    self:showMessage(T(
-        _("GrimmLink cache\nBooks cached: %1\nMatched: %2\nUnmatched: %3\nPending progress: %4\nPending sessions: %5"),
-        stats.total,
-        stats.matched,
-        stats.unmatched,
-        pending_progress,
-        pending_sessions
-    ), 5)
+    self:showMessage(table.concat({
+        _("GrimmLink cache"),
+        table.concat(self:buildDebugSummaryLines(2), "\n"),
+    }, "\n"), 6)
 end
 
 function Grimmlink:setPrereleaseUpdates(enabled)
@@ -3034,7 +3909,8 @@ function Grimmlink:showAbout()
         T(_("Release repo: %1"), self.update_repo or DEFAULTS.update_repo),
         _("Updates always require confirmation before download/install."),
         _("Updating GrimmLink preserves settings, database, cache, downloaded books, and .sdr files."),
-        T(_("Web Reader sync: %1"), self:isWebReaderSyncEnabled() and _("linked to Reading Sync") or _("disabled")),
+        T(_("Web Reader bridge: %1"), self.web_reader_bridge_enabled and _("enabled") or _("disabled")),
+        T(_("Web Reader sync: %1"), self:isWebReaderSyncEnabled() and _("active") or _("disabled")),
         T(_("EPUB CFI conversion: %1"), self.cfi_conversion_enabled and _("enabled") or _("disabled")),
         _("Web Reader progress now follows Reading Sync so KOReader and Web Reader share the same progress source."),
     }, "\n"), 8)
@@ -3377,6 +4253,8 @@ function Grimmlink:addToMainMenu(menu_items)
         return tonumber(value) or 0
     end
 
+    local current_document_match = self:hasMatchedCurrentDocument()
+
     menu_items.grimmlink = {
         text = _("GrimmLink"),
         sorting_hint = "tools",
@@ -3540,6 +4418,15 @@ function Grimmlink:addToMainMenu(menu_items)
                         end,
                     },
                     {
+                        text = _("Enable Web Reader Bridge"),
+                        checked_func = function()
+                            return self.web_reader_bridge_enabled
+                        end,
+                        callback = function()
+                            self:saveSetting("web_reader_bridge_enabled", not self.web_reader_bridge_enabled)
+                        end,
+                    },
+                    {
                         text = _("Exact Web Reader position (EPUB only)"),
                         checked_func = function()
                             return self.cfi_conversion_enabled
@@ -3579,12 +4466,22 @@ function Grimmlink:addToMainMenu(menu_items)
                     },
                     {
                         text_func = function()
+                            if not self.web_reader_bridge_enabled then
+                                return _("Shared reading progress is off because the Web Reader bridge is disabled")
+                            end
                             return self:isWebReaderSyncEnabled()
                                 and _("Shared reading progress is active")
                                 or _("Shared reading progress is off because Reading Sync is disabled")
                         end,
                         callback = function()
-                            self:showMessage(_("Web Reader progress now follows Reading Sync automatically."), 4)
+                            if not self.web_reader_bridge_enabled then
+                                self:showMessage(_("Enable the Web Reader bridge first."), 4)
+                            else
+                                self:showMessage(_("Web Reader progress now follows Reading Sync automatically."), 4)
+                            end
+                        end,
+                        enabled_func = function()
+                            return current_document_match and self.web_reader_bridge_enabled
                         end,
                     },
                 },
@@ -3678,7 +4575,13 @@ function Grimmlink:addToMainMenu(menu_items)
             },
             {
                 text = _("Sync Shared Reading Progress Now"),
+                enabled_func = function()
+                    return current_document_match
+                end,
                 callback = function()
+                    if not current_document_match then
+                        return
+                    end
                     self:syncWebReaderBridgeNow(false)
                 end,
             },
@@ -3747,7 +4650,13 @@ function Grimmlink:addToMainMenu(menu_items)
                     },
                     {
                         text = _("Pull Remote Annotations Now"),
+                        enabled_func = function()
+                            return current_document_match
+                        end,
                         callback = function()
+                            if not current_document_match then
+                                return
+                            end
                             self:pullCurrentDocumentAnnotations(false)
                         end,
                     },
@@ -3793,18 +4702,83 @@ function Grimmlink:addToMainMenu(menu_items)
                     self:syncPendingNow(false)
                 end,
             },
-            {
-                text = _("Show Local Cache Stats"),
-                callback = function()
-                    if not menuReady() then
-                        self:showMessage(_("GrimmLink is still starting up"), 2)
-                        return
-                    end
-                    self:showPendingStats()
-                end,
-            },
-        },
-    }
+              {
+                  text = _("Show Local Cache Stats"),
+                  callback = function()
+                      if not menuReady() then
+                          self:showMessage(_("GrimmLink is still starting up"), 2)
+                          return
+                      end
+                      self:showPendingStats()
+                  end,
+              },
+              {
+                  text = _("Status / Debug"),
+                  sub_item_table = {
+                      {
+                          text = _("Show Detailed Cache Stats"),
+                          callback = function()
+                              if not menuReady() then
+                                  self:showMessage(_("GrimmLink is still starting up"), 2)
+                                  return
+                              end
+                              self:showDetailedCacheStats()
+                          end,
+                      },
+                      {
+                          text = _("Dump Local DB Summary"),
+                          callback = function()
+                              if not menuReady() then
+                                  self:showMessage(_("GrimmLink is still starting up"), 2)
+                                  return
+                              end
+                              self:showLocalDbSummary()
+                          end,
+                      },
+                      {
+                          text = _("Clear Pending Progress"),
+                          callback = function()
+                              if not menuReady() then
+                                  self:showMessage(_("GrimmLink is still starting up"), 2)
+                                  return
+                              end
+                              self:clearPendingProgressQueue()
+                          end,
+                      },
+                      {
+                          text = _("Clear Stale Cache"),
+                          callback = function()
+                              if not menuReady() then
+                                  self:showMessage(_("GrimmLink is still starting up"), 2)
+                                  return
+                              end
+                              self:clearStaleCacheEntries()
+                          end,
+                      },
+                      {
+                          text = _("Clear Not Found Hashes"),
+                          callback = function()
+                              if not menuReady() then
+                                  self:showMessage(_("GrimmLink is still starting up"), 2)
+                                  return
+                              end
+                              self:clearNotFoundHashes()
+                          end,
+                      },
+                      {
+                          text = _("Export Debug Log"),
+                          callback = function()
+                              if not menuReady() then
+                                  self:showMessage(_("GrimmLink is still starting up"), 2)
+                                  return
+                              end
+                              self:exportDebugLog()
+                          end,
+                      },
+                  },
+              },
+          },
+      }
     menu_items.grimmlink = self:wrapUiSpec(menu_items.grimmlink, "GrimmLink Main Menu")
 end
 

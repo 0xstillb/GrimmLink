@@ -4,10 +4,22 @@ local json = require("json")
 local logger = require("logger")
 
 local Database = {
-    VERSION = 6,
+    VERSION = 7,
     conn = nil,
     db_path = nil,
 }
+
+local function fileExists(path)
+    if not path or path == "" then
+        return false
+    end
+    local handle = io.open(path, "r")
+    if handle then
+        handle:close()
+        return true
+    end
+    return false
+end
 
 Database.migrations = {
     [1] = {
@@ -214,9 +226,9 @@ Database.migrations = {
                 ON remote_annotation_merge_state(book_id, kind, status)
         ]],
     },
-    [6] = {
-        [[
-            CREATE TABLE IF NOT EXISTS web_bridge_state (
+      [6] = {
+          [[
+              CREATE TABLE IF NOT EXISTS web_bridge_state (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_hash TEXT NOT NULL UNIQUE,
                 file_path TEXT,
@@ -248,10 +260,30 @@ Database.migrations = {
             )
         ]],
         [[
-            CREATE INDEX IF NOT EXISTS idx_web_bridge_state_book_id ON web_bridge_state(book_id)
-        ]],
-    },
-}
+              CREATE INDEX IF NOT EXISTS idx_web_bridge_state_book_id ON web_bridge_state(book_id)
+          ]],
+      },
+      [7] = {
+          [[
+              CREATE TABLE IF NOT EXISTS not_found_hashes (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  file_hash TEXT NOT NULL UNIQUE,
+                  book_id INTEGER,
+                  file_path TEXT,
+                  file_format TEXT,
+                  source TEXT,
+                  reason TEXT,
+                  retry_count INTEGER DEFAULT 0,
+                  last_seen_at INTEGER,
+                  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                  updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+              )
+          ]],
+          [[
+              CREATE INDEX IF NOT EXISTS idx_not_found_hashes_book_id ON not_found_hashes(book_id)
+          ]],
+      },
+  }
 
 local function decodeSettingValue(raw_value)
     if raw_value == nil or raw_value == "" then
@@ -584,6 +616,223 @@ function Database:getBookCacheStats()
     return stats
 end
 
+function Database:getStaleCacheEntries(limit)
+    local rows = {}
+    local max_rows = limit or 100
+
+    local function collect(table_name, sql)
+        if #rows >= max_rows then
+            return
+        end
+
+        local stmt = self.conn:prepare(sql)
+        if not stmt then
+            return
+        end
+
+        for row in stmt:rows() do
+            local file_path = row[3] and tostring(row[3]) or nil
+            if file_path and not fileExists(file_path) then
+                rows[#rows + 1] = {
+                    table_name = table_name,
+                    id = tonumber(row[1]),
+                    file_hash = row[2] and tostring(row[2]) or nil,
+                    file_path = file_path,
+                    book_id = row[4] and tonumber(row[4]) or nil,
+                    file_format = row[5] and tostring(row[5]) or nil,
+                }
+                if #rows >= max_rows then
+                    break
+                end
+            end
+        end
+        stmt:close()
+    end
+
+    collect("book_cache", [[
+        SELECT id, file_hash, file_path, book_id, title
+        FROM book_cache
+        ORDER BY updated_at DESC, id DESC
+    ]])
+    collect("progress_state", [[
+        SELECT id, file_hash, file_path, book_id, file_format
+        FROM progress_state
+        ORDER BY updated_at DESC, id DESC
+    ]])
+    collect("web_bridge_state", [[
+        SELECT id, file_hash, file_path, book_id, file_format
+        FROM web_bridge_state
+        ORDER BY updated_at DESC, id DESC
+    ]])
+
+    return rows
+end
+
+function Database:getStaleCacheCount()
+    return #self:getStaleCacheEntries(1000)
+end
+
+function Database:clearStaleCache()
+    local entries = self:getStaleCacheEntries(1000)
+    local deleted = {
+        book_cache = 0,
+        progress_state = 0,
+        web_bridge_state = 0,
+    }
+
+    local function deleteRow(sql, value)
+        local stmt = self.conn:prepare(sql)
+        if not stmt then
+            return false
+        end
+        stmt:bind(value)
+        local result = stmt:step()
+        stmt:close()
+        return result == SQ3.DONE or result == SQ3.OK
+    end
+
+    for _, entry in ipairs(entries) do
+        if entry.table_name == "book_cache" then
+            if deleteRow("DELETE FROM book_cache WHERE id = ?", entry.id) then
+                deleted.book_cache = deleted.book_cache + 1
+            end
+        elseif entry.table_name == "progress_state" then
+            if deleteRow("DELETE FROM progress_state WHERE id = ?", entry.id) then
+                deleted.progress_state = deleted.progress_state + 1
+            end
+        elseif entry.table_name == "web_bridge_state" then
+            if deleteRow("DELETE FROM web_bridge_state WHERE id = ?", entry.id) then
+                deleted.web_bridge_state = deleted.web_bridge_state + 1
+            end
+        end
+    end
+
+    return deleted
+end
+
+function Database:deleteAllPendingProgress()
+    local stmt = self.conn:prepare("DELETE FROM pending_progress")
+    if not stmt then
+        return false
+    end
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:deletePendingProgressByHash(file_hash)
+    local stmt = self.conn:prepare("DELETE FROM pending_progress WHERE file_hash = ?")
+    if not stmt then
+        return false
+    end
+    stmt:bind(tostring(file_hash))
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:upsertNotFoundHash(entry)
+    local stmt = self.conn:prepare([[
+        INSERT INTO not_found_hashes (
+            file_hash, book_id, file_path, file_format, source, reason, retry_count, last_seen_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, CAST(strftime('%s', 'now') AS INTEGER), CAST(strftime('%s', 'now') AS INTEGER), CAST(strftime('%s', 'now') AS INTEGER))
+        ON CONFLICT(file_hash) DO UPDATE SET
+            book_id = COALESCE(excluded.book_id, not_found_hashes.book_id),
+            file_path = COALESCE(excluded.file_path, not_found_hashes.file_path),
+            file_format = COALESCE(excluded.file_format, not_found_hashes.file_format),
+            source = COALESCE(excluded.source, not_found_hashes.source),
+            reason = COALESCE(excluded.reason, not_found_hashes.reason),
+            retry_count = not_found_hashes.retry_count + 1,
+            last_seen_at = excluded.last_seen_at,
+            updated_at = excluded.updated_at
+    ]])
+    if not stmt then
+        return false
+    end
+
+    stmt:bind(
+        tostring(entry.file_hash or ""),
+        entry.book_id and tonumber(entry.book_id) or nil,
+        entry.file_path,
+        entry.file_format,
+        entry.source,
+        entry.reason
+    )
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
+function Database:hasNotFoundHash(file_hash)
+    local stmt = self.conn:prepare("SELECT 1 FROM not_found_hashes WHERE file_hash = ? LIMIT 1")
+    if not stmt then
+        return false
+    end
+    stmt:bind(tostring(file_hash))
+
+    local found = false
+    for row in stmt:rows() do
+        found = row[1] ~= nil
+        break
+    end
+    stmt:close()
+    return found
+end
+
+function Database:getNotFoundHashCount()
+    local stmt = self.conn:prepare("SELECT COUNT(*) FROM not_found_hashes")
+    if not stmt then
+        return 0
+    end
+    local count = 0
+    for row in stmt:rows() do
+        count = tonumber(row[1]) or 0
+        break
+    end
+    stmt:close()
+    return count
+end
+
+function Database:getNotFoundHashes(limit)
+    local stmt = self.conn:prepare([[
+        SELECT id, file_hash, book_id, file_path, file_format, source, reason, retry_count, last_seen_at
+        FROM not_found_hashes
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+    ]])
+    if not stmt then
+        return {}
+    end
+    stmt:bind(limit or 25)
+
+    local rows = {}
+    for row in stmt:rows() do
+        rows[#rows + 1] = {
+            id = tonumber(row[1]),
+            file_hash = tostring(row[2]),
+            book_id = row[3] and tonumber(row[3]) or nil,
+            file_path = row[4] and tostring(row[4]) or nil,
+            file_format = row[5] and tostring(row[5]) or nil,
+            source = row[6] and tostring(row[6]) or nil,
+            reason = row[7] and tostring(row[7]) or nil,
+            retry_count = row[8] and tonumber(row[8]) or 0,
+            last_seen_at = row[9] and tonumber(row[9]) or nil,
+        }
+    end
+    stmt:close()
+    return rows
+end
+
+function Database:clearNotFoundHashes()
+    local stmt = self.conn:prepare("DELETE FROM not_found_hashes")
+    if not stmt then
+        return false
+    end
+    local result = stmt:step()
+    stmt:close()
+    return result == SQ3.DONE or result == SQ3.OK
+end
+
 function Database:getProgressState(file_hash)
     local stmt = self.conn:prepare([[
         SELECT
@@ -904,8 +1153,14 @@ function Database:upsertPendingProgress(file_hash, payload_json)
         VALUES (?, ?, 0, CAST(strftime('%s', 'now') AS INTEGER), NULL)
         ON CONFLICT(file_hash) DO UPDATE SET
             payload_json = excluded.payload_json,
-            retry_count = 0,
-            last_retry_at = NULL
+            retry_count = CASE
+                WHEN pending_progress.payload_json = excluded.payload_json THEN pending_progress.retry_count
+                ELSE 0
+            END,
+            last_retry_at = CASE
+                WHEN pending_progress.payload_json = excluded.payload_json THEN pending_progress.last_retry_at
+                ELSE NULL
+            END
     ]])
     if not stmt then
         return false
@@ -919,7 +1174,7 @@ end
 
 function Database:getPendingProgress(limit)
     local stmt = self.conn:prepare([[
-        SELECT id, file_hash, payload_json, retry_count
+        SELECT id, file_hash, payload_json, retry_count, last_retry_at, created_at
         FROM pending_progress
         ORDER BY created_at ASC
         LIMIT ?
@@ -936,6 +1191,8 @@ function Database:getPendingProgress(limit)
             file_hash = tostring(row[2]),
             payload_json = tostring(row[3]),
             retry_count = tonumber(row[4]) or 0,
+            last_retry_at = row[5] and tonumber(row[5]) or nil,
+            created_at = row[6] and tonumber(row[6]) or nil,
         }
     end
     stmt:close()
