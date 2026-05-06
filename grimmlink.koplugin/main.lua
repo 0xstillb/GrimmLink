@@ -2959,24 +2959,12 @@ function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, sil
         apiErrorClass = "none",
     }))
 
-    if remote_snapshot and self.cfi_conversion_enabled and isNonEmpty(remote_snapshot.epubCfi) then
-        local resolved = self:resolveBridgeConversion(book_id, {
-            epubCfi = remote_snapshot.epubCfi,
-            currentPage = remote_snapshot.currentPage,
-            totalPages = remote_snapshot.totalPages,
-            percentage = remote_snapshot.percentage,
-        })
-        if resolved and resolved.converted then
-            remote_snapshot.location = resolved.rawKoreaderXPointer or resolved.rawLocation or remote_snapshot.location
-            remote_snapshot.progress = remote_snapshot.location or remote_snapshot.progress
-            remote_snapshot.positionHref = resolved.positionHref or remote_snapshot.positionHref
-            remote_snapshot.contentSourceProgressPercent = resolved.contentSourceProgressPercent or remote_snapshot.contentSourceProgressPercent
-            remote_snapshot.conversionStatus = resolved.conversionStatus or remote_snapshot.conversionStatus
-            remote_snapshot.conversionConfidence = resolved.conversionConfidence or remote_snapshot.conversionConfidence
-        elseif resolved then
-            remote_snapshot.conversionStatus = resolved.conversionStatus or "conversion_failed"
-            remote_snapshot.conversionConfidence = resolved.conversionConfidence or 0
-        end
+    -- Keep the open-path lightweight. The Web Reader API already returns the
+    -- exact EPUB locator fields when they are available, and resolving the
+    -- bridge CFI back into a KOReader xpointer here can block long enough to
+    -- trip Android's "stop responding" watchdog on large EPUBs.
+    if remote_snapshot and isNonEmpty(remote_snapshot.epubCfi) and not remote_snapshot.conversionStatus then
+        remote_snapshot.conversionStatus = "cfi_available"
     end
 
     self:rememberLocalWebBridgeSnapshot(file_hash, local_snapshot, "web-bridge-open-local")

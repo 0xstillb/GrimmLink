@@ -4,5 +4,5 @@ return {
     name = "grimmlink",
     fullname = _("GrimmLink"),
     description = _("KOReader Companion for Grimmory"),
-    version = "1.0.2",
+    version = "1.0.5",
 }

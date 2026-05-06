@@ -1358,6 +1358,83 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("/body/DocFragment[1]/body/div[1]/p[2]", payload.rawKoreaderXPointer)
     end)
 
+    it("does not resolve bridge CFI during open-time Web Reader pull", function()
+        local conversion_called = false
+        local dialog_shown = false
+        plugin.enabled = true
+        plugin.web_reader_bridge_enabled = true
+        plugin.cfi_conversion_enabled = true
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.api = {
+            init = function() end,
+            getWebProgress = function()
+                return true, {
+                    bookFileId = 420,
+                    epubCfi = "epubcfi(/6/2!/4/2)",
+                    positionHref = "chapter311.xhtml#p1",
+                    contentSourceProgressPercent = 44.4,
+                    currentPage = 26,
+                    totalPages = 16653,
+                    percentage = 15.6,
+                    progress = "/body/DocFragment[5]/body/h3/text().0",
+                    location = "/body/DocFragment[5]/body/h3/text().0",
+                    timestamp = 222,
+                    source = "WEB_READER",
+                    device = "Web Reader",
+                    deviceId = "web-reader",
+                    conversionStatus = "cfi_available",
+                }
+            end,
+        }
+        plugin.db = {
+            getWebBridgeState = function()
+                return nil
+            end,
+            upsertLocalWebBridgeState = function() end,
+            upsertRemoteWebBridgeState = function() end,
+        }
+        plugin.getCurrentProgressSnapshot = function()
+            return {
+                bookHash = "hash-epub",
+                bookId = 77,
+                file_path = "/books/title.epub",
+                fileFormat = "EPUB",
+                percentage = 2.0,
+                progress = "/body/DocFragment[1]/body/div[1]/p[2]",
+                location = "/body/DocFragment[1]/body/div[1]/p[2]",
+                currentPage = 3,
+                totalPages = 200,
+                timestamp = 123,
+                device = "KOReader",
+                deviceId = "device-1",
+            }
+        end
+        plugin.resolveBridgeConversion = function()
+            conversion_called = true
+            error("should not resolve bridge CFI during open pull")
+        end
+        plugin.rememberLocalWebBridgeSnapshot = function() end
+        plugin.rememberRemoteWebBridgeSnapshot = function() end
+        plugin.logProgressEvent = function() end
+        plugin.logInfo = function() end
+        plugin.logWarn = function() end
+        plugin.showWebBridgeConflictDialog = function(_, file_hash, local_snapshot, remote_snapshot, mode)
+            dialog_shown = true
+            assert.are.equal("remote_newer", mode)
+            assert.are.equal("hash-epub", file_hash)
+            assert.are.equal("cfi_available", remote_snapshot.conversionStatus)
+            assert.are.equal(77, local_snapshot.bookId)
+        end
+
+        local result = plugin:maybePullWebReaderProgress("hash-epub", "/books/title.epub", 77, true)
+
+        assert.is_false(conversion_called)
+        assert.is_true(dialog_shown)
+        assert.are.equal("remote_newer", result.decision)
+    end)
+
     it("skips EPUB conversion for PDF bridge payloads", function()
         local conversion_called = false
         plugin.cfi_conversion_enabled = true
