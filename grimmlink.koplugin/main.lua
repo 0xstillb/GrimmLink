@@ -1810,6 +1810,17 @@ function Grimmlink:applyRemoteProgress(remote_snapshot)
 
     local is_paged_document = self:documentHasPages()
     local target_page = self:getRemotePageTarget(remote_snapshot)
+    local file_format = remote_snapshot.fileFormat and tostring(remote_snapshot.fileFormat):upper() or nil
+    local is_epub_like = file_format == "EPUB" or file_format == "FB2" or file_format == "MOBI" or file_format == "AZW3"
+    local has_direct_location = isNonEmpty(remote_snapshot.location)
+        and self:looksLikeXPointer(remote_snapshot.location)
+
+    -- EPUB progress is only trustworthy when we can restore the exact xpointer/CFI
+    -- chain. Page numbers are fine for PDFs, but they are too coarse for EPUB and
+    -- can land on the wrong chapter even when the remote bridge converted correctly.
+    if is_epub_like and has_direct_location and self:jumpToLocation(remote_snapshot.location) then
+        return true
+    end
 
     -- Match KOSync for paged documents such as PDFs: page number wins.
     if is_paged_document and target_page and self:jumpToPage(target_page) then
@@ -1817,9 +1828,14 @@ function Grimmlink:applyRemoteProgress(remote_snapshot)
     end
 
     if isNonEmpty(remote_snapshot.location)
-        and (not is_paged_document or self:looksLikeXPointer(remote_snapshot.location))
+        and not has_direct_location
+        and (not is_paged_document or not is_epub_like)
         and self:jumpToLocation(remote_snapshot.location)
     then
+        return true
+    end
+
+    if not is_epub_like and has_direct_location and self:jumpToLocation(remote_snapshot.location) then
         return true
     end
 

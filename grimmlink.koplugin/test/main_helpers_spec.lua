@@ -184,6 +184,34 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(40, jumped_page)
     end)
 
+    it("prefers direct xpointer jumps for EPUB bridge progress even when page numbers exist", function()
+        local jumped_location
+        plugin.ui = {
+            document = {
+                info = {
+                    has_pages = true,
+                },
+            },
+        }
+        plugin.jumpToPage = function()
+            error("EPUB bridge progress should prefer xpointer jumps before page jumps")
+        end
+        plugin.jumpToLocation = function(_, location)
+            jumped_location = location
+            return true
+        end
+
+        local ok = plugin:applyRemoteProgress({
+            fileFormat = "EPUB",
+            currentPage = 200,
+            progress = "/body/DocFragment[5]/body/h3/text().0",
+            location = "/body/DocFragment[5]/body/h3/text().0",
+        })
+
+        assert.is_true(ok)
+        assert.are.equal("/body/DocFragment[5]/body/h3/text().0", jumped_location)
+    end)
+
     it("keeps xpointer jumps for rolling documents", function()
         local jumped_location
         plugin.ui = {
