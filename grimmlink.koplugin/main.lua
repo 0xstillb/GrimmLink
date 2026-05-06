@@ -1477,6 +1477,13 @@ function Grimmlink:progressDifferenceExceeded(left, right)
     return false
 end
 
+function Grimmlink:shouldPromptBeforeApplyingRemoteProgress(local_snapshot, remote_snapshot)
+    if not self:hasMeaningfulProgress(local_snapshot) or not self:hasMeaningfulProgress(remote_snapshot) then
+        return false
+    end
+    return self:progressDifferenceExceeded(local_snapshot, remote_snapshot)
+end
+
 function Grimmlink:buildStoredLocalSnapshot(state)
     if not state then
         return nil
@@ -2578,6 +2585,11 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id)
     end
 
     if decision == "remote_newer" then
+        if self:shouldPromptBeforeApplyingRemoteProgress(local_snapshot, remote_snapshot) then
+            self:logInfo("GrimmLink prompting before applying remote EPUB progress")
+            self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, decision)
+            return
+        end
         self:logProgressEvent("info", "progress pull applying remote", self:buildProgressDebugFields(remote_snapshot, {
             bookId = book_id,
             direction = "pull",

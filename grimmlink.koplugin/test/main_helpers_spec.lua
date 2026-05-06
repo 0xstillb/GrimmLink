@@ -1389,7 +1389,7 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(200, payload.totalPages)
     end)
 
-    it("auto-applies remote progress when the remote side is newer on open", function()
+    it("auto-applies remote progress when the local side has no meaningful progress", function()
         local calls = {}
         plugin.auto_pull_on_open = true
         plugin.server_url = "http://example.com"
@@ -1420,14 +1420,7 @@ describe("GrimmLink helper methods", function()
             upsertRemoteProgressState = function() end,
         }
         plugin.getCurrentProgressSnapshot = function()
-            return {
-                percentage = 5.4,
-                currentPage = 36,
-                totalPages = 663,
-                progress = "36",
-                location = "36",
-                timestamp = 500,
-            }
+            return nil
         end
         plugin.resolveRemoteChoice = function(_, file_hash, remote_snapshot)
             calls[#calls + 1] = {
@@ -1437,7 +1430,7 @@ describe("GrimmLink helper methods", function()
             }
         end
         plugin.showProgressConflictDialog = function()
-            error("should not show a conflict dialog when remote is clearly newer")
+            error("should not show a conflict dialog when local progress is empty")
         end
         plugin.logInfo = function() end
         plugin.rememberLocalSnapshot = function() end
@@ -1449,6 +1442,144 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("hash-remote", calls[1].file_hash)
         assert.are.equal(56, calls[1].currentPage)
         assert.are.equal(8.4, calls[1].percentage)
+    end)
+
+    it("prompts before applying newer remote PDF progress on open", function()
+        local calls = {}
+        plugin.auto_pull_on_open = true
+        plugin.server_url = "http://example.com"
+        plugin.username = "reader"
+        plugin.auth_key = "secret"
+        plugin.debug_logging = false
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.api = {
+            init = function() end,
+            getProgress = function()
+                return true, {
+                    fileFormat = "PDF",
+                    percentage = 8.4,
+                    currentPage = 56,
+                    totalPages = 663,
+                    progress = "56",
+                    location = "56",
+                    timestamp = 490,
+                }
+            end,
+        }
+        plugin.db = {
+            getProgressState = function()
+                return nil
+            end,
+            upsertLocalProgressState = function() end,
+            upsertRemoteProgressState = function() end,
+        }
+        plugin.getCurrentProgressSnapshot = function()
+            return {
+                fileFormat = "PDF",
+                percentage = 5.4,
+                currentPage = 36,
+                totalPages = 663,
+                progress = "36",
+                location = "36",
+                timestamp = 500,
+            }
+        end
+        plugin.resolveRemoteChoice = function()
+            error("should prompt before applying remote PDF progress")
+        end
+        plugin.showProgressConflictDialog = function(_, file_hash, local_snapshot, remote_snapshot, mode)
+            calls[#calls + 1] = {
+                file_hash = file_hash,
+                mode = mode,
+                local_location = local_snapshot.location,
+                remote_location = remote_snapshot.location,
+                remote_page = remote_snapshot.currentPage,
+            }
+        end
+        plugin.logInfo = function() end
+        plugin.logProgressEvent = function() end
+        plugin.rememberLocalSnapshot = function() end
+        plugin.rememberRemoteSnapshot = function() end
+
+        plugin:maybePullRemoteProgress("hash-pdf", "/books/title.pdf", 42)
+
+        assert.are.equal(1, #calls)
+        assert.are.equal("hash-pdf", calls[1].file_hash)
+        assert.are.equal("remote_newer", calls[1].mode)
+        assert.are.equal("36", calls[1].local_location)
+        assert.are.equal("56", calls[1].remote_location)
+        assert.are.equal(56, calls[1].remote_page)
+    end)
+
+    it("prompts before applying newer remote EPUB progress on open", function()
+        local calls = {}
+        plugin.auto_pull_on_open = true
+        plugin.server_url = "http://example.com"
+        plugin.username = "reader"
+        plugin.auth_key = "secret"
+        plugin.debug_logging = false
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.api = {
+            init = function() end,
+            getProgress = function()
+                return true, {
+                    fileFormat = "EPUB",
+                    percentage = 8.4,
+                    currentPage = 56,
+                    totalPages = 663,
+                    progress = "/body/DocFragment[2]/body/h3/text().0",
+                    location = "/body/DocFragment[2]/body/h3/text().0",
+                    timestamp = 490,
+                }
+            end,
+        }
+        plugin.db = {
+            getProgressState = function()
+                return nil
+            end,
+            upsertLocalProgressState = function() end,
+            upsertRemoteProgressState = function() end,
+        }
+        plugin.getCurrentProgressSnapshot = function()
+            return {
+                fileFormat = "EPUB",
+                percentage = 5.4,
+                currentPage = 36,
+                totalPages = 663,
+                progress = "/body/DocFragment[1]/body/h3/text().0",
+                location = "/body/DocFragment[1]/body/h3/text().0",
+                timestamp = 500,
+            }
+        end
+        plugin.resolveRemoteChoice = function()
+            error("should prompt before applying remote EPUB progress")
+        end
+        plugin.showProgressConflictDialog = function(_, file_hash, local_snapshot, remote_snapshot, mode)
+            calls[#calls + 1] = {
+                file_hash = file_hash,
+                mode = mode,
+                local_location = local_snapshot.location,
+                remote_location = remote_snapshot.location,
+                remote_page = remote_snapshot.currentPage,
+            }
+        end
+        plugin.logInfo = function() end
+        plugin.logProgressEvent = function() end
+        plugin.rememberLocalSnapshot = function() end
+        plugin.rememberRemoteSnapshot = function() end
+
+        plugin:maybePullRemoteProgress("hash-epub", "/books/title.epub", 42)
+
+        assert.are.equal(1, #calls)
+        assert.are.equal("hash-epub", calls[1].file_hash)
+        assert.are.equal("remote_newer", calls[1].mode)
+        assert.are.equal("/body/DocFragment[1]/body/h3/text().0", calls[1].local_location)
+        assert.are.equal("/body/DocFragment[2]/body/h3/text().0", calls[1].remote_location)
+        assert.are.equal(56, calls[1].remote_page)
     end)
 
     it("selects a shelf without shadowing the gettext helper", function()
