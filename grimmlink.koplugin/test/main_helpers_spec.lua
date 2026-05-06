@@ -451,21 +451,15 @@ describe("GrimmLink helper methods", function()
         assert.is_false(payload.force)
     end)
 
-    it("captures annotations before syncing pending work on suspend", function()
+    it("captures annotations on suspend after requesting deferred close sync", function()
         local calls = {}
         plugin.enabled = true
         plugin.endSession = function(_, options)
-            calls[#calls + 1] = "endSession:" .. tostring(options.reason)
+            calls[#calls + 1] = "endSession:" .. tostring(options.reason) .. ":" .. tostring(options.defer_network)
             return true
         end
         plugin.captureCurrentDocumentAnnotations = function()
             calls[#calls + 1] = "capture"
-        end
-        plugin.isOnline = function()
-            return true
-        end
-        plugin.syncPendingNow = function(_, silent)
-            calls[#calls + 1] = "syncPendingNow:" .. tostring(silent)
         end
         plugin.logInfo = function() end
         plugin.logWarn = function() end
@@ -474,10 +468,156 @@ describe("GrimmLink helper methods", function()
 
         assert.is_false(result)
         assert.are.same({
-            "endSession:suspend",
+            "endSession:suspend:true",
             "capture",
-            "syncPendingNow:true",
         }, calls)
+    end)
+
+    it("defers close-session network work until after the UI settles", function()
+        local calls = {}
+        local scheduled = {}
+        local original_schedule_in = UIManager.scheduleIn
+
+        UIManager.scheduleIn = function(_, delay, callback)
+            scheduled[#scheduled + 1] = {
+                delay = delay,
+                callback = callback,
+            }
+        end
+
+        local ok, err = pcall(function()
+            plugin._initialized = true
+            plugin.enabled = true
+            plugin.auto_push_on_close = true
+            plugin.annotations_capture_on_close = true
+            plugin.api = {
+                init = function() end,
+            }
+            plugin.db = {
+                addPendingSession = function() end,
+                getProgressState = function()
+                    return {}
+                end,
+                setProgressLastAction = function() end,
+            }
+            plugin.current_session = {
+                file_path = "/books/title.epub",
+                file_hash = "hash-1",
+                book_id = 42,
+                book_title = "Title",
+                start_time = 1000,
+                start_snapshot = {
+                    percentage = 0,
+                    currentPage = 1,
+                },
+                book_type = "EPUB",
+            }
+            plugin.isOnline = function()
+                return true
+            end
+            plugin.getCurrentProgressSnapshot = function()
+                return {
+                    bookHash = "hash-1",
+                    bookId = 42,
+                    file_path = "/books/title.epub",
+                    fileFormat = "EPUB",
+                    currentPage = 10,
+                    totalPages = 100,
+                    percentage = 10,
+                    progress = "10",
+                    location = "10",
+                    timestamp = 2000,
+                }
+            end
+            plugin.rememberLocalSnapshot = function() end
+            plugin.shouldPushProgress = function()
+                return true
+            end
+            plugin.pushProgressSnapshot = function(_, snapshot, reason, silent)
+                calls[#calls + 1] = "push:" .. tostring(reason) .. ":" .. tostring(silent)
+                assert.are.equal("hash-1", snapshot.bookHash)
+                return true
+            end
+            plugin.pushWebReaderBridgeSnapshot = function(_, snapshot, opts)
+                calls[#calls + 1] = "bridge:" .. tostring(opts.reason)
+                assert.are.equal("hash-1", snapshot.bookHash)
+                return { ok = true }
+            end
+            plugin.syncPendingNow = function(_, silent)
+                calls[#calls + 1] = "syncPending:" .. tostring(silent)
+            end
+
+            local result = plugin:endSession({ reason = "close", defer_network = true })
+
+            assert.is_true(result)
+            assert.is_nil(plugin.current_session)
+            assert.are.equal(1, #scheduled)
+            assert.are.same({}, calls)
+
+            scheduled[1].callback()
+
+            assert.are.same({
+                "push:close:true",
+                "bridge:web-bridge-close",
+                "syncPending:true",
+            }, calls)
+        end)
+
+        UIManager.scheduleIn = original_schedule_in
+        assert.is_true(ok, err)
+    end)
+
+    it("defers resume sync work until after the UI settles", function()
+        local calls = {}
+        local scheduled = {}
+        local original_schedule_in = UIManager.scheduleIn
+
+        UIManager.scheduleIn = function(_, delay, callback)
+            scheduled[#scheduled + 1] = {
+                delay = delay,
+                callback = callback,
+            }
+        end
+
+        local ok, err = pcall(function()
+            plugin.enabled = true
+            plugin.ui = {
+                document = {
+                    file = "/books/title.epub",
+                },
+            }
+            plugin.isOnline = function()
+                return true
+            end
+            plugin.last_auto_sync_time = 0
+            plugin.threshold_minutes = 5
+            plugin.startSession = function()
+                calls[#calls + 1] = "start"
+            end
+            plugin.syncPendingNow = function(_, silent)
+                calls[#calls + 1] = "syncPending:" .. tostring(silent)
+            end
+            plugin.pullCurrentDocumentAnnotations = function(_, silent)
+                calls[#calls + 1] = "pullAnnotations:" .. tostring(silent)
+            end
+
+            local result = plugin:onResume()
+
+            assert.is_false(result)
+            assert.are.same({ "start" }, calls)
+            assert.are.equal(1, #scheduled)
+
+            scheduled[1].callback()
+
+            assert.are.same({
+                "start",
+                "syncPending:true",
+                "pullAnnotations:true",
+            }, calls)
+        end)
+
+        UIManager.scheduleIn = original_schedule_in
+        assert.is_true(ok, err)
     end)
 
     it("registers the main menu after initialization is complete", function()
@@ -809,6 +949,34 @@ describe("GrimmLink helper methods", function()
       assert.is_true(messages[#messages]:find("hash-a", 1, true) ~= nil)
   end)
 
+  it("clears unmatched cache entries separately from stale cache entries", function()
+      local messages = {}
+      local count_calls = 0
+      local clear_calls = 0
+
+      plugin._initialized = true
+      plugin.db = {
+          getUnmatchedCacheCount = function()
+              count_calls = count_calls + 1
+              return 4
+          end,
+          clearUnmatchedCache = function()
+              clear_calls = clear_calls + 1
+              return true, 4
+          end,
+      }
+      plugin.showMessage = function(_, text)
+          messages[#messages + 1] = text
+      end
+
+      plugin:clearUnmatchedCacheEntries()
+
+      assert.are.equal(1, count_calls)
+      assert.are.equal(1, clear_calls)
+      assert.is_true(type(messages[#messages]) == "string")
+      assert.is_true(messages[#messages]:find("Cleared 4 unmatched cache entries", 1, true) ~= nil)
+  end)
+
   it("adds the status/debug menu group", function()
       local menu_items = {}
 
@@ -831,6 +999,7 @@ describe("GrimmLink helper methods", function()
       assert.is_not_nil(status_debug_menu)
       assert.is_not_nil(findMenuItem(status_debug_menu.sub_item_table, "Show Detailed Cache Stats"))
       assert.is_not_nil(findMenuItem(status_debug_menu.sub_item_table, "Clear Pending Progress"))
+      assert.is_not_nil(findMenuItem(status_debug_menu.sub_item_table, "Clear Unmatched Cache"))
       assert.is_not_nil(findMenuItem(status_debug_menu.sub_item_table, "Export Debug Log"))
   end)
 

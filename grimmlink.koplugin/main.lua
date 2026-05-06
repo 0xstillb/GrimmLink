@@ -676,6 +676,20 @@ function Grimmlink:clearNotFoundHashes()
     end
 end
 
+function Grimmlink:clearUnmatchedCacheEntries()
+    if not self:requireReady({ silent = false }) then
+        return
+    end
+
+    local count = self:safeDbCall("getUnmatchedCacheCount", 0)
+    local ok = self:safeDbCall("clearUnmatchedCache", false)
+    if ok then
+        self:showMessage(T(_("Cleared %1 unmatched cache entries."), count or 0), 3)
+    else
+        self:showMessage(_("Failed to clear unmatched cache entries."), 4)
+    end
+end
+
 function Grimmlink:exportDebugLog()
     if not self:requireReady({ silent = false }) then
         return
@@ -1969,6 +1983,54 @@ function Grimmlink:runAfterUiSettles(callback)
     end
 end
 
+function Grimmlink:scheduleDeferredWebReaderBridgeSync(file_hash, file_path, book_id)
+    if not file_hash or file_hash == "" or not book_id then
+        return
+    end
+
+    self:runAfterUiSettles(function()
+        if not self.current_session or self.current_session.file_hash ~= file_hash then
+            return
+        end
+
+        local function doBridgeSync()
+            if not self.current_session or self.current_session.file_hash ~= file_hash then
+                return
+            end
+
+            self:invokeSafely("deferred web bridge sync", function()
+                self:maybePullWebReaderProgress(file_hash, file_path, book_id, true, 5)
+            end, {}, { silent = true })
+        end
+
+        if UIManager and type(UIManager.scheduleIn) == "function" then
+            UIManager:scheduleIn(2, doBridgeSync)
+        else
+            doBridgeSync()
+        end
+    end)
+end
+
+function Grimmlink:scheduleDeferredCloseSync(end_snapshot, reason, should_push)
+    local snapshot = cloneTable(end_snapshot or {})
+    local push_reason = reason or "close"
+
+    self:runAfterUiSettles(function()
+        self:invokeSafely("deferred close sync", function()
+            if should_push and snapshot.bookHash and self.auto_push_on_close then
+                self:pushProgressSnapshot(snapshot, push_reason, true)
+                self:pushWebReaderBridgeSnapshot(snapshot, {
+                    reason = "web-bridge-" .. push_reason,
+                })
+            end
+
+            if self:isOnline() then
+                self:syncPendingNow(true)
+            end
+        end, {}, { silent = true })
+    end)
+end
+
 function Grimmlink:applyAndFinalizeRemoteProgress(file_hash, remote_snapshot, success_message, failure_message, success_action, failure_action)
     self:runAfterUiSettles(function()
         self:invokeSafely("apply remote progress", function()
@@ -2899,7 +2961,7 @@ function Grimmlink:showWebBridgeConflictDialog(file_hash, local_snapshot, remote
     UIManager:show(dialog)
 end
 
-function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, silent)
+function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, silent, timeout_sec)
     if not self:isWebReaderSyncEnabled() or not file_hash or file_hash == "" or not book_id then
         return nil
     end
@@ -2916,7 +2978,7 @@ function Grimmlink:maybePullWebReaderProgress(file_hash, file_path, book_id, sil
         source = "web",
         apiStatus = "request",
     }))
-    local success, remote, code = self.api:getWebProgress(book_id)
+    local success, remote, code = self.api:getWebProgress(book_id, timeout_sec)
     if not success then
         local api_status, api_error_class = self:classifyApiOutcome(code, remote)
         self:logProgressEvent("warn", "web bridge pull failed", self:buildProgressDebugFields(local_snapshot, {
@@ -3136,8 +3198,24 @@ function Grimmlink:startSession()
         end
         self:invokeSafely("session open sync", function()
             self:maybePullRemoteProgress(file_hash, file_path, book_id)
-            self:maybePullWebReaderProgress(file_hash, file_path, book_id, true)
-            self:maybePullRemoteAnnotations(book_id)
+            if self.current_session and self.current_session.file_hash == file_hash then
+                local function doFollowUpSync()
+                    if not self.current_session or self.current_session.file_hash ~= file_hash then
+                        return
+                    end
+                    self:invokeSafely("session open follow-up sync", function()
+                        self:maybePullRemoteAnnotations(book_id)
+                    end)
+                end
+
+                if UIManager and type(UIManager.scheduleIn) == "function" then
+                    UIManager:scheduleIn(0.5, doFollowUpSync)
+                else
+                    doFollowUpSync()
+                end
+            end
+
+            self:scheduleDeferredWebReaderBridgeSync(file_hash, file_path, book_id)
         end)
     end
 
@@ -3191,7 +3269,9 @@ function Grimmlink:endSession(options)
 
     local state = self.db:getProgressState(file_hash)
     local should_push = self:shouldPushProgress(end_snapshot, state, options.reason or "close")
-    if should_push and self.auto_push_on_close then
+    if options.defer_network then
+        self:scheduleDeferredCloseSync(end_snapshot, options.reason or "close", should_push)
+    elseif should_push and self.auto_push_on_close then
         self:pushProgressSnapshot(end_snapshot, options.reason or "close", true)
         self:pushWebReaderBridgeSnapshot(end_snapshot, {
             reason = "web-bridge-" .. (options.reason or "close"),
@@ -3961,13 +4041,10 @@ function Grimmlink:onCloseDocument()
         end
 
         self:logInfo("GrimmLink: document closing")
-        self:endSession({ reason = "close" })
+        self:endSession({ reason = "close", defer_network = true })
         if self.annotations_capture_on_close then
             local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
             if not ok then self:logWarn("GrimmLink: capture annotations error:", tostring(err)) end
-        end
-        if self:isOnline() then
-            self:syncPendingNow(true)
         end
     end, {}, { silent = true })
     return false
@@ -3980,12 +4057,9 @@ function Grimmlink:onSuspend()
         end
 
         self:logInfo("GrimmLink: suspend")
-        self:endSession({ reason = "suspend" })
+        self:endSession({ reason = "suspend", defer_network = true })
         local ok, err = pcall(function() self:captureCurrentDocumentAnnotations() end)
         if not ok then self:logWarn("GrimmLink: suspend annotation capture error:", tostring(err)) end
-        if self:isOnline() then
-            self:syncPendingNow(true)
-        end
     end, {}, { silent = true })
     return false
 end
@@ -4000,8 +4074,12 @@ function Grimmlink:onResume()
         local now = nowUtc()
         if self:isOnline() and (now - (self.last_auto_sync_time or 0)) >= ((tonumber(self.threshold_minutes) or DEFAULTS.threshold_minutes) * 60) then
             self.last_auto_sync_time = now
-            self:syncPendingNow(true)
-            self:pullCurrentDocumentAnnotations(true)
+            self:runAfterUiSettles(function()
+                self:invokeSafely("Resume sync", function()
+                    self:syncPendingNow(true)
+                    self:pullCurrentDocumentAnnotations(true)
+                end, {}, { silent = true })
+            end)
         end
 
         if self.ui and self.ui.document and not self.current_session then
@@ -4010,7 +4088,11 @@ function Grimmlink:onResume()
 
         -- Auto-sync shelf on resume (optional, default OFF)
         if self.shelf_sync_enabled and self.auto_sync_shelf_on_resume and self.shelf_id and self:isOnline() then
-            self:syncShelfNow(true)
+            self:runAfterUiSettles(function()
+                self:invokeSafely("Resume shelf sync", function()
+                    self:syncShelfNow(true)
+                end, {}, { silent = true })
+            end)
         end
     end, {}, { silent = true })
 
@@ -4783,6 +4865,16 @@ function Grimmlink:addToMainMenu(menu_items)
                                   return
                               end
                               self:clearNotFoundHashes()
+                          end,
+                      },
+                      {
+                          text = _("Clear Unmatched Cache"),
+                          callback = function()
+                              if not menuReady() then
+                                  self:showMessage(_("GrimmLink is still starting up"), 2)
+                                  return
+                              end
+                              self:clearUnmatchedCacheEntries()
                           end,
                       },
                       {

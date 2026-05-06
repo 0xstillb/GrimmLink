@@ -616,6 +616,40 @@ function Database:getBookCacheStats()
     return stats
 end
 
+function Database:getUnmatchedCacheCount()
+    local stmt = self.conn:prepare([[
+        SELECT COUNT(*)
+        FROM book_cache
+        WHERE book_id IS NULL
+    ]])
+    if not stmt then
+        return 0
+    end
+
+    local count = 0
+    for row in stmt:rows() do
+        count = tonumber(row[1]) or 0
+        break
+    end
+    stmt:close()
+    return count
+end
+
+function Database:clearUnmatchedCache()
+    local count = self:getUnmatchedCacheCount()
+    local stmt = self.conn:prepare([[DELETE FROM book_cache WHERE book_id IS NULL]])
+    if not stmt then
+        return false, 0
+    end
+
+    local result = stmt:step()
+    stmt:close()
+    if result == SQ3.DONE or result == SQ3.OK then
+        return true, count
+    end
+    return false, count
+end
+
 function Database:getStaleCacheEntries(limit)
     local rows = {}
     local max_rows = limit or 100

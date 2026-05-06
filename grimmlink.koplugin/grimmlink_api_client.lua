@@ -141,7 +141,7 @@ function APIClient:extractErrorMessage(response_text, code)
     return fallback[code] or ("HTTP " .. tostring(code))
 end
 
-function APIClient:request(method, path, body, extra_headers)
+function APIClient:request(method, path, body, extra_headers, timeout_sec)
     if not self.server_url or self.server_url == "" then
         return false, nil, "Server URL not configured"
     end
@@ -150,7 +150,7 @@ function APIClient:request(method, path, body, extra_headers)
     self:log("info", "GrimmLink API:", method, url)
 
     local protocol = url:match("^https://") and https or http
-    protocol.TIMEOUT = self.timeout
+    protocol.TIMEOUT = timeout_sec or self.timeout
 
     local headers = extra_headers or {}
     headers["Accept"] = headers["Accept"] or "application/json"
@@ -231,10 +231,13 @@ function APIClient:getBookByHash(book_hash)
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
-function APIClient:getProgress(book_hash)
+function APIClient:getProgress(book_hash, timeout_sec)
     local success, code, response = self:request(
         "GET",
-        "/api/koreader/syncs/progress/" .. self:_urlEncode(book_hash)
+        "/api/koreader/syncs/progress/" .. self:_urlEncode(book_hash),
+        nil,
+        nil,
+        timeout_sec
     )
     if success and type(response) == "table" then
         return true, response
@@ -331,10 +334,13 @@ function APIClient:removeBookFromShelf(shelf_id, book_id)
     return false, response or ("HTTP " .. tostring(code or "?"))
 end
 
-function APIClient:getWebProgress(book_id)
+function APIClient:getWebProgress(book_id, timeout_sec)
     local success, code, response = self:request(
         "GET",
-        "/api/koreader/books/" .. tostring(book_id) .. "/web-progress"
+        "/api/koreader/books/" .. tostring(book_id) .. "/web-progress",
+        nil,
+        nil,
+        timeout_sec
     )
     if success and type(response) == "table" then
         return true, response
