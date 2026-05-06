@@ -388,6 +388,43 @@ function ShelfSync:syncShelf(opts)
         if book_id and not should_continue then
             -- Need to download
             local filename = self:buildSafeFilename(book, use_original)
+            local sep = download_dir:sub(-1) == "/" and "" or "/"
+            local candidate_path = download_dir .. sep .. filename
+
+            -- Check if the file already exists on disk (e.g. from a previous
+            -- sync session whose DB was cleared).  When the size roughly
+            -- matches the remote, reuse the existing file instead of
+            -- downloading a duplicate with a _2 suffix.
+            local candidate_attr = lfs.attributes(candidate_path)
+            if candidate_attr and candidate_attr.mode == "file" then
+                local remote_kb = book.fileSizeKb
+                local local_kb = math.floor(candidate_attr.size / 1024)
+                if remote_kb == nil or math.abs(local_kb - remote_kb) < 10 then
+                    self.db:upsertShelfSyncEntry({
+                        book_id = book_id,
+                        shelf_id = shelf_id,
+                        remote_filename = book.fileName,
+                        remote_title = book.title,
+                        remote_author = book.author,
+                        remote_format = book.fileFormat,
+                        remote_file_size_kb = book.fileSizeKb,
+                        local_path = candidate_path,
+                        downloaded_at = os.time(),
+                        last_seen_in_shelf_at = sync_start,
+                        downloaded_by_grimmlink = 1,
+                    })
+                    if self.db.saveBookCache then
+                        self.db:saveBookCache(candidate_path, "", book_id, book.title, book.author)
+                    end
+                    result.skipped = result.skipped + 1
+                    logger.info("GrimmLink ShelfSync: reused existing file for bookId=" .. tostring(book_id) .. " at " .. candidate_path)
+                    should_continue = true
+                end
+            end
+        end
+
+        if book_id and not should_continue then
+            local filename = self:buildSafeFilename(book, use_original)
             local dest_path = uniquePath(download_dir, filename)
 
             progress("Downloading: " .. (book.title or filename))
