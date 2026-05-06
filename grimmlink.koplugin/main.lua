@@ -1519,6 +1519,10 @@ function Grimmlink:compareOpenProgress(local_snapshot, remote_snapshot, state)
         return "none"
     end
 
+    if not self:hasMeaningfulProgress(local_snapshot) then
+        return "remote_newer"
+    end
+
     local previous_local = self:buildStoredLocalSnapshot(state)
     local previous_remote = self:buildStoredRemoteSnapshot(state)
     local remote_is_significantly_different = self:progressDifferenceExceeded(local_snapshot, remote_snapshot)
