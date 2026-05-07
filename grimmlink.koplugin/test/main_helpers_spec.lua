@@ -620,6 +620,162 @@ describe("GrimmLink helper methods", function()
         assert.is_true(ok, err)
     end)
 
+    it("starts a Moon+ style periodic push loop while a session is active", function()
+        local calls = {}
+        local scheduled = {}
+        local original_schedule_in = UIManager.scheduleIn
+
+        UIManager.scheduleIn = function(_, delay, callback)
+            scheduled[#scheduled + 1] = {
+                delay = delay,
+                callback = callback,
+            }
+        end
+
+        local ok, err = pcall(function()
+            plugin.enabled = true
+            plugin.auto_push_on_close = true
+            plugin.threshold_minutes = 5
+            plugin.current_session = {
+                file_path = "/books/title.epub",
+                file_hash = "hash-1",
+                book_id = 42,
+            }
+            plugin.requireReady = function()
+                return true
+            end
+            plugin.isOnline = function()
+                return true
+            end
+            plugin.invokeSafely = function(_, _, callback)
+                return callback()
+            end
+            plugin.shouldPushProgress = function()
+                return true
+            end
+            plugin.getCurrentProgressSnapshot = function(_, file_hash, file_path, book_id)
+                return {
+                    bookHash = file_hash,
+                    file_path = file_path,
+                    bookId = book_id,
+                    fileFormat = "EPUB",
+                    percentage = 12,
+                    currentPage = 12,
+                    totalPages = 100,
+                    progress = "12",
+                    location = "12",
+                    timestamp = 1000,
+                }
+            end
+            plugin.db = {
+                getProgressState = function()
+                    return { local_timestamp = 0 }
+                end,
+            }
+            plugin.pushProgressSnapshot = function(_, snapshot, reason, silent)
+                calls[#calls + 1] = "push:" .. tostring(reason) .. ":" .. tostring(silent)
+                assert.are.equal("hash-1", snapshot.bookHash)
+                return true
+            end
+
+            plugin:startProgressAutoPushLoop("hash-1", "/books/title.epub", 42)
+
+            assert.are.equal(1, #scheduled)
+            assert.are.equal(300, scheduled[1].delay)
+
+            scheduled[1].callback()
+
+            assert.are.same({ "push:periodic:true" }, calls)
+            assert.is_true(#scheduled >= 2)
+        end)
+
+        UIManager.scheduleIn = original_schedule_in
+        assert.is_true(ok, err)
+    end)
+
+    it("stops the periodic push loop when the session ends", function()
+        local calls = {}
+        local scheduled = {}
+        local original_schedule_in = UIManager.scheduleIn
+
+        UIManager.scheduleIn = function(_, delay, callback)
+            scheduled[#scheduled + 1] = {
+                delay = delay,
+                callback = callback,
+            }
+        end
+
+        local ok, err = pcall(function()
+            plugin.enabled = true
+            plugin.auto_push_on_close = true
+            plugin.threshold_minutes = 5
+            plugin.current_session = {
+                file_path = "/books/title.epub",
+                file_hash = "hash-1",
+                book_id = 42,
+                start_time = 0,
+                start_snapshot = {
+                    percentage = 10,
+                    currentPage = 10,
+                    location = "10",
+                },
+            }
+            plugin.requireReady = function()
+                return true
+            end
+            plugin.isOnline = function()
+                return true
+            end
+            plugin.invokeSafely = function(_, _, callback)
+                return callback()
+            end
+            plugin.shouldPushProgress = function()
+                return true
+            end
+            plugin.getCurrentProgressSnapshot = function()
+                return {
+                    bookHash = "hash-1",
+                    file_path = "/books/title.epub",
+                    bookId = 42,
+                    fileFormat = "EPUB",
+                    percentage = 12,
+                    currentPage = 12,
+                    totalPages = 100,
+                    progress = "12",
+                    location = "12",
+                    timestamp = 1000,
+                }
+            end
+            plugin.db = {
+                getProgressState = function()
+                    return { local_timestamp = 0 }
+                end,
+                addPendingSession = function()
+                    error("session validation should not queue pending sessions in this test")
+                end,
+            }
+            plugin.validateSession = function()
+                return false
+            end
+            plugin.rememberLocalSnapshot = function() end
+            plugin.pushProgressSnapshot = function(_, snapshot, reason, silent)
+                calls[#calls + 1] = "push:" .. tostring(reason) .. ":" .. tostring(silent)
+                return true
+            end
+
+            plugin:startProgressAutoPushLoop("hash-1", "/books/title.epub", 42)
+            assert.are.equal(1, #scheduled)
+
+            plugin:stopProgressAutoPushLoop()
+            scheduled[1].callback()
+
+            assert.are.same({}, calls)
+        end)
+
+        UIManager.scheduleIn = original_schedule_in
+        assert.is_true(ok, err)
+    end)
+
     it("registers the main menu after initialization is complete", function()
         local menu_items = {}
         plugin.ui = {

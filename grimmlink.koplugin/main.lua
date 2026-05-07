@@ -2031,6 +2031,68 @@ function Grimmlink:scheduleDeferredCloseSync(end_snapshot, reason, should_push)
     end)
 end
 
+function Grimmlink:getProgressAutoPushIntervalSeconds()
+    local minutes = tonumber(self.threshold_minutes) or DEFAULTS.threshold_minutes
+    if minutes < 1 then
+        minutes = 1
+    end
+    return math.max(60, math.floor(minutes * 60))
+end
+
+function Grimmlink:stopProgressAutoPushLoop()
+    self._progress_auto_push_generation = (tonumber(self._progress_auto_push_generation) or 0) + 1
+end
+
+function Grimmlink:startProgressAutoPushLoop(file_hash, file_path, book_id)
+    if not self.auto_push_on_close then
+        return
+    end
+    if not file_hash or file_hash == "" or not book_id then
+        return
+    end
+
+    self:stopProgressAutoPushLoop()
+    local generation = self._progress_auto_push_generation
+
+    local function scheduleNextTick()
+        if generation ~= self._progress_auto_push_generation then
+            return
+        end
+        if not self.current_session or self.current_session.file_hash ~= file_hash then
+            return
+        end
+        if not (UIManager and type(UIManager.scheduleIn) == "function") then
+            return
+        end
+
+        UIManager:scheduleIn(self:getProgressAutoPushIntervalSeconds(), function()
+            self:invokeSafely("Moon+ style progress auto push", function()
+                if generation ~= self._progress_auto_push_generation then
+                    return
+                end
+                if not self.current_session or self.current_session.file_hash ~= file_hash then
+                    return
+                end
+                if not self:requireReady({ require_api = true, silent = true }) then
+                    return
+                end
+
+                local snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
+                if snapshot then
+                    local state = self.db and self.db:getProgressState(file_hash) or nil
+                    if self:shouldPushProgress(snapshot, state, "periodic") then
+                        self:pushProgressSnapshot(snapshot, "periodic", true)
+                    end
+                end
+
+                scheduleNextTick()
+            end, {}, { silent = true })
+        end)
+    end
+
+    scheduleNextTick()
+end
+
 function Grimmlink:applyAndFinalizeRemoteProgress(file_hash, remote_snapshot, success_message, failure_message, success_action, failure_action)
     self:runAfterUiSettles(function()
         self:invokeSafely("apply remote progress", function()
@@ -3175,21 +3237,22 @@ function Grimmlink:startSession()
 
     local start_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
 
-    self.current_session = {
-        file_path = file_path,
-        file_hash = file_hash,
-        book_id = book_id,
-        book_title = title,
+      self.current_session = {
+          file_path = file_path,
+          file_hash = file_hash,
+          book_id = book_id,
+          book_title = title,
         start_time = nowUtc(),
         start_snapshot = start_snapshot,
         book_type = self:getBookType(file_path),
-    }
+      }
 
-    self:logInfo("GrimmLink session started for", title, "hash:", file_hash or "nil")
+      self:logInfo("GrimmLink session started for", title, "hash:", file_hash or "nil")
+      self:startProgressAutoPushLoop(file_hash, file_path, book_id)
 
-    -- Defer all network calls so they don't block the document render thread.
-    -- Blocking HTTP in onReaderReady corrupts KOReader's internal state and
-    -- causes a native crash, especially on EPUB/CRE documents.
+      -- Defer all network calls so they don't block the document render thread.
+      -- Blocking HTTP in onReaderReady corrupts KOReader's internal state and
+      -- causes a native crash, especially on EPUB/CRE documents.
     local defer = UIManager and type(UIManager.scheduleIn) == "function"
     local function doNetworkSync()
         -- Guard: skip if user switched books before the deferred sync fired
@@ -3232,12 +3295,13 @@ function Grimmlink:endSession(options)
         return false
     end
 
-    local file_path = self.current_session.file_path
-    local file_hash = self.current_session.file_hash
-    local book_id = self.current_session.book_id
-    local end_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
-    local duration_seconds = math.max(0, nowUtc() - (self.current_session.start_time or nowUtc()))
-    local start_snapshot = self.current_session.start_snapshot or {}
+      local file_path = self.current_session.file_path
+      local file_hash = self.current_session.file_hash
+      local book_id = self.current_session.book_id
+      local end_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id)
+      self:stopProgressAutoPushLoop()
+      local duration_seconds = math.max(0, nowUtc() - (self.current_session.start_time or nowUtc()))
+      local start_snapshot = self.current_session.start_snapshot or {}
 
     local progress_delta = (tonumber(end_snapshot.percentage) or 0) - (tonumber(start_snapshot.percentage) or 0)
     local session_valid = self:validateSession(
@@ -4501,13 +4565,13 @@ function Grimmlink:addToMainMenu(menu_items)
                             self:saveSetting("auto_pull_on_open", not self.auto_pull_on_open)
                         end,
                     },
-                    {
-                        text = _("Auto push on book close"),
-                        checked_func = function()
-                            return self.auto_push_on_close
-                        end,
-                        callback = function()
-                            self:saveSetting("auto_push_on_close", not self.auto_push_on_close)
+                      {
+                          text = _("Auto push progress (Moon+ style)"),
+                          checked_func = function()
+                              return self.auto_push_on_close
+                          end,
+                          callback = function()
+                              self:saveSetting("auto_push_on_close", not self.auto_push_on_close)
                         end,
                     },
                     {
