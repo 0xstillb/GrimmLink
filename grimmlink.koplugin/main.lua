@@ -2630,6 +2630,36 @@ function Grimmlink:shouldPushProgress(current_snapshot, state, reason)
     return false
 end
 
+function Grimmlink:selectCloseSessionSnapshot(end_snapshot, state)
+    if not end_snapshot then
+        return nil
+    end
+
+    local stored_local_snapshot = self:buildStoredLocalSnapshot(state)
+    if not stored_local_snapshot then
+        return end_snapshot
+    end
+
+    local session_start_snapshot = self.current_session and self.current_session.start_snapshot or nil
+    if not session_start_snapshot then
+        return end_snapshot
+    end
+
+    local end_is_close_to_start = not self:progressDifferenceExceeded(end_snapshot, session_start_snapshot)
+    local stored_local_differs_from_start = self:progressDifferenceExceeded(stored_local_snapshot, session_start_snapshot)
+
+    if end_is_close_to_start and stored_local_differs_from_start then
+        self:logInfo("GrimmLink preferring stored local close snapshot over stale close capture")
+        local merged_snapshot = cloneTable(end_snapshot)
+        for key, value in pairs(stored_local_snapshot) do
+            merged_snapshot[key] = value
+        end
+        return merged_snapshot
+    end
+
+    return end_snapshot
+end
+
 function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id)
     if not self.auto_pull_on_open or not file_hash or file_hash == "" or not book_id then
         return
@@ -3302,16 +3332,18 @@ function Grimmlink:endSession(options)
       self:stopProgressAutoPushLoop()
       local duration_seconds = math.max(0, nowUtc() - (self.current_session.start_time or nowUtc()))
       local start_snapshot = self.current_session.start_snapshot or {}
+      local state = self.db:getProgressState(file_hash)
+      local close_snapshot = self:selectCloseSessionSnapshot(end_snapshot, state) or end_snapshot
 
-    local progress_delta = (tonumber(end_snapshot.percentage) or 0) - (tonumber(start_snapshot.percentage) or 0)
+    local progress_delta = (tonumber(close_snapshot.percentage) or 0) - (tonumber(start_snapshot.percentage) or 0)
     local session_valid = self:validateSession(
         duration_seconds,
         progress_delta,
         start_snapshot.currentPage,
-        end_snapshot.currentPage
+        close_snapshot.currentPage
     )
 
-    self:rememberLocalSnapshot(file_hash, end_snapshot, "local-" .. (options.reason or "close"))
+    self:rememberLocalSnapshot(file_hash, close_snapshot, "local-" .. (options.reason or "close"))
 
     if session_valid then
         self.db:addPendingSession({
@@ -3321,23 +3353,22 @@ function Grimmlink:endSession(options)
             device = self.device_name,
             deviceId = self.device_id,
             startTime = toIso8601(self.current_session.start_time),
-            endTime = toIso8601(end_snapshot.timestamp),
+            endTime = toIso8601(close_snapshot.timestamp),
             durationSeconds = duration_seconds,
             startProgress = roundToSingleDecimal(start_snapshot.percentage or 0),
-            endProgress = roundToSingleDecimal(end_snapshot.percentage or 0),
+            endProgress = roundToSingleDecimal(close_snapshot.percentage or 0),
             progressDelta = roundToSingleDecimal(progress_delta),
             startLocation = start_snapshot.location or "",
-            endLocation = end_snapshot.location or "",
+            endLocation = close_snapshot.location or "",
         })
     end
 
-    local state = self.db:getProgressState(file_hash)
-    local should_push = self:shouldPushProgress(end_snapshot, state, options.reason or "close")
+    local should_push = self:shouldPushProgress(close_snapshot, state, options.reason or "close")
     if options.defer_network then
-        self:scheduleDeferredCloseSync(end_snapshot, options.reason or "close", should_push)
+        self:scheduleDeferredCloseSync(close_snapshot, options.reason or "close", should_push)
     elseif should_push and self.auto_push_on_close then
-        self:pushProgressSnapshot(end_snapshot, options.reason or "close", true)
-        self:pushWebReaderBridgeSnapshot(end_snapshot, {
+        self:pushProgressSnapshot(close_snapshot, options.reason or "close", true)
+        self:pushWebReaderBridgeSnapshot(close_snapshot, {
             reason = "web-bridge-" .. (options.reason or "close"),
         })
     end

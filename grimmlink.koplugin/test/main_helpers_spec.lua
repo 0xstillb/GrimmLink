@@ -567,6 +567,113 @@ describe("GrimmLink helper methods", function()
         assert.is_true(ok, err)
     end)
 
+    it("prefers the newer stored local snapshot when close capture regresses to the session start", function()
+        local calls = {}
+        local scheduled = {}
+        local original_schedule_in = UIManager.scheduleIn
+
+        UIManager.scheduleIn = function(_, delay, callback)
+            scheduled[#scheduled + 1] = {
+                delay = delay,
+                callback = callback,
+            }
+        end
+
+        local ok, err = pcall(function()
+            plugin._initialized = true
+            plugin.enabled = true
+            plugin.auto_push_on_close = true
+            plugin.annotations_capture_on_close = true
+            plugin.api = {
+                init = function() end,
+            }
+            plugin.db = {
+                addPendingSession = function() end,
+                getProgressState = function()
+                    return {
+                        local_progress = 22.4,
+                        local_location = "/body/DocFragment[5]/body/h3/text().0",
+                        local_percentage = 22.4,
+                        local_current_page = 40,
+                        local_total_pages = 100,
+                        local_timestamp = 2000,
+                    }
+                end,
+                setProgressLastAction = function() end,
+            }
+            plugin.current_session = {
+                file_path = "/books/title.epub",
+                file_hash = "hash-1",
+                book_id = 42,
+                book_title = "Title",
+                start_time = 1000,
+                start_snapshot = {
+                    percentage = 0.6,
+                    currentPage = 1,
+                    location = "/body/DocFragment[1]/body/div/svg.0",
+                },
+                book_type = "EPUB",
+            }
+            plugin.isOnline = function()
+                return true
+            end
+            plugin.getCurrentProgressSnapshot = function()
+                return {
+                    bookHash = "hash-1",
+                    bookId = 42,
+                    file_path = "/books/title.epub",
+                    fileFormat = "EPUB",
+                    currentPage = 1,
+                    totalPages = 100,
+                    percentage = 0.6,
+                    progress = "/body/DocFragment[1]/body/div/svg.0",
+                    location = "/body/DocFragment[1]/body/div/svg.0",
+                    timestamp = 3000,
+                }
+            end
+            plugin.rememberLocalSnapshot = function(_, _, snapshot)
+                assert.are.equal(22.4, snapshot.percentage)
+                assert.are.equal("/body/DocFragment[5]/body/h3/text().0", snapshot.location)
+            end
+            plugin.shouldPushProgress = function()
+                return true
+            end
+            plugin.pushProgressSnapshot = function(_, snapshot, reason, silent)
+                calls[#calls + 1] = "push:" .. tostring(reason) .. ":" .. tostring(silent)
+                assert.are.equal(22.4, snapshot.percentage)
+                assert.are.equal("/body/DocFragment[5]/body/h3/text().0", snapshot.location)
+                return true
+            end
+            plugin.pushWebReaderBridgeSnapshot = function(_, snapshot, opts)
+                calls[#calls + 1] = "bridge:" .. tostring(opts.reason)
+                assert.are.equal(22.4, snapshot.percentage)
+                assert.are.equal("/body/DocFragment[5]/body/h3/text().0", snapshot.location)
+                return { ok = true }
+            end
+            plugin.syncPendingNow = function(_, silent)
+                calls[#calls + 1] = "syncPending:" .. tostring(silent)
+            end
+
+            local result = plugin:endSession({ reason = "close", defer_network = true })
+
+            assert.is_true(result)
+            assert.is_nil(plugin.current_session)
+            assert.are.equal(1, #scheduled)
+            assert.are.same({}, calls)
+
+            scheduled[1].callback()
+
+            assert.are.same({
+                "push:close:true",
+                "bridge:web-bridge-close",
+                "syncPending:true",
+            }, calls)
+        end)
+
+        UIManager.scheduleIn = original_schedule_in
+        assert.is_true(ok, err)
+    end)
+
     it("defers resume sync work until after the UI settles", function()
         local calls = {}
         local scheduled = {}
