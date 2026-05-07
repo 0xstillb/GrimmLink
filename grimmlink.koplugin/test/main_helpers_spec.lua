@@ -674,57 +674,59 @@ describe("GrimmLink helper methods", function()
         assert.is_true(ok, err)
     end)
 
-    it("defers resume sync work until after the UI settles", function()
+    it("skips remote annotation auto-pull for EPUB-like books", function()
         local calls = {}
-        local scheduled = {}
-        local original_schedule_in = UIManager.scheduleIn
-
-        UIManager.scheduleIn = function(_, delay, callback)
-            scheduled[#scheduled + 1] = {
-                delay = delay,
-                callback = callback,
+        plugin.enabled = true
+        plugin.auto_pull_on_open = true
+        plugin.annotations_sync_enabled = true
+        plugin.bookmarks_sync_enabled = false
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.current_session = {
+            book_type = "EPUB",
+        }
+        plugin.pullCurrentDocumentAnnotations = function(_, silent, opts)
+            calls[#calls + 1] = {
+                silent = silent,
+                book_id = opts and opts.book_id,
             }
+            return { fetched = 1 }
         end
 
-        local ok, err = pcall(function()
-            plugin.enabled = true
-            plugin.ui = {
-                document = {
-                    file = "/books/title.epub",
-                },
+        plugin:maybePullRemoteAnnotations(42)
+
+        assert.are.same({}, calls)
+    end)
+
+    it("still auto-pulls annotations for PDF once the UI settles", function()
+        local calls = {}
+        plugin.enabled = true
+        plugin.auto_pull_on_open = true
+        plugin.annotations_sync_enabled = true
+        plugin.bookmarks_sync_enabled = false
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.current_session = {
+            book_type = "PDF",
+        }
+        plugin.pullCurrentDocumentAnnotations = function(_, silent, opts)
+            calls[#calls + 1] = {
+                silent = silent,
+                book_id = opts and opts.book_id,
             }
-            plugin.isOnline = function()
-                return true
-            end
-            plugin.last_auto_sync_time = 0
-            plugin.threshold_minutes = 5
-            plugin.startSession = function()
-                calls[#calls + 1] = "start"
-            end
-            plugin.syncPendingNow = function(_, silent)
-                calls[#calls + 1] = "syncPending:" .. tostring(silent)
-            end
-            plugin.pullCurrentDocumentAnnotations = function(_, silent)
-                calls[#calls + 1] = "pullAnnotations:" .. tostring(silent)
-            end
+            return { fetched = 1 }
+        end
 
-            local result = plugin:onResume()
+        plugin:maybePullRemoteAnnotations(42)
 
-            assert.is_false(result)
-            assert.are.same({ "start" }, calls)
-            assert.are.equal(1, #scheduled)
-
-            scheduled[1].callback()
-
-            assert.are.same({
-                "start",
-                "syncPending:true",
-                "pullAnnotations:true",
-            }, calls)
-        end)
-
-        UIManager.scheduleIn = original_schedule_in
-        assert.is_true(ok, err)
+        assert.are.same({
+            {
+                silent = true,
+                book_id = 42,
+            },
+        }, calls)
     end)
 
     it("starts a Moon+ style periodic push loop while a session is active", function()

@@ -3852,6 +3852,14 @@ function Grimmlink:maybePullRemoteAnnotations(book_id)
     if not self:isOnline() then
         return
     end
+    local current_book_type = self.current_session and self.current_session.book_type
+    if current_book_type then
+        local normalized_book_type = tostring(current_book_type):upper()
+        if normalized_book_type == "EPUB" or normalized_book_type == "FB2" or normalized_book_type == "MOBI" or normalized_book_type == "AZW3" then
+            self:logInfo("GrimmLink annotation auto-pull skipped for EPUB-like book to avoid open-time crash.")
+            return
+        end
+    end
     self:pullCurrentDocumentAnnotations(true, { book_id = book_id })
 end
 
