@@ -3,18 +3,31 @@ local https = require("ssl.https")
 local ltn12 = require("ltn12")
 local json = require("json")
 local logger = require("logger")
-local unpackValues = table.unpack or unpack
+
+local unpack_values = table.unpack or unpack
 
 local APIClient = {
     timeout = 25,
     secure_logs = false,
 }
 
-local function redactUrls(message)
+local function redact_urls(message)
     if type(message) ~= "string" then
         return tostring(message)
     end
     return message:gsub("https?://[^%s]+", "[URL REDACTED]")
+end
+
+local function is_md5(value)
+    return type(value) == "string" and #value == 32 and value:match("^[a-fA-F0-9]+$") ~= nil
+end
+
+local function md5(value)
+    local ok, sha2 = pcall(require, "ffi/sha2")
+    if ok and sha2 and type(sha2.md5) == "function" then
+        return sha2.md5(value or "")
+    end
+    return tostring(value or "")
 end
 
 function APIClient:new(o)
@@ -25,61 +38,49 @@ function APIClient:new(o)
 end
 
 function APIClient:init(server_url, username, password, secure_logs)
-    self.server_url = server_url or ""
-    self.username = username or ""
-    self.auth_key = password or ""
-    self.secure_logs = secure_logs or false
+    self.server_url = tostring(server_url or "")
+    self.username = tostring(username or "")
+    self.password = tostring(password or "")
+    self.secure_logs = secure_logs == true
 
     if self.server_url:sub(-1) == "/" then
         self.server_url = self.server_url:sub(1, -2)
     end
 end
 
-function APIClient:_looksLikeMd5(value)
-    return type(value) == "string" and value:match("^[a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9]$") ~= nil
-end
-
 function APIClient:_resolveAuthKey()
-    if not self.auth_key or self.auth_key == "" then
+    if self.password == "" then
         return ""
     end
-
-    if self:_looksLikeMd5(self.auth_key) then
-        return self.auth_key:lower()
+    if is_md5(self.password) then
+        return self.password:lower()
     end
-
-    local ok, sha2 = pcall(require, "ffi/sha2")
-    if ok and sha2 and type(sha2.md5) == "function" then
-        return sha2.md5(self.auth_key)
-    end
-
-    return self.auth_key
+    return md5(self.password)
 end
 
 function APIClient:log(level, ...)
     local args = { ... }
     if self.secure_logs then
         for i = 1, #args do
-            args[i] = redactUrls(args[i])
+            args[i] = redact_urls(args[i])
         end
     end
 
     if level == "warn" then
-        logger.warn(unpackValues(args))
+        logger.warn(unpack_values(args))
     elseif level == "err" then
-        logger.err(unpackValues(args))
+        logger.err(unpack_values(args))
     elseif level == "dbg" then
-        logger.dbg(unpackValues(args))
+        logger.dbg(unpack_values(args))
     else
-        logger.info(unpackValues(args))
+        logger.info(unpack_values(args))
     end
 end
 
 function APIClient:_urlEncode(value)
-    if not value then
+    if value == nil then
         return ""
     end
-
     local encoded = tostring(value)
     encoded = encoded:gsub("\n", "\r\n")
     encoded = encoded:gsub("([^%w %-%_%.~])", function(char)
@@ -135,6 +136,8 @@ function APIClient:extractErrorMessage(response_text, code)
         [403] = "Forbidden - Access denied",
         [404] = "Not Found",
         [409] = "Conflict",
+        [415] = "Unsupported Media Type",
+        [422] = "Unprocessable Entity",
         [500] = "Internal Server Error",
         [503] = "Service Unavailable",
     }
@@ -155,10 +158,9 @@ function APIClient:request(method, path, body, extra_headers, timeout_sec)
     local headers = extra_headers or {}
     headers["Accept"] = headers["Accept"] or "application/json"
 
-    local resolved_auth_key = self:_resolveAuthKey()
-    if self.username ~= "" and resolved_auth_key ~= "" then
+    if self.username ~= "" and self.password ~= "" then
         headers["x-auth-user"] = self.username
-        headers["x-auth-key"] = resolved_auth_key
+        headers["x-auth-key"] = self:_resolveAuthKey()
     end
 
     local request_body = nil
@@ -172,7 +174,6 @@ function APIClient:request(method, path, body, extra_headers, timeout_sec)
         end
         headers["Content-Length"] = tostring(#request_body)
         source = ltn12.source.string(request_body)
-        self:log("dbg", "GrimmLink API:", method, path, "payload bytes:", #request_body)
     end
 
     local response_buffer = {}
@@ -209,15 +210,15 @@ function APIClient:testAuth()
     if self.username == "" then
         return false, "Username not configured"
     end
-    if self.auth_key == "" then
+    if self.password == "" then
         return false, "Password not configured"
     end
 
     local success, code, response = self:request("GET", "/api/koreader/users/auth")
     if success then
-        return true, response
+        return true, response, code
     end
-    return false, response or ("HTTP " .. tostring(code or "?"))
+    return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
 function APIClient:getBookByHash(book_hash)
@@ -226,7 +227,7 @@ function APIClient:getBookByHash(book_hash)
         "/api/koreader/books/by-hash/" .. self:_urlEncode(book_hash)
     )
     if success and type(response) == "table" then
-        return true, response
+        return true, response, code
     end
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
@@ -240,9 +241,9 @@ function APIClient:getProgress(book_hash, timeout_sec)
         timeout_sec
     )
     if success and type(response) == "table" then
-        return true, response
+        return true, response, code
     end
-    return false, response or ("HTTP " .. tostring(code or "?"))
+    return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
 function APIClient:updateProgress(progress_payload)
@@ -261,12 +262,29 @@ function APIClient:submitSession(session_payload)
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
+function APIClient:submitSessionBatch(book_id, book_hash, book_type, device, device_id, sessions)
+    local payload = {
+        bookId = book_id,
+        bookHash = book_hash,
+        bookType = book_type or "EPUB",
+        device = device,
+        deviceId = device_id,
+        sessions = sessions,
+    }
+
+    local success, code, response = self:request("POST", "/api/v1/reading-sessions/batch", payload)
+    if success then
+        return true, response, code
+    end
+    return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
 function APIClient:getShelves()
     local success, code, response = self:request("GET", "/api/koreader/shelves")
     if success and type(response) == "table" then
-        return true, response
+        return true, response, code
     end
-    return false, response or ("HTTP " .. tostring(code or "?"))
+    return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
 function APIClient:getShelfBooks(shelf_id)
@@ -275,9 +293,9 @@ function APIClient:getShelfBooks(shelf_id)
         "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books"
     )
     if success and type(response) == "table" then
-        return true, response
+        return true, response, code
     end
-    return false, response or ("HTTP " .. tostring(code or "?"))
+    return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
 function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec)
@@ -303,6 +321,7 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec)
         headers = {
             ["x-auth-user"] = self.username,
             ["x-auth-key"] = self:_resolveAuthKey(),
+            ["Accept"] = "application/octet-stream",
         },
         sink = ltn12.sink.file(file),
     }
@@ -329,113 +348,31 @@ function APIClient:removeBookFromShelf(shelf_id, book_id)
         "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove"
     )
     if success then
-        return true, response
+        return true, response, code
     end
-    return false, response or ("HTTP " .. tostring(code or "?"))
+    return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
-function APIClient:getWebProgress(book_id, timeout_sec)
+function APIClient:getPdfProgress(book_id, timeout_sec)
     local success, code, response = self:request(
         "GET",
-        "/api/koreader/books/" .. tostring(book_id) .. "/web-progress",
+        "/api/koreader/books/" .. tostring(book_id) .. "/pdf-progress",
         nil,
         nil,
         timeout_sec
     )
     if success and type(response) == "table" then
-        return true, response
+        return true, response, code
     end
-    return false, response or ("HTTP " .. tostring(code or "?"))
+    return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
-function APIClient:updateWebProgress(book_id, progress_payload)
+function APIClient:updatePdfProgress(book_id, progress_payload)
     local success, code, response = self:request(
         "PUT",
-        "/api/koreader/books/" .. tostring(book_id) .. "/web-progress",
+        "/api/koreader/books/" .. tostring(book_id) .. "/pdf-progress",
         progress_payload
     )
-    if success then
-        return true, response, code
-    end
-    return false, response or ("HTTP " .. tostring(code or "?")), code
-end
-
-function APIClient:resolveBridgeCfi(book_id, payload)
-    local success, code, response = self:request(
-        "POST",
-        "/api/koreader/books/" .. tostring(book_id) .. "/cfi/resolve",
-        payload
-    )
-    if success then
-        return true, response, code
-    end
-    return false, response or ("HTTP " .. tostring(code or "?")), code
-end
-
--- ===== Annotation / Bookmark / Rating sync =====
-
-function APIClient:getAnnotations(book_id, since_epoch_sec)
-    local path = "/api/koreader/books/" .. tostring(book_id) .. "/annotations"
-    if since_epoch_sec then
-        path = path .. "?since=" .. self:_urlEncode(since_epoch_sec)
-    end
-    local success, code, response = self:request(
-        "GET", path)
-    if success then return true, response end
-    return false, response or ("HTTP " .. tostring(code or "?"))
-end
-
-function APIClient:postAnnotationsBatch(book_id, items)
-    local success, code, response = self:request(
-        "POST", "/api/koreader/books/" .. tostring(book_id) .. "/annotations/batch", items or {})
-    if success then return true, response end
-    return false, response or ("HTTP " .. tostring(code or "?"))
-end
-
-function APIClient:getBookmarks(book_id, since_epoch_sec)
-    local path = "/api/koreader/books/" .. tostring(book_id) .. "/bookmarks"
-    if since_epoch_sec then
-        path = path .. "?since=" .. self:_urlEncode(since_epoch_sec)
-    end
-    local success, code, response = self:request(
-        "GET", path)
-    if success then return true, response end
-    return false, response or ("HTTP " .. tostring(code or "?"))
-end
-
-function APIClient:postBookmarksBatch(book_id, items)
-    local success, code, response = self:request(
-        "POST", "/api/koreader/books/" .. tostring(book_id) .. "/bookmarks/batch", items or {})
-    if success then return true, response end
-    return false, response or ("HTTP " .. tostring(code or "?"))
-end
-
-function APIClient:getRating(book_id)
-    local success, code, response = self:request(
-        "GET", "/api/koreader/books/" .. tostring(book_id) .. "/rating")
-    if success then return true, response end
-    return false, response or ("HTTP " .. tostring(code or "?"))
-end
-
-function APIClient:putRating(book_id, rating)
-    local success, code, response = self:request(
-        "PUT", "/api/koreader/books/" .. tostring(book_id) .. "/rating",
-        { bookId = tonumber(book_id), rating = rating })
-    if success then return true, response end
-    return false, response or ("HTTP " .. tostring(code or "?"))
-end
-
-function APIClient:submitSessionBatch(book_id, book_hash, book_type, device, device_id, sessions)
-    local payload = {
-        bookId = book_id,
-        bookHash = book_hash,
-        bookType = book_type or "EPUB",
-        device = device,
-        deviceId = device_id,
-        sessions = sessions,
-    }
-
-    local success, code, response = self:request("POST", "/api/v1/reading-sessions/batch", payload)
     if success then
         return true, response, code
     end

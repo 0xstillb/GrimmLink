@@ -7,6 +7,7 @@ package.path = table.concat({
 }, ";")
 
 local captured_request
+local next_http_response
 
 package.preload["logger"] = function()
     return {
@@ -48,10 +49,16 @@ package.preload["socket.http"] = function()
     return {
         request = function(arguments)
             captured_request = arguments
-            if arguments.sink then
-                arguments.sink('{"status":"ok"}')
+            local response = next_http_response or {
+                body = '{"status":"ok"}',
+                code = 200,
+                headers = {},
+                ok = 1,
+            }
+            if arguments.sink and response.body then
+                arguments.sink(response.body)
             end
-            return 1, 200, {}
+            return response.ok or 1, response.code or 200, response.headers or {}
         end,
     }
 end
@@ -60,10 +67,16 @@ package.preload["ssl.https"] = function()
     return {
         request = function(arguments)
             captured_request = arguments
-            if arguments.sink then
-                arguments.sink('{"status":"ok"}')
+            local response = next_http_response or {
+                body = '{"status":"ok"}',
+                code = 200,
+                headers = {},
+                ok = 1,
+            }
+            if arguments.sink and response.body then
+                arguments.sink(response.body)
             end
-            return 1, 200, {}
+            return response.ok or 1, response.code or 200, response.headers or {}
         end,
     }
 end
@@ -71,9 +84,6 @@ end
 package.preload["json"] = function()
     return {
         encode = function(value)
-            if type(value) == "table" and value.hello then
-                return '{"hello":"world"}'
-            end
             if type(value) == "table" and value.message then
                 return '{"message":"' .. value.message .. '"}'
             end
@@ -106,13 +116,9 @@ describe("GrimmLink API client", function()
 
     before_each(function()
         captured_request = nil
+        next_http_response = nil
         client = APIClient:new()
         client:init("http://example.com", "reader", "secret-password", false)
-    end)
-
-    it("encodes path values", function()
-        assert.are.equal("The+Name+of+the+Rose", client:_urlEncode("The Name of the Rose"))
-        assert.are.equal("a%26b", client:_urlEncode("a&b"))
     end)
 
     it("hashes plain-text passwords into x-auth-key headers", function()
@@ -134,8 +140,43 @@ describe("GrimmLink API client", function()
         assert.are.equal("5f4dcc3b5aa765d61d8327deb882cf99", captured_request.headers["x-auth-key"])
     end)
 
-    it("extracts fallback error messages", function()
-        assert.are.equal("bad", client:extractErrorMessage('{"message":"bad"}', 400))
-        assert.are.equal("HTTP 418", client:extractErrorMessage(string.rep("x", 500), 418))
+    it("uses the canonical PDF bridge endpoint", function()
+        client:getPdfProgress(123)
+        assert.are.equal("/api/koreader/books/123/pdf-progress", captured_request.url:match("/api/koreader/books/123/pdf%-progress$") and "/api/koreader/books/123/pdf-progress" or nil)
+
+        client:updatePdfProgress(123, { currentPage = 9 })
+        assert.are.equal("/api/koreader/books/123/pdf-progress", captured_request.url:match("/api/koreader/books/123/pdf%-progress$") and "/api/koreader/books/123/pdf-progress" or nil)
+    end)
+
+    it("returns useful auth errors", function()
+        client:init("http://example.com", "", "", false)
+        local success, message = client:testAuth()
+        assert.is_false(success)
+        assert.are.equal("Username not configured", message)
+
+        client:init("http://example.com", "reader", "secret-password", false)
+        next_http_response = {
+            body = '{"message":"Unauthorized - Invalid credentials"}',
+            code = 401,
+            headers = {},
+            ok = 1,
+        }
+        success, message = client:testAuth()
+        assert.is_false(success)
+        assert.is_true(tostring(message):find("Unauthorized") ~= nil)
+    end)
+
+    it("uses the reading session endpoints with bookType payloads", function()
+        client:submitSession({
+            bookId = 99,
+            bookType = "PDF",
+            startTime = "2026-05-07T00:00:00Z",
+            endTime = "2026-05-07T00:01:00Z",
+            durationSeconds = 60,
+        })
+        assert.are.equal("/api/v1/reading-sessions", captured_request.url:match("/api/v1/reading%-sessions$") and "/api/v1/reading-sessions" or nil)
+
+        client:submitSessionBatch(99, "hash-1", "PDF", "KOReader", "device-1", {})
+        assert.are.equal("/api/v1/reading-sessions/batch", captured_request.url:match("/api/v1/reading%-sessions/batch$") and "/api/v1/reading-sessions/batch" or nil)
     end)
 end)

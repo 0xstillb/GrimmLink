@@ -26,7 +26,7 @@ describe("GrimmLink database helpers", function()
         local fake_stmt = {
             bind = function() end,
             step = function()
-                return 0
+                return 101
             end,
             close = function() end,
         }

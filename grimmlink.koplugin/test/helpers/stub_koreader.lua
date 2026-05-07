@@ -16,6 +16,8 @@ local STUB_KEYS = {
     "grimmlink_api_client",
     "grimmlink_file_logger",
     "grimmlink_updater",
+    "ffi/sha2",
+    "device",
     "bit",
 }
 
@@ -220,6 +222,21 @@ local function install()
                     end,
                 }
             end,
+        }
+    end
+
+    package.preload["ffi/sha2"] = function()
+        return {
+            md5 = function(value)
+                return "md5:" .. tostring(value or "")
+            end,
+        }
+    end
+
+    package.preload["device"] = function()
+        return {
+            model = "KOReader",
+            name = "KOReader",
         }
     end
 
