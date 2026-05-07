@@ -74,6 +74,7 @@ local DEFAULTS = {
     annotations_sync_enabled = false,
     bookmarks_sync_enabled = false,
     rating_sync_enabled = false,
+    annotations_auto_pull_on_open = false,
     annotations_capture_on_close = true,
     -- Auto update (Prompt 7B)
     auto_update_enabled = false,
@@ -897,6 +898,7 @@ function Grimmlink:init()
     self.annotations_sync_enabled = self:readSetting("annotations_sync_enabled", DEFAULTS.annotations_sync_enabled)
     self.bookmarks_sync_enabled = self:readSetting("bookmarks_sync_enabled", DEFAULTS.bookmarks_sync_enabled)
     self.rating_sync_enabled = self:readSetting("rating_sync_enabled", DEFAULTS.rating_sync_enabled)
+    self.annotations_auto_pull_on_open = self:readSetting("annotations_auto_pull_on_open", DEFAULTS.annotations_auto_pull_on_open)
     self.annotations_capture_on_close = self:readSetting("annotations_capture_on_close", DEFAULTS.annotations_capture_on_close)
 
     self.annotations = Annotations:new({
@@ -3292,19 +3294,23 @@ function Grimmlink:startSession()
         self:invokeSafely("session open sync", function()
             self:maybePullRemoteProgress(file_hash, file_path, book_id)
             if self.current_session and self.current_session.file_hash == file_hash then
-                local function doFollowUpSync()
-                    if not self.current_session or self.current_session.file_hash ~= file_hash then
-                        return
+                if self.annotations_auto_pull_on_open then
+                    local function doFollowUpSync()
+                        if not self.current_session or self.current_session.file_hash ~= file_hash then
+                            return
+                        end
+                        self:invokeSafely("session open follow-up sync", function()
+                            self:maybePullRemoteAnnotations(book_id)
+                        end)
                     end
-                    self:invokeSafely("session open follow-up sync", function()
-                        self:maybePullRemoteAnnotations(book_id)
-                    end)
-                end
 
-                if UIManager and type(UIManager.scheduleIn) == "function" then
-                    UIManager:scheduleIn(0.5, doFollowUpSync)
-                else
-                    doFollowUpSync()
+                    if UIManager and type(UIManager.scheduleIn) == "function" then
+                        -- Remote annotation import is opt-in because it can touch reader state
+                        -- while the document is still settling after book open.
+                        UIManager:scheduleIn(2, doFollowUpSync)
+                    else
+                        doFollowUpSync()
+                    end
                 end
             end
 
@@ -4180,7 +4186,9 @@ function Grimmlink:onResume()
             self:runAfterUiSettles(function()
                 self:invokeSafely("Resume sync", function()
                     self:syncPendingNow(true)
-                    self:pullCurrentDocumentAnnotations(true)
+                    if self.annotations_auto_pull_on_open then
+                        self:pullCurrentDocumentAnnotations(true)
+                    end
                 end, {}, { silent = true })
             end)
         end
