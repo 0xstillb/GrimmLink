@@ -69,7 +69,11 @@ local function firstRow(stmt, mapper)
 
     local result = nil
     for row in stmt:rows() do
-        result = mapper(row)
+        if mapper then
+            result = mapper(row)
+        else
+            result = row
+        end
         break
     end
     stmt:close()
