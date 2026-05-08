@@ -820,4 +820,56 @@ describe("GrimmLink helper methods", function()
         local password_item = findMenuItem(advanced_item.sub_item_table, "Password")
         assert.is_not_nil(password_item)
     end)
+
+    it("uses live release checks for manual update checks", function()
+        local plugin = newPlugin()
+        local captured_use_cache = nil
+        plugin.updater = {
+            setAllowPrerelease = function() end,
+            checkForUpdates = function(_, use_cache)
+                captured_use_cache = use_cache
+                return {
+                    available = false,
+                    current_version = "v1.0.1",
+                    latest_version = "v1.0.1",
+                }, nil
+            end,
+        }
+
+        local result, err = plugin:checkForUpdates(false)
+        assert.is_nil(err)
+        assert.is_not_nil(result)
+        assert.is_false(captured_use_cache)
+    end)
+
+    it("auto-installs on startup when auto update and startup checks are enabled", function()
+        local plugin = newPlugin({
+            auto_update_enabled = true,
+            check_update_on_startup = true,
+        })
+        local seen_use_cache = nil
+        local install_calls = 0
+        plugin.updater = {
+            setAllowPrerelease = function() end,
+            checkForUpdates = function(_, use_cache)
+                seen_use_cache = use_cache
+                return {
+                    available = true,
+                    current_version = "v1.0.1",
+                    latest_version = "v1.0.2",
+                    release_info = {
+                        download_url = "https://example.invalid/grimmlink.koplugin.zip",
+                    },
+                }, nil
+            end,
+            installUpdate = function(_, release_info)
+                install_calls = install_calls + 1
+                return release_info ~= nil, release_info and nil or "missing release"
+            end,
+        }
+
+        plugin:maybeCheckForUpdatesOnStartup()
+        assert.is_false(seen_use_cache)
+        assert.are.equal(1, install_calls)
+    end)
 end)

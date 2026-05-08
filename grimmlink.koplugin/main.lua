@@ -2000,7 +2000,8 @@ function Grimmlink:pushPdfWebProgressForCurrentDocument(reason, silent)
     return self:pushPdfWebProgress(snapshot, reason or "manual", silent)
 end
 
-function Grimmlink:checkForUpdates(silent)
+function Grimmlink:checkForUpdates(silent, options)
+    options = options or {}
     if not self.updater or type(self.updater.checkForUpdates) ~= "function" then
         if not silent then
             self:showMessage(_("Updater is unavailable"), 4)
@@ -2015,7 +2016,7 @@ function Grimmlink:checkForUpdates(silent)
     if type(self.updater.setAllowPrerelease) == "function" then
         self.updater:setAllowPrerelease(self.allow_prerelease_updates)
     end
-    local use_cache = silent == true
+    local use_cache = silent == true and options.force_refresh ~= true
     local result, err = self.updater:checkForUpdates(use_cache)
     if not result then
         if not silent then
@@ -2329,7 +2330,10 @@ end
 
 function Grimmlink:maybeCheckForUpdatesOnStartup()
     if self.check_update_on_startup and self.auto_update_enabled then
-        self:checkForUpdates(true)
+        local result = self:checkForUpdates(true, { force_refresh = true })
+        if result and result.available and result.release_info then
+            self:installUpdate(result.release_info)
+        end
     end
 end
 
