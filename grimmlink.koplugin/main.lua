@@ -2015,7 +2015,8 @@ function Grimmlink:checkForUpdates(silent)
     if type(self.updater.setAllowPrerelease) == "function" then
         self.updater:setAllowPrerelease(self.allow_prerelease_updates)
     end
-    local result, err = self.updater:checkForUpdates(self.update_channel == "stable")
+    local use_cache = silent == true
+    local result, err = self.updater:checkForUpdates(use_cache)
     if not result then
         if not silent then
             self:showMessage(T(_("Update check failed:\n%1"), safeToString(err)), 4)
@@ -2025,7 +2026,19 @@ function Grimmlink:checkForUpdates(silent)
 
     if result.available then
         if not silent then
-            self:showMessage(T(_("Update available: %1"), result.latest_version), 3)
+            local from_version = safeToString(result.current_version) or _("unknown")
+            local to_version = safeToString(result.latest_version) or _("unknown")
+            if result.release_info then
+                self:showConfirmAction(
+                    T(_("Update available: %1 -> %2\nInstall now?"), from_version, to_version),
+                    _("Update"),
+                    function()
+                        self:installUpdate(result.release_info)
+                    end
+                )
+            else
+                self:showMessage(T(_("Update available: %1"), to_version), 3)
+            end
         end
     elseif not silent then
         self:showMessage(_("Already up to date"), 2)

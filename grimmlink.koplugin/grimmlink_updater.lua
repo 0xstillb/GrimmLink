@@ -653,4 +653,29 @@ function Updater:installDownloadedUpdate(zip_path)
     return true, backup_result
 end
 
+function Updater:installUpdate(release_info, progress_callback)
+    if type(release_info) ~= "table" then
+        return false, "missing release info"
+    end
+    local download_url = safeStr(release_info.download_url)
+    if not download_url or download_url == "" then
+        return false, "missing download URL"
+    end
+
+    local downloaded, zip_or_error = self:downloadReleaseAsset(download_url, progress_callback)
+    if not downloaded then
+        self:cleanupTempFiles()
+        return false, zip_or_error
+    end
+
+    local installed, backup_or_error = self:installDownloadedUpdate(zip_or_error)
+    if not installed then
+        self:cleanupTempFiles()
+        return false, backup_or_error
+    end
+
+    self:clearCache()
+    return true, backup_or_error
+end
+
 return Updater
