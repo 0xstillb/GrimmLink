@@ -1,82 +1,124 @@
-# GrimmLink
+<p align="center">
+  <h1 align="center">GrimmLink</h1>
+  <p align="center">KOReader companion plugin for <a href="https://github.com/0xstillb/grimmory">Grimmory</a></p>
+</p>
 
-GrimmLink is the KOReader companion plugin for Grimmory.
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-KOReader-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/language-Lua-purple" alt="Language">
+  <img src="https://img.shields.io/github/v/release/0xstillb/grimmlink?label=release" alt="Release">
+  <img src="https://img.shields.io/github/license/0xstillb/grimmlink" alt="License">
+</p>
 
-Stable minimal scope:
+---
 
-- Server URL, Username, and Password authentication
-- hash-based book matching
-- native KOReader progress sync for EPUB, PDF, CBX, and other supported book types
-- reading session upload with offline replay
-- shelf sync with tracked-download safety rules
-- PDF-only Web Reader Bridge
-- opt-in auto update
+## What is GrimmLink?
 
-## Important Notes
+GrimmLink syncs your reading progress, sessions, and library between [KOReader](https://koreader.rocks/) and [Grimmory](https://github.com/0xstillb/grimmory) server. It supports EPUB, PDF, CBZ, and other KOReader-compatible formats.
 
-- The plugin generates `x-auth-key` internally from the entered Password.
-- The user never types an auth key, token, or MD5 hash.
-- EPUB Web Reader Bridge is intentionally out of scope.
-- PDF Web Reader Bridge is optional and disabled by default.
-- Remote progress is never applied silently. The user is prompted before jumping to newer remote progress.
+### Key Features
 
-## Install
+- **Progress Sync** -- Pull remote progress on book open, push on close/suspend. You are always prompted before jumping to a remote position.
+- **PDF Web Reader Bridge** -- Sync PDF page positions between KOReader and Grimmory's web reader (optional, disabled by default).
+- **Reading Sessions** -- Track and upload reading sessions with offline replay for failed uploads.
+- **Shelf Sync** -- Download books from Grimmory shelves to local storage with tracked-download safety rules.
+- **Auto Update** -- In-app updater with opt-in startup checks.
 
-1. Download the latest release asset for `grimmlink.koplugin`.
-2. Extract the archive into KOReader's `plugins/` directory.
+---
+
+## Installation
+
+1. Download `grimmlink.koplugin.zip` from the [latest release](https://github.com/0xstillb/grimmlink/releases/latest).
+2. Extract into KOReader's `plugins/` directory.
 3. Restart KOReader.
-4. Open `Tools -> GrimmLink`.
-5. Configure:
+4. Open **Tools > GrimmLink** and configure:
    - Grimmory Server URL
    - KOReader Username
    - Password
-6. Run `Test Connection`.
+5. Run **Test Connection** to verify.
 
-## Safe Defaults
+> The plugin generates `x-auth-key` internally from your password. You never need to enter an auth key, token, or MD5 hash.
 
-| Setting | Default | What it does |
+---
+
+## Configuration
+
+| Setting | Default | Description |
 |---|---|---|
-| `pdf_web_reader_bridge_enabled` | `false` | Enables the PDF-only Web Reader Bridge. |
-| `two_way_shelf_delete_sync` | `false` | Mirrors tracked shelf deletions into local cleanup. |
-| `delete_sdr_on_book_delete` | `false` | Also removes local `.sdr` sidecars when deleting a tracked book. |
-| `auto_update_enabled` | `false` | Allows the in-app updater to install GrimmLink updates. |
-| `check_update_on_startup` | `false` | Checks for updates during startup when auto-update is enabled. |
+| `pdf_web_reader_bridge_enabled` | `false` | Enable PDF-only Web Reader Bridge |
+| `two_way_shelf_delete_sync` | `false` | Mirror tracked shelf deletions into local cleanup |
+| `delete_sdr_on_book_delete` | `false` | Remove `.sdr` sidecars when deleting a tracked book |
+| `auto_update_enabled` | `false` | Allow in-app updater to install updates |
+| `check_update_on_startup` | `false` | Check for updates during startup |
 
-## Core Behavior
+---
 
-### Native KOReader sync
+## How It Works
 
-- Pull remote progress when a book opens.
-- Prompt before jumping to newer remote progress.
-- Push local progress on close, suspend, or manual sync.
-- Queue failed progress and session uploads for later replay.
+### Progress Sync (all formats)
+
+```
+KOReader Device A ──push──> Grimmory Server <──pull── KOReader Device B
+```
+
+- Pulls remote progress when a book opens
+- Prompts before jumping to newer remote progress
+- Pushes local progress on close, suspend, or manual sync
+- Queues failed uploads for later replay
 
 ### PDF Web Reader Bridge
 
-- Only runs for PDF files.
-- Uses `/api/koreader/books/{bookId}/pdf-progress` only.
-- Supports KOReader -> Web Reader pushes.
-- Supports Web Reader -> KOReader prompts before jumping.
+```
+KOReader ──push──> Grimmory Server <──push── Grimmory Web Reader
+    |                                              |
+    <──────────── pull (prompted) ─────────────────>
+```
+
+- Only runs for PDF files
+- Uses `/api/koreader/books/{bookId}/pdf-progress`
+- Requires **Sync with Grimmory Reader** enabled in Grimmory web settings
 
 ### Shelf Sync
 
-- Downloads shelf books to local storage.
-- Never deletes Grimmory library files or records.
-- Only removes local files that GrimmLink downloaded and tracked.
+- Downloads shelf books to local storage
+- Only removes local files that GrimmLink downloaded and tracked
+- Never deletes Grimmory library files or server records
 
-## Release Note
+---
 
-> EPUB Web Reader Bridge is intentionally disabled/out of scope. KOReader-to-KOReader sync remains supported for EPUB via native KOReader progress. PDF Web Reader Bridge supports page-based sync between KOReader and Grimmory Web Reader. Authentication uses Server URL, Username, and Password; the plugin generates x-auth-key internally. Remote progress is never applied silently; the user is prompted before jumping to newer remote progress.
+## Project Structure
 
-## Repository Layout
+```
+grimmlink.koplugin/
+  main.lua                  # Plugin entry point and UI
+  grimmlink_api_client.lua  # HTTP client for Grimmory API
+  grimmlink_database.lua    # Local SQLite storage
+  grimmlink_shelf_sync.lua  # Shelf download and cleanup
+  grimmlink_updater.lua     # In-app update mechanism
+  plugin_version.lua        # Version metadata
+  _meta.lua                 # KOReader plugin descriptor
+  test/                     # Unit tests
+docs/                       # Documentation site (Zola)
+```
 
-| Path | Purpose |
+---
+
+## Branch Structure
+
+| Branch | Purpose |
 |---|---|
-| `grimmlink.koplugin/` | Active plugin package |
-| `grimmlink.koplugin/test/` | Stable unit tests |
-| `docs/PLUGIN_SCOPE.md` | Scope and safety boundaries |
-| `docs/TEST_PLAN.md` | Manual and CI verification guidance |
+| `main` | Production branch, all releases are tagged here |
+| `archive/*` | Historical branches kept for reference |
+| `backup` | Snapshot of previous codebase |
+
+---
 
 ## Credits
 
-GrimmLink is a fork and adaptation of the upstream BookLoreSync plugin by WorldTeacher.
+GrimmLink is a fork and adaptation of the [BookLoreSync](https://github.com/WorldTeacher/BookLoreSync-plugin) plugin by WorldTeacher.
+
+---
+
+## License
+
+See [LICENSE](LICENSE) for details.
