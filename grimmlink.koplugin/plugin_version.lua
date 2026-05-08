@@ -1,6 +1,6 @@
 return {
-    version = "v1.0.10-1-g2804657",
-    version_type = "development",
-    git_commit = "2804657",
-    build_date = "2026-05-07T14:32:37Z",
+    version = "1.0.16",
+    version_type = "release",
+    git_commit = "94f1e62",
+    build_date = "2026-05-08T00:00:00Z",
 }
