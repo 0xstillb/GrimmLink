@@ -2332,7 +2332,17 @@ function Grimmlink:maybeCheckForUpdatesOnStartup()
     if self.check_update_on_startup and self.auto_update_enabled then
         local result = self:checkForUpdates(true, { force_refresh = true })
         if result and result.available and result.release_info then
-            self:installUpdate(result.release_info)
+            local from_version = safeToString(result.current_version) or _("unknown")
+            local to_version = safeToString(result.latest_version) or _("unknown")
+            self:runAfterUiSettles(function()
+                self:showConfirmAction(
+                    T(_("Update available: %1 -> %2\nInstall now?"), from_version, to_version),
+                    _("Update"),
+                    function()
+                        self:installUpdate(result.release_info)
+                    end
+                )
+            end)
         end
     end
 end

@@ -842,7 +842,7 @@ describe("GrimmLink helper methods", function()
         assert.is_false(captured_use_cache)
     end)
 
-    it("auto-installs on startup when auto update and startup checks are enabled", function()
+    it("asks before installing on startup when auto update and startup checks are enabled", function()
         local plugin = newPlugin({
             auto_update_enabled = true,
             check_update_on_startup = true,
@@ -870,6 +870,13 @@ describe("GrimmLink helper methods", function()
 
         plugin:maybeCheckForUpdatesOnStartup()
         assert.is_false(seen_use_cache)
+        assert.are.equal(0, install_calls)
+
+        local dialog = UIManager.getLastShown()
+        assert.is_not_nil(dialog)
+        assert.is_true(type(dialog.ok_callback) == "function")
+
+        dialog.ok_callback()
         assert.are.equal(1, install_calls)
     end)
 end)
