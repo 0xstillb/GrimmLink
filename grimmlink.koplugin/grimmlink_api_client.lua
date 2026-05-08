@@ -30,6 +30,19 @@ local function md5(value)
     return tostring(value or "")
 end
 
+local function normalizeNumericId(value)
+    local num = tonumber(value)
+    if num then
+        return tostring(math.floor(num))
+    end
+    local raw = tostring(value or "")
+    local digits = raw:match("^%-?%d+")
+    if digits then
+        return digits
+    end
+    return raw
+end
+
 function APIClient:new(o)
     o = o or {}
     setmetatable(o, self)
@@ -264,7 +277,7 @@ end
 
 function APIClient:submitSessionBatch(book_id, book_hash, book_type, device, device_id, sessions)
     local payload = {
-        bookId = book_id,
+        bookId = tonumber(book_id) or book_id,
         bookHash = book_hash,
         bookType = book_type or "EPUB",
         device = device,
@@ -354,9 +367,10 @@ function APIClient:removeBookFromShelf(shelf_id, book_id)
 end
 
 function APIClient:getPdfProgress(book_id, timeout_sec)
+    local normalized_book_id = normalizeNumericId(book_id)
     local success, code, response = self:request(
         "GET",
-        "/api/koreader/books/" .. tostring(book_id) .. "/pdf-progress",
+        "/api/koreader/books/" .. normalized_book_id .. "/pdf-progress",
         nil,
         nil,
         timeout_sec
@@ -368,9 +382,10 @@ function APIClient:getPdfProgress(book_id, timeout_sec)
 end
 
 function APIClient:updatePdfProgress(book_id, progress_payload)
+    local normalized_book_id = normalizeNumericId(book_id)
     local success, code, response = self:request(
         "PUT",
-        "/api/koreader/books/" .. tostring(book_id) .. "/pdf-progress",
+        "/api/koreader/books/" .. normalized_book_id .. "/pdf-progress",
         progress_payload
     )
     if success then

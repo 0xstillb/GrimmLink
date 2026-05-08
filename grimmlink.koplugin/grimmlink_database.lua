@@ -323,13 +323,13 @@ end
 
 local function mapBookCacheRow(row)
     return {
-        id = row[1],
+        id = tonumber(row[1]) or row[1],
         file_path = row[2],
         file_hash = row[3],
-        book_id = row[4],
+        book_id = tonumber(row[4]) or row[4],
         title = row[5],
         author = row[6],
-        last_accessed = row[7],
+        last_accessed = tonumber(row[7]) or row[7],
     }
 end
 
@@ -353,6 +353,21 @@ function Database:getBookByHash(file_hash)
     end
     stmt:bind(file_hash)
     return firstRow(stmt, mapBookCacheRow)
+end
+
+function Database:getLatestBookPathByBookId(book_id)
+    local stmt = self.conn and self.conn:prepare(
+        "SELECT file_path FROM book_cache WHERE book_id = ? ORDER BY updated_at DESC LIMIT 1"
+    )
+    if not stmt then
+        return nil
+    end
+    stmt:bind(book_id)
+    local row = firstRow(stmt)
+    if not row then
+        return nil
+    end
+    return row[1]
 end
 
 function Database:saveBookCache(file_path, file_hash, book_id, title, author)
@@ -543,26 +558,26 @@ local function mapProgressStateRow(row)
     return {
         file_hash = row[1],
         file_path = row[2],
-        book_id = row[3],
+        book_id = tonumber(row[3]) or row[3],
         document = row[4],
         book_type = row[5],
         local_progress = row[6],
         local_location = row[7],
         local_percentage = row[8],
-        local_current_page = row[9],
-        local_total_pages = row[10],
-        local_timestamp = row[11],
+        local_current_page = tonumber(row[9]) or row[9],
+        local_total_pages = tonumber(row[10]) or row[10],
+        local_timestamp = tonumber(row[11]) or row[11],
         remote_progress = row[12],
         remote_location = row[13],
         remote_percentage = row[14],
-        remote_current_page = row[15],
-        remote_total_pages = row[16],
+        remote_current_page = tonumber(row[15]) or row[15],
+        remote_total_pages = tonumber(row[16]) or row[16],
         remote_device = row[17],
         remote_device_id = row[18],
         remote_source = row[19],
-        remote_timestamp = row[20],
+        remote_timestamp = tonumber(row[20]) or row[20],
         last_action = row[21],
-        updated_at = row[22],
+        updated_at = tonumber(row[22]) or row[22],
     }
 end
 
@@ -708,20 +723,20 @@ end
 
 local function mapShelfEntry(row)
     return {
-        id = row[1],
-        book_id = row[2],
-        shelf_id = row[3],
+        id = tonumber(row[1]) or row[1],
+        book_id = tonumber(row[2]) or row[2],
+        shelf_id = tonumber(row[3]) or row[3],
         remote_filename = row[4],
         remote_title = row[5],
         remote_author = row[6],
         remote_format = row[7],
-        remote_file_size_kb = row[8],
+        remote_file_size_kb = tonumber(row[8]) or row[8],
         local_path = row[9],
-        downloaded_at = row[10],
-        last_seen_in_shelf_at = row[11],
-        downloaded_by_grimmlink = row[12],
-        created_at = row[13],
-        updated_at = row[14],
+        downloaded_at = tonumber(row[10]) or row[10],
+        last_seen_in_shelf_at = tonumber(row[11]) or row[11],
+        downloaded_by_grimmlink = (tonumber(row[12]) or 0) == 1 and 1 or 0,
+        created_at = tonumber(row[13]) or row[13],
+        updated_at = tonumber(row[14]) or row[14],
     }
 end
 
@@ -833,15 +848,15 @@ end
 
 local function mapPendingShelfRemoval(row)
     return {
-        id = row[1],
-        book_id = row[2],
-        shelf_id = row[3],
+        id = tonumber(row[1]) or row[1],
+        book_id = tonumber(row[2]) or row[2],
+        shelf_id = tonumber(row[3]) or row[3],
         local_path = row[4],
-        delete_sdr = row[5],
-        retry_count = row[6],
-        last_retry_at = row[7],
-        created_at = row[8],
-        updated_at = row[9],
+        delete_sdr = (tonumber(row[5]) or 0) == 1,
+        retry_count = tonumber(row[6]) or row[6],
+        last_retry_at = tonumber(row[7]) or row[7],
+        created_at = tonumber(row[8]) or row[8],
+        updated_at = tonumber(row[9]) or row[9],
     }
 end
 
@@ -989,26 +1004,26 @@ function Database:getPendingSessions(limit)
     stmt:bind(limit or 100)
     return allRows(stmt, function(row)
         return {
-            id = row[1],
-            bookId = row[2],
+            id = tonumber(row[1]) or row[1],
+            bookId = tonumber(row[2]) or row[2],
             bookHash = row[3],
             bookType = row[4],
             device = row[5],
             deviceId = row[6],
             startTime = row[7],
             endTime = row[8],
-            durationSeconds = row[9],
+            durationSeconds = tonumber(row[9]) or row[9],
             durationFormatted = row[10],
             startProgress = row[11],
             endProgress = row[12],
             progressDelta = row[13],
             startLocation = row[14],
             endLocation = row[15],
-            currentPage = row[16],
-            totalPages = row[17],
-            retry_count = row[18],
-            last_retry_at = row[19],
-            created_at = row[20],
+            currentPage = tonumber(row[16]) or row[16],
+            totalPages = tonumber(row[17]) or row[17],
+            retry_count = tonumber(row[18]) or row[18],
+            last_retry_at = tonumber(row[19]) or row[19],
+            created_at = tonumber(row[20]) or row[20],
         }
     end)
 end

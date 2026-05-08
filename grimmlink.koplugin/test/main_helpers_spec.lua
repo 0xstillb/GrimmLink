@@ -498,6 +498,14 @@ describe("GrimmLink helper methods", function()
 
     it("calculates a deterministic book hash", function()
         local plugin = newPlugin()
+        local original_sha2_preload = package.preload["ffi/sha2"]
+        package.preload["ffi/sha2"] = function()
+            return {
+                md5 = function(value)
+                    return "md5:" .. tostring(value or "")
+                end,
+            }
+        end
         local path = "grimmlink-hash-test.txt"
         local file = assert(io.open(path, "wb"))
         file:write("hash me")
@@ -505,6 +513,7 @@ describe("GrimmLink helper methods", function()
 
         local hash = plugin:calculateBookHash(path)
         os.remove(path)
+        package.preload["ffi/sha2"] = original_sha2_preload
 
         assert.is_string(hash)
         assert.is_true(hash:find("md5:") == 1)
@@ -589,8 +598,8 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("getProgress", plugin.api.calls[1].name)
         local dialog = UIManager.getLastShown()
         assert.is_not_nil(dialog)
-        assert.is_true(tostring(dialog.text):find("Local:") ~= nil)
-        dialog.buttons[1][1].callback()
+        assert.is_true(tostring(dialog.title):find("Local:") ~= nil)
+        dialog.buttons[1][2].callback()
         assert.are.equal("/remote", jumped_location)
     end)
 
@@ -619,8 +628,8 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("getPdfProgress", plugin.api.calls[1].name)
         local dialog = UIManager.getLastShown()
         assert.is_not_nil(dialog)
-        assert.is_true(tostring(dialog.text):find("Web Reader") ~= nil)
-        dialog.buttons[1][1].callback()
+        assert.is_true(tostring(dialog.title):find("Web Reader") ~= nil)
+        dialog.buttons[1][2].callback()
         assert.are.equal(80, jumped_page)
     end)
 
@@ -797,14 +806,18 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("hash-8", plugin.db.book_cache_calls[1].file_hash)
     end)
 
-    it("shows password-facing connection labels in the menu", function()
+    it("shows guided and advanced connection labels in the menu", function()
         local plugin = newPlugin()
         local menu = {}
         plugin:addToMainMenu(menu)
 
         local connection_menu = findMenuItem(menu.grimmlink.sub_item_table, "Connection")
         assert.is_not_nil(connection_menu)
-        local password_item = findMenuItem(connection_menu.sub_item_table, "Password")
+        local setup_item = findMenuItem(connection_menu.sub_item_table, "Setup")
+        assert.is_not_nil(setup_item)
+        local advanced_item = findMenuItem(connection_menu.sub_item_table, "Advanced")
+        assert.is_not_nil(advanced_item)
+        local password_item = findMenuItem(advanced_item.sub_item_table, "Password")
         assert.is_not_nil(password_item)
     end)
 end)
