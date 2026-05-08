@@ -2365,6 +2365,9 @@ function Grimmlink:startSession()
         end
         self:invokeSafely("session open sync", function()
             self:maybePullRemoteProgress(file_hash, file_path, book_id)
+            -- Clear conflict-dialog flag so the web-bridge pull is never
+            -- blocked by a KOSync conflict dialog that was already shown.
+            self._conflict_dialog_open = nil
             self:maybePullWebReaderProgress(file_hash, file_path, book_id, true)
             self:maybePullRemoteAnnotations(book_id)
         end)
