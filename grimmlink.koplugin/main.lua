@@ -2488,6 +2488,20 @@ function Grimmlink:syncShelfNow(silent)
         end
         self:showMessage(msg, 5)
     end
+
+    -- Broadcast sync result so other plugins (e.g. SimpleUI) can react.
+    if Event and ((result.synced or 0) > 0 or (result.deleted or 0) > 0) then
+        local FM2 = FileManager and FileManager.instance
+        if FM2 and type(FM2.handleEvent) == "function" then
+            pcall(FM2.handleEvent, FM2, Event:new("GrimmLinkShelfSyncComplete", {
+                synced = result.synced or 0,
+                deleted = result.deleted or 0,
+                skipped = result.skipped or 0,
+                download_dir = self.download_dir,
+            }))
+        end
+    end
+
     return result
 end
 
