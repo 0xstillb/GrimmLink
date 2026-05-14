@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">GrimmLink</h1>
-  <p align="center">KOReader companion plugin for <a href="https://github.com/0xstillb/grimmory">Grimmory</a></p>
+  <p align="center">KOReader companion plugin for <a href="https://github.com/0xstillb/grimmory">Grimmory Fork by 0xStillb</a></p>
 </p>
 
 > **Requires [Grimmory](https://github.com/0xstillb/grimmory)** -- a self-hosted book server with KOReader sync API. GrimmLink is designed exclusively for Grimmory.
@@ -16,7 +16,7 @@
 
 ## What is GrimmLink?
 
-GrimmLink syncs your reading progress, sessions, and library between [KOReader](https://koreader.rocks/) and [Grimmory](https://github.com/0xstillb/grimmory) server. It supports EPUB, PDF, CBZ, and other KOReader-compatible formats.
+GrimmLink syncs your reading progress, sessions, and library between [KOReader](https://koreader.rocks/) and [Grimmory Fork by 0xStillb](https://github.com/0xstillb/grimmory) server. It supports EPUB, PDF, CBZ, and other KOReader-compatible formats.
 
 ### Key Features
 
