@@ -3,6 +3,8 @@
   <p align="center">KOReader companion plugin for <a href="https://github.com/0xstillb/grimmory">Grimmory</a></p>
 </p>
 
+> **Requires [Grimmory](https://github.com/0xstillb/grimmory)** -- a self-hosted book server forked from [BookLore](https://github.com/adityacodes30/booklore). GrimmLink talks to Grimmory's KOReader-compatible API; it does **not** work with upstream BookLore or other servers.
+
 <p align="center">
   <img src="https://img.shields.io/badge/platform-KOReader-blue" alt="Platform">
   <img src="https://img.shields.io/badge/language-Lua-purple" alt="Language">
@@ -111,6 +113,7 @@ docs/                       # Documentation site (Zola)
 | Branch | Purpose |
 |---|---|
 | `main` | Production branch, all releases are tagged here |
+| `idea/*` | Experimental / concept branches |
 | `archive/*` | Historical branches kept for reference |
 | `backup` | Snapshot of previous codebase |
 
@@ -118,7 +121,8 @@ docs/                       # Documentation site (Zola)
 
 ## Credits
 
-GrimmLink is a fork and adaptation of the [BookLoreSync](https://github.com/WorldTeacher/BookLoreSync-plugin) plugin by WorldTeacher.
+- **GrimmLink** is a fork of [BookLoreSync](https://github.com/WorldTeacher/BookLoreSync-plugin) by WorldTeacher
+- **Grimmory** ([0xstillb/grimmory](https://github.com/0xstillb/grimmory)) is a fork of [BookLore](https://github.com/adityacodes30/booklore) by adityacodes30
 
 ---
 
