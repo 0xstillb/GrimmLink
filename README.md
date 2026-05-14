@@ -21,7 +21,7 @@ GrimmLink syncs your reading progress, sessions, and library between [KOReader](
 - **Progress Sync** -- Pull remote progress on book open, push on close/suspend. You are always prompted before jumping to a remote position.
 - **PDF Web Reader Bridge** -- Sync PDF page positions between KOReader and Grimmory's web reader (optional, disabled by default).
 - **Reading Sessions** -- Track and upload reading sessions with offline replay for failed uploads.
-- **Shelf Sync** -- Download books from Grimmory shelves to local storage with tracked-download safety rules.
+- **Shelf Sync** -- Download books from Grimmory shelves with progress bar, async/blocking fallback, and large file support.
 - **Auto Update** -- In-app updater with opt-in startup checks.
 
 ---
@@ -80,7 +80,10 @@ KOReader ──push──> Grimmory Server <──push── Grimmory Web Reader
 
 ### Shelf Sync
 
-- Downloads shelf books to local storage
+- Downloads shelf books to local storage with visual progress bar
+- **Async download** (curl/wget subprocess) on devices that support it -- non-blocking UI
+- **Blocking fallback** (LuaSocket) for devices without curl/wget (e.g. iReader) -- with per-second progress updates
+- Handles large files (200MB+) with auto-scaled timeouts and cancellation support
 - Only removes local files that GrimmLink downloaded and tracked
 - Never deletes Grimmory library files or server records
 

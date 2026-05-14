@@ -391,6 +391,49 @@ function Grimmlink:showMessage(text, timeout)
     })
 end
 
+-- Shelf sync status popup controller.
+-- Keeps at most one popup alive during shelf sync progress updates to avoid
+-- stacked/toast spam when many progress callbacks fire in a short burst.
+function Grimmlink:closeShelfSyncMessage()
+    self._shelf_sync_message_pending = nil
+    self._shelf_sync_message_flush_scheduled = nil
+    if self._shelf_sync_message_widget then
+        pcall(UIManager.close, UIManager, self._shelf_sync_message_widget)
+        self._shelf_sync_message_widget = nil
+    end
+end
+
+function Grimmlink:showShelfSyncMessage(text, timeout)
+    self._shelf_sync_message_pending = {
+        text = text,
+        timeout = timeout or 2,
+    }
+    if self._shelf_sync_message_flush_scheduled then
+        return
+    end
+    self._shelf_sync_message_flush_scheduled = true
+    self:runAfterUiSettles(function()
+        self._shelf_sync_message_flush_scheduled = nil
+        local pending = self._shelf_sync_message_pending
+        if not pending then
+            return
+        end
+        self._shelf_sync_message_pending = nil
+
+        if self._shelf_sync_message_widget then
+            pcall(UIManager.close, UIManager, self._shelf_sync_message_widget)
+            self._shelf_sync_message_widget = nil
+        end
+
+        local widget = InfoMessage:new{
+            text = pending.text,
+            timeout = pending.timeout or 2,
+        }
+        self._shelf_sync_message_widget = widget
+        UIManager:show(widget)
+    end)
+end
+
 function Grimmlink:refreshTouchMenu(touchmenu_instance)
     if touchmenu_instance then
         safeMethodCall(touchmenu_instance, "updateItems")
@@ -1690,6 +1733,8 @@ function Grimmlink:startSession()
     }
 
     local function doNetworkSync()
+        -- Clear handle first so this task is not reused across sessions.
+        self._scheduled_session_open_sync = nil
         if not self.current_session or self.current_session.file_hash ~= file_hash then
             return
         end
@@ -1703,6 +1748,10 @@ function Grimmlink:startSession()
     end
 
     if UIManager and type(UIManager.scheduleIn) == "function" then
+        if self._scheduled_session_open_sync and type(UIManager.unschedule) == "function" then
+            pcall(UIManager.unschedule, UIManager, self._scheduled_session_open_sync)
+        end
+        self._scheduled_session_open_sync = doNetworkSync
         UIManager:scheduleIn(0.5, doNetworkSync)
     else
         doNetworkSync()
@@ -1711,17 +1760,30 @@ end
 
 function Grimmlink:endSession(options)
     options = options or {}
-    if not self.db or not self.current_session or not self:requireReady({ require_api = true, silent = true }) then
+    if not self.db or not self.current_session then
         return false
     end
 
-    local file_path = self.current_session.file_path
-    local file_hash = self.current_session.file_hash
-    local book_id = self.current_session.book_id
-    local book_file_id = self.current_session.book_file_id
+    -- Prevent open-session deferred work from racing close-session handling.
+    if self._scheduled_session_open_sync and UIManager and type(UIManager.unschedule) == "function" then
+        pcall(UIManager.unschedule, UIManager, self._scheduled_session_open_sync)
+        self._scheduled_session_open_sync = nil
+    end
+
+    local session = self.current_session
+    self.current_session = nil
+
+    if not self:requireReady({ require_api = true, silent = true }) then
+        return false
+    end
+
+    local file_path = session.file_path
+    local file_hash = session.file_hash
+    local book_id = session.book_id
+    local book_file_id = session.book_file_id
     local end_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id, book_file_id)
-    local duration_seconds = math.max(0, nowUtc() - (self.current_session.start_time or nowUtc()))
-    local start_snapshot = self.current_session.start_snapshot or {}
+    local duration_seconds = math.max(0, nowUtc() - (session.start_time or nowUtc()))
+    local start_snapshot = session.start_snapshot or {}
     local state = self.db:getProgressState(file_hash)
     local progress_delta = (tonumber(end_snapshot.percentage) or 0) - (tonumber(start_snapshot.percentage) or 0)
     local session_valid = self:validateSession(
@@ -1737,10 +1799,10 @@ function Grimmlink:endSession(options)
         self.db:addPendingSession({
             bookId = book_id,
             bookHash = file_hash,
-            bookType = self.current_session.book_type,
+            bookType = session.book_type,
             device = self.device_name,
             deviceId = self.device_id,
-            startTime = toIso8601(self.current_session.start_time),
+            startTime = toIso8601(session.start_time),
             endTime = toIso8601(end_snapshot.timestamp),
             durationSeconds = duration_seconds,
             durationFormatted = self:formatDuration(duration_seconds),
@@ -1760,9 +1822,12 @@ function Grimmlink:endSession(options)
         self:pushPdfWebProgress(end_snapshot, options.reason or "close", true)
     end
 
-    self.current_session = nil
     if self:isOnline() then
-        self:syncPendingNow(true)
+        self:runAfterUiSettles(function()
+            self:invokeSafely("session close sync", function()
+                self:syncPendingNow(true)
+            end, {}, { silent = true })
+        end)
     end
     return true
 end
@@ -2376,6 +2441,180 @@ function Grimmlink:runAfterUiSettles(callback)
     end
 end
 
+-- ============================================================
+-- Async shelf sync — downloads one file at a time, yielding
+-- control back to UIManager between each download so the UI
+-- stays responsive on weak e-reader CPUs.
+-- ============================================================
+
+-- Guard: prevent double-sync.
+function Grimmlink:_isShelfSyncRunning()
+    return self._shelf_sync_running == true
+end
+
+-- Show / update the progress InfoMessage for the current download.
+-- progress is optional table: {pct=0-100, bytes=N, total=N}
+-- When nil, shows "Connecting..." state.
+function Grimmlink:_showSyncProgress(idx, total, title, progress)
+    -- Close the plan-phase message popup (showShelfSyncMessage) first —
+    -- it uses a different widget ref and would otherwise stay on top
+    -- of our progress popup, hiding it completely.
+    self:closeShelfSyncMessage()
+
+    -- Close previous progress widget.
+    if self._shelf_sync_progress_widget then
+        self._shelf_sync_progress_widget.dismiss_callback = nil
+        pcall(UIManager.close, UIManager, self._shelf_sync_progress_widget)
+        self._shelf_sync_progress_widget = nil
+    end
+
+    local short_title = title or "?"
+    if #short_title > 40 then short_title = short_title:sub(1, 40) .. "..." end
+
+    local lines = {}
+    -- Header
+    lines[#lines + 1] = T(_("Downloading  %1 / %2"), idx, total)
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = short_title
+
+    if progress then
+        lines[#lines + 1] = ""
+        local pct = progress.pct or 0
+        local bytes = progress.bytes or 0
+
+        -- Size + percentage on one line:  62%  —  131.2 / 200.8 MB
+        if progress.total and progress.total > 0 then
+            lines[#lines + 1] = string.format("%d%%  —  %.1f / %.1f MB",
+                pct, bytes / (1024 * 1024), progress.total / (1024 * 1024))
+        elseif bytes > 0 then
+            lines[#lines + 1] = string.format("%.1f MB", bytes / (1024 * 1024))
+        end
+
+        -- Progress bar:  █████████░░░░░░
+        local bar_w = 15
+        local filled = math.floor(pct / 100 * bar_w)
+        if filled > bar_w then filled = bar_w end
+        lines[#lines + 1] = string.rep("\xE2\x96\x88", filled)
+                          .. string.rep("\xE2\x96\x91", bar_w - filled)
+    else
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = _("Connecting...")
+    end
+
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.rep("\xE2\x94\x80", 15)
+    lines[#lines + 1] = "\xE2\x96\xB6  " .. _("Tap to cancel") .. "  \xE2\x97\x80"
+
+    local grimmlink_self = self
+    local widget = InfoMessage:new{
+        text    = table.concat(lines, "\n"),
+        timeout = 600,
+        dismiss_callback = function()
+            grimmlink_self:_confirmCancelSync()
+        end,
+    }
+    self._shelf_sync_progress_widget = widget
+    UIManager:show(widget)
+    UIManager:forceRePaint()
+end
+
+function Grimmlink:_closeSyncProgress()
+    if self._shelf_sync_progress_widget then
+        self._shelf_sync_progress_widget.dismiss_callback = nil
+        pcall(UIManager.close, UIManager, self._shelf_sync_progress_widget)
+        self._shelf_sync_progress_widget = nil
+    end
+    self:closeShelfSyncMessage()
+end
+
+-- Update download progress.  progress = {pct, bytes, total}
+function Grimmlink:_updateSyncProgressPct(idx, total, title, progress)
+    self:_showSyncProgress(idx, total, title, progress)
+end
+
+-- Ask user whether to cancel.  Already-downloaded files are kept.
+function Grimmlink:_confirmCancelSync()
+    if not self._shelf_sync_running then return end
+    local grimmlink_self = self
+    local box = ConfirmBox:new{
+        text = _("Cancel shelf sync?\nBooks already downloaded will be kept."),
+        ok_text = _("Cancel sync"),
+        cancel_text = _("Continue"),
+        ok_callback = function()
+            grimmlink_self._shelf_sync_cancelled = true
+        end,
+    }
+    UIManager:show(box)
+end
+
+-- Multi-line completion summary.
+function Grimmlink:_showSyncCompletionSummary(result)
+    self:_closeSyncProgress()
+    local lines = {}
+    lines[#lines + 1] = _("Shelf Sync Complete")
+    lines[#lines + 1] = "————————————————"
+    if (result.synced or 0) > 0 then
+        lines[#lines + 1] = T(_("Downloaded:  %1"), result.synced)
+    end
+    if (result.skipped or 0) > 0 then
+        lines[#lines + 1] = T(_("Already on device:  %1"), result.skipped)
+    end
+    if (result.deleted or 0) > 0 then
+        lines[#lines + 1] = T(_("Removed:  %1"), result.deleted)
+    end
+    if (result.failed or 0) > 0 then
+        lines[#lines + 1] = T(_("Failed:  %1"), result.failed)
+    end
+    if (result.cancelled) then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = _("(Cancelled by user)")
+    end
+    if (result.synced or 0) == 0 and (result.failed or 0) == 0
+       and (result.deleted or 0) == 0 and not result.cancelled then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = _("Everything is up to date.")
+    end
+    if type(result.errors) == "table" and #result.errors > 0 then
+        lines[#lines + 1] = ""
+        local first_err = safeToString(result.errors[1] or "")
+        if #first_err > 120 then first_err = first_err:sub(1, 120) .. "..." end
+        if first_err ~= "" then
+            lines[#lines + 1] = first_err
+        end
+    end
+    UIManager:show(InfoMessage:new{
+        text    = table.concat(lines, "\n"),
+        timeout = 8,
+    })
+end
+
+-- Broadcast sync result so other plugins (e.g. SimpleUI) can react.
+function Grimmlink:_broadcastSyncResult(result)
+    if not Event then return end
+    if (result.synced or 0) == 0 and (result.deleted or 0) == 0 then return end
+    local ev = Event:new("GrimmLinkShelfSyncComplete", {
+        synced       = result.synced or 0,
+        deleted      = result.deleted or 0,
+        skipped      = result.skipped or 0,
+        download_dir = self.download_dir,
+    })
+    local function _emit()
+        if UIManager and type(UIManager.broadcastEvent) == "function" then
+            pcall(UIManager.broadcastEvent, UIManager, ev)
+            return
+        end
+        local FM2 = FileManager and FileManager.instance
+        if FM2 and type(FM2.handleEvent) == "function" then
+            pcall(FM2.handleEvent, FM2, ev)
+        end
+    end
+    if UIManager and type(UIManager.scheduleIn) == "function" then
+        UIManager:scheduleIn(0.1, _emit)
+    else
+        pcall(_emit)
+    end
+end
+
 function Grimmlink:syncShelfNow(silent)
     if not self:requireReady({ require_api = true, silent = silent }) then
         return nil
@@ -2386,7 +2625,7 @@ function Grimmlink:syncShelfNow(silent)
         end
         return nil
     end
-    if not self.shelf_sync or type(self.shelf_sync.syncShelf) ~= "function" then
+    if not self.shelf_sync or type(self.shelf_sync.prepareSyncPlan) ~= "function" then
         if not silent then
             self:showMessage(_("Shelf sync module unavailable"), 3)
         end
@@ -2410,57 +2649,43 @@ function Grimmlink:syncShelfNow(silent)
         end
         return nil
     end
+    -- Prevent double-sync.
+    if self:_isShelfSyncRunning() then
+        if not silent then
+            self:showMessage(_("Shelf sync is already running."), 2)
+        end
+        return nil
+    end
+
+    self._shelf_sync_running   = true
+    self._shelf_sync_cancelled = false
 
     if not silent then
-        self:showMessage(T(_("Syncing shelf: %1..."), self.shelf_name or tostring(self.shelf_id)), 2)
+        self:showShelfSyncMessage(T(_("Syncing shelf: %1..."), self.shelf_name or tostring(self.shelf_id)), 2)
     end
 
+    local remote_delete_sync = self.two_way_shelf_delete_sync
     local preloaded_remote_books = nil
     local cached_books_age = nil
-    if self.shelf_fast_sync_enabled then
+    if self.shelf_fast_sync_enabled and not remote_delete_sync then
         preloaded_remote_books, cached_books_age = self:getCachedShelfBooks(self.shelf_id, self.shelf_fast_sync_cache_seconds or 15)
         if preloaded_remote_books and not silent then
-            self:showMessage(T(_("Fast Sync: using cached shelf data (%1s old)"), math.max(0, math.floor(tonumber(cached_books_age) or 0))), 2)
+            self:showShelfSyncMessage(T(_("Fast Sync: using cached shelf data (%1s old)"), math.max(0, math.floor(tonumber(cached_books_age) or 0))), 2)
         end
     end
 
-    local last_progress_ts = 0
-    local download_progress_seen = 0
-    local phase_progress_seen = {}
-    local function onShelfProgress(msg)
-        if silent then
-            return
-        end
-        local text = safeToString(msg)
-        if text == "" then
-            return
-        end
-        local now = os.time()
-        if text:sub(1, 12) == "Downloading:" then
-            download_progress_seen = download_progress_seen + 1
-            if download_progress_seen == 1 or (download_progress_seen % 5) == 0 then
-                self:showMessage(T(_("Shelf download progress: %1 items"), download_progress_seen), 2)
-                last_progress_ts = now
-            end
-            return
-        end
-        if not phase_progress_seen[text] and (now - last_progress_ts >= 1) then
-            phase_progress_seen[text] = true
-            self:showMessage(text, 2)
-            last_progress_ts = now
-        end
-    end
-
-    local ok_sync, result_or_err = pcall(function()
-        return self.shelf_sync:syncShelf({
+    -- Phase 1: Plan (classify books — fast, no large I/O).
+    local ok_plan, plan_or_err = pcall(function()
+        return self.shelf_sync:prepareSyncPlan({
             shelf_id = self.shelf_id,
             download_dir = self.download_dir,
             use_original_filename = self.shelf_use_original_filename,
-            two_way_delete_sync = self.two_way_shelf_delete_sync,
-            allow_local_delete_remote = false,
+            remote_delete_sync = remote_delete_sync,
             delete_sdr = self.delete_sdr_on_book_delete,
             preloaded_remote_books = preloaded_remote_books,
-            on_progress = onShelfProgress,
+            on_progress = function(msg)
+                if not silent then self:showShelfSyncMessage(safeToString(msg), 2) end
+            end,
             on_fetched_remote_books = function(remote_books)
                 if self.shelf_fast_sync_enabled and type(remote_books) == "table" then
                     self:setShelfBooksCache(self.shelf_id, remote_books)
@@ -2468,41 +2693,245 @@ function Grimmlink:syncShelfNow(silent)
             end,
         })
     end)
-    if not ok_sync then
-        local err_text = safeToString(result_or_err)
-        self:logErr("GrimmLink shelf sync crashed:", err_text)
+    if not ok_plan then
+        self._shelf_sync_running = false
+        local err_text = safeToString(plan_or_err)
+        self:logErr("GrimmLink shelf sync plan crashed:", err_text)
         if not silent then
-            self:showMessage(T(_("Shelf sync failed:\n%1"), err_text), 5)
+            self:_closeSyncProgress()
+            self:showShelfSyncMessage(T(_("Shelf sync failed:\n%1"), err_text), 5)
         end
         return nil
     end
-    local result = type(result_or_err) == "table" and result_or_err or { synced = 0, skipped = 0, failed = 1, errors = { safeToString(result_or_err) } }
 
-    if not silent then
-        local msg = T(_("Shelf sync complete: %1 downloaded, %2 skipped, %3 failed"), result.synced or 0, result.skipped or 0, result.failed or 0)
-        if (result.deleted or 0) > 0 then
-            msg = msg .. "\n" .. T(_("%1 removed"), result.deleted)
+    local plan   = plan_or_err
+    local result = plan.result
+    local queue  = plan.download_queue or {}
+    local total  = #queue
+
+    -- Nothing to download → finish immediately.
+    if total == 0 then
+        -- Still run cleanup phase.
+        if plan.cleanup then
+            pcall(function()
+                self.shelf_sync:runCleanupPhase(plan.cleanup, result, function(msg)
+                    if not silent then self:showShelfSyncMessage(safeToString(msg), 2) end
+                end)
+            end)
         end
-        if type(result.errors) == "table" and #result.errors > 0 then
-            msg = msg .. "\n" .. safeToString(result.errors[1])
+        self._shelf_sync_running = false
+        if not silent then
+            self:_showSyncCompletionSummary(result)
         end
-        self:showMessage(msg, 5)
+        self:_broadcastSyncResult(result)
+        return result
     end
 
-    -- Broadcast sync result so other plugins (e.g. SimpleUI) can react.
-    if Event and ((result.synced or 0) > 0 or (result.deleted or 0) > 0) then
-        local FM2 = FileManager and FileManager.instance
-        if FM2 and type(FM2.handleEvent) == "function" then
-            pcall(FM2.handleEvent, FM2, Event:new("GrimmLinkShelfSyncComplete", {
-                synced = result.synced or 0,
-                deleted = result.deleted or 0,
-                skipped = result.skipped or 0,
-                download_dir = self.download_dir,
-            }))
+    -- Decide whether to use async (curl/wget subprocess) or blocking (LuaSocket).
+    local use_async = self.api:isAsyncDownloadAvailable()
+
+    -- Phase 2: Download loop.
+    local idx = 0
+    local grimmlink_self = self
+    local active_handle  = nil  -- current curl download handle (async mode)
+
+    -- Helper: build progress info table from byte counts.
+    local function fmtProgress(bytes_so_far, total_bytes)
+        local info = { bytes = bytes_so_far or 0 }
+        if total_bytes and total_bytes > 0 then
+            info.total = total_bytes
+            info.pct = math.min(100, math.floor(bytes_so_far / total_bytes * 100))
+        else
+            info.pct = 0
+        end
+        return info
+    end
+
+    -- Helper: finish sync (cleanup + summary + broadcast).
+    local function finishSync()
+        if not silent then
+            grimmlink_self:_closeSyncProgress()
+            grimmlink_self:showShelfSyncMessage(_("Cleaning up..."), 2)
+        end
+        if plan.cleanup then
+            pcall(function()
+                grimmlink_self.shelf_sync:runCleanupPhase(plan.cleanup, result, function(msg)
+                    if not silent then grimmlink_self:showShelfSyncMessage(safeToString(msg), 2) end
+                end)
+            end)
+        end
+        grimmlink_self._shelf_sync_running = false
+        if not silent then
+            grimmlink_self:_showSyncCompletionSummary(result)
+        end
+        grimmlink_self:_broadcastSyncResult(result)
+    end
+
+    -- Helper: handle cancellation.
+    local function handleCancel()
+        result.cancelled = true
+        if active_handle then
+            pcall(grimmlink_self.api.cancelAsyncDownload, grimmlink_self.api, active_handle)
+            active_handle = nil
+        end
+        if plan.cleanup then
+            pcall(function()
+                grimmlink_self.shelf_sync:runCleanupPhase(plan.cleanup, result, function() end)
+            end)
+        end
+        grimmlink_self._shelf_sync_running = false
+        if not silent then
+            grimmlink_self:_showSyncCompletionSummary(result)
+        end
+        grimmlink_self:_broadcastSyncResult(result)
+    end
+
+    local function startNextDownload()
+        -- Check cancel.
+        if grimmlink_self._shelf_sync_cancelled then
+            handleCancel()
+            return
+        end
+
+        idx = idx + 1
+        if idx > total then
+            finishSync()
+            return
+        end
+
+        local item = queue[idx]
+        if not silent then
+            grimmlink_self:_showSyncProgress(idx, total, item.title, nil)
+        end
+
+        if use_async then
+            -- === ASYNC PATH: curl/wget subprocess ===
+            UIManager:nextTick(function()
+                local ok_start, handle_or_err = pcall(
+                    grimmlink_self.shelf_sync.startAsyncDownload,
+                    grimmlink_self.shelf_sync, item)
+                if not ok_start or not handle_or_err then
+                    result.failed = result.failed + 1
+                    local err = "Async start failed bookId=" .. tostring(item.book_id)
+                        .. ": " .. safeToString(handle_or_err or ok_start)
+                    result.errors[#result.errors + 1] = err
+                    logger.warn("GrimmLink:", err)
+                    UIManager:scheduleIn(0.1, startNextDownload)
+                    return
+                end
+
+                active_handle = handle_or_err
+
+                local function pollDownload()
+                    if grimmlink_self._shelf_sync_cancelled then
+                        handleCancel()
+                        return
+                    end
+
+                    local ok_poll, status, bytes, total_bytes, exit_code = pcall(
+                        grimmlink_self.api.pollAsyncDownload,
+                        grimmlink_self.api, active_handle)
+
+                    if not ok_poll then
+                        logger.warn("GrimmLink: poll error:", safeToString(status))
+                        result.failed = result.failed + 1
+                        result.errors[#result.errors + 1] = "Poll error: " .. safeToString(status)
+                        active_handle = nil
+                        UIManager:scheduleIn(0.1, startNextDownload)
+                        return
+                    end
+
+                    if status == "running" then
+                        if not silent then
+                            grimmlink_self:_updateSyncProgressPct(
+                                idx, total, item.title, fmtProgress(bytes, total_bytes))
+                        end
+                        UIManager:scheduleIn(2, pollDownload)
+                    elseif status == "done" then
+                        pcall(grimmlink_self.shelf_sync.recordDownload,
+                            grimmlink_self.shelf_sync,
+                            item, plan.cleanup.shelf_id, plan.cleanup.sync_start)
+                        result.synced = result.synced + 1
+                        active_handle = nil
+                        if not silent then
+                            grimmlink_self:_updateSyncProgressPct(
+                                idx, total, item.title, fmtProgress(bytes, total_bytes or bytes))
+                        end
+                        UIManager:scheduleIn(0.5, startNextDownload)
+                    else
+                        result.failed = result.failed + 1
+                        local err = "Download " .. status .. " bookId=" .. tostring(item.book_id)
+                        if exit_code then
+                            if exit_code == 127 then
+                                err = err .. " (curl/wget not found)"
+                            else
+                                err = err .. " (exit " .. tostring(exit_code) .. ")"
+                            end
+                        end
+                        result.errors[#result.errors + 1] = err
+                        logger.warn("GrimmLink:", err)
+                        active_handle = nil
+                        UIManager:scheduleIn(0.1, startNextDownload)
+                    end
+                end
+
+                UIManager:scheduleIn(2, pollDownload)
+            end)
+        else
+            -- === BLOCKING PATH: LuaSocket download with progress callback ===
+            -- Works on all devices but UI freezes between progress updates.
+            UIManager:nextTick(function()
+                local book = item.book or {}
+                local dl_opts = {
+                    expected_size_kb = book.fileSizeKb,
+                    on_progress = function(bytes_so_far, total_bytes_est)
+                        if grimmlink_self._shelf_sync_cancelled then
+                            return true  -- signal cancellation
+                        end
+                        if not silent then
+                            grimmlink_self:_updateSyncProgressPct(
+                                idx, total, item.title,
+                                fmtProgress(bytes_so_far, total_bytes_est))
+                        end
+                    end,
+                    is_cancelled = function()
+                        return grimmlink_self._shelf_sync_cancelled
+                    end,
+                }
+                local ok_dl, dl_err = pcall(function()
+                    return grimmlink_self.shelf_sync:executeDownload(
+                        item, plan.cleanup.shelf_id, plan.cleanup.sync_start, dl_opts)
+                end)
+
+                if grimmlink_self._shelf_sync_cancelled then
+                    handleCancel()
+                    return
+                end
+
+                if ok_dl and dl_err then
+                    result.synced = result.synced + 1
+                    if not silent then
+                        local est = (book.fileSizeKb or 0) * 1024
+                        grimmlink_self:_updateSyncProgressPct(
+                            idx, total, item.title, fmtProgress(est, est))
+                    end
+                else
+                    result.failed = result.failed + 1
+                    local err = "Download failed bookId=" .. tostring(item.book_id)
+                        .. ": " .. safeToString(dl_err)
+                    result.errors[#result.errors + 1] = err
+                    logger.warn("GrimmLink:", err)
+                end
+                UIManager:scheduleIn(0.1, startNextDownload)
+            end)
         end
     end
 
-    return result
+    -- Kick off the first download.
+    UIManager:scheduleIn(0.2, startNextDownload)
+
+    -- Return nil because results come asynchronously.
+    return nil
 end
 
 function Grimmlink:normalizeShelfList(shelves)
@@ -2748,7 +3177,9 @@ function Grimmlink:onGrimmLinkTestConnection()
 end
 
 function Grimmlink:onGrimmLinkSyncShelf()
-    self:syncShelfNow(false)
+    self:runAfterUiSettles(function()
+        self:syncShelfNow(false)
+    end)
 end
 
 function Grimmlink:testConnection()
@@ -2859,11 +3290,15 @@ function Grimmlink:onReaderReady()
 end
 
 function Grimmlink:onCloseDocument()
-    self:endSession({ reason = "close" })
+    self:invokeSafely("close document", function()
+        self:endSession({ reason = "close" })
+    end, {}, { silent = true })
 end
 
 function Grimmlink:onSuspend()
-    self:endSession({ reason = "suspend" })
+    self:invokeSafely("suspend document", function()
+        self:endSession({ reason = "suspend" })
+    end, {}, { silent = true })
 end
 
 function Grimmlink:onResume()
@@ -3010,7 +3445,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.pdf_web_reader_bridge_enabled
                         end,
                         callback = function()
-                            self:saveSetting("pdf_web_reader_bridge_enabled", not self.pdf_web_reader_bridge_enabled)
+                            self.pdf_web_reader_bridge_enabled = not self.pdf_web_reader_bridge_enabled
+                            self:saveSetting("pdf_web_reader_bridge_enabled", self.pdf_web_reader_bridge_enabled)
                         end,
                     },
                     {
@@ -3030,7 +3466,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.shelf_sync_enabled
                         end,
                         callback = function()
-                            self:saveSetting("shelf_sync_enabled", not self.shelf_sync_enabled)
+                            self.shelf_sync_enabled = not self.shelf_sync_enabled
+                            self:saveSetting("shelf_sync_enabled", self.shelf_sync_enabled)
                         end,
                     },
                     {
@@ -3057,7 +3494,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.shelf_use_original_filename
                         end,
                         callback = function()
-                            self:saveSetting("shelf_use_original_filename", not self.shelf_use_original_filename)
+                            self.shelf_use_original_filename = not self.shelf_use_original_filename
+                            self:saveSetting("shelf_use_original_filename", self.shelf_use_original_filename)
                         end,
                     },
                     {
@@ -3066,7 +3504,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.auto_sync_shelf_on_resume
                         end,
                         callback = function()
-                            self:saveSetting("auto_sync_shelf_on_resume", not self.auto_sync_shelf_on_resume)
+                            self.auto_sync_shelf_on_resume = not self.auto_sync_shelf_on_resume
+                            self:saveSetting("auto_sync_shelf_on_resume", self.auto_sync_shelf_on_resume)
                         end,
                     },
                     {
@@ -3075,7 +3514,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.shelf_fast_sync_enabled
                         end,
                         callback = function()
-                            self:saveSetting("shelf_fast_sync_enabled", not self.shelf_fast_sync_enabled)
+                            self.shelf_fast_sync_enabled = not self.shelf_fast_sync_enabled
+                            self:saveSetting("shelf_fast_sync_enabled", self.shelf_fast_sync_enabled)
                         end,
                     },
                     {
@@ -3101,7 +3541,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.two_way_shelf_delete_sync
                         end,
                         callback = function()
-                            self:saveSetting("two_way_shelf_delete_sync", not self.two_way_shelf_delete_sync)
+                            self.two_way_shelf_delete_sync = not self.two_way_shelf_delete_sync
+                            self:saveSetting("two_way_shelf_delete_sync", self.two_way_shelf_delete_sync)
                         end,
                     },
                     {
@@ -3110,7 +3551,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.delete_sdr_on_book_delete
                         end,
                         callback = function()
-                            self:saveSetting("delete_sdr_on_book_delete", not self.delete_sdr_on_book_delete)
+                            self.delete_sdr_on_book_delete = not self.delete_sdr_on_book_delete
+                            self:saveSetting("delete_sdr_on_book_delete", self.delete_sdr_on_book_delete)
                         end,
                     },
                     {
@@ -3133,7 +3575,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.auto_update_enabled
                         end,
                         callback = function()
-                            self:saveSetting("auto_update_enabled", not self.auto_update_enabled)
+                            self.auto_update_enabled = not self.auto_update_enabled
+                            self:saveSetting("auto_update_enabled", self.auto_update_enabled)
                         end,
                     },
                     {
@@ -3142,7 +3585,8 @@ function Grimmlink:addToMainMenu(menu_items)
                             return self.check_update_on_startup
                         end,
                         callback = function()
-                            self:saveSetting("check_update_on_startup", not self.check_update_on_startup)
+                            self.check_update_on_startup = not self.check_update_on_startup
+                            self:saveSetting("check_update_on_startup", self.check_update_on_startup)
                         end,
                     },
                     {
@@ -3228,4 +3672,5 @@ function Grimmlink:addToMainMenu(menu_items)
 end
 
 return Grimmlink
+
 
