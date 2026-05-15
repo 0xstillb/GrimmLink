@@ -3584,6 +3584,24 @@ function Grimmlink:addToMainMenu(menu_items)
                             end)
                         end,
                     },
+                    {
+                        text = _("Rebuild SimpleUI metadata cache"),
+                        callback = function()
+                            if not self.shelf_sync or not self.download_dir then
+                                self:showMessage(_("Shelf sync not configured."), 3)
+                                return
+                            end
+                            local counts = self.shelf_sync:rebuildBookInfoCacheFromIndex(
+                                self.shelf_sync:resolveDownloadDir(self.download_dir))
+                            if counts.error then
+                                self:showMessage(T(_("Rebuild failed: %1"), counts.error), 4)
+                            else
+                                self:showMessage(T(
+                                    _("Rebuild complete\nInserted: %1  Updated: %2  Skipped: %3"),
+                                    counts.inserted, counts.updated, counts.skipped), 5)
+                            end
+                        end,
+                    },
                 },
             },
             {

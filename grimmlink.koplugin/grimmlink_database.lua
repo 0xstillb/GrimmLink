@@ -238,6 +238,18 @@ Database.schema_sql = {
     [[
         CREATE INDEX IF NOT EXISTS idx_pending_shelf_removals_shelf_id ON pending_shelf_removals(shelf_id)
     ]],
+    [[
+        CREATE TABLE IF NOT EXISTS shelf_sync_tombstones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            shelf_id INTEGER NOT NULL,
+            local_path TEXT,
+            remote_title TEXT,
+            remote_series_name TEXT,
+            removed_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(book_id, shelf_id)
+        )
+    ]],
 }
 
 function Database:new(o)
@@ -943,6 +955,34 @@ function Database:incrementPendingShelfRemovalRetryCount(book_id)
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
+end
+
+function Database:addShelfSyncTombstone(entry)
+    local sql = [[
+        INSERT INTO shelf_sync_tombstones (book_id, shelf_id, local_path, remote_title, remote_series_name, removed_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(book_id, shelf_id) DO UPDATE SET
+            local_path = excluded.local_path,
+            remote_title = excluded.remote_title,
+            remote_series_name = excluded.remote_series_name,
+            removed_at = excluded.removed_at
+    ]]
+    local stmt = self.conn and self.conn:prepare(sql)
+    if not stmt then return false end
+    stmt:bind(entry.book_id, entry.shelf_id, entry.local_path, entry.remote_title, entry.remote_series_name, nowEpoch())
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:isTombstoned(book_id, shelf_id)
+    local stmt = self.conn and self.conn:prepare(
+        "SELECT 1 FROM shelf_sync_tombstones WHERE book_id = ? AND shelf_id = ?"
+    )
+    if not stmt then return false end
+    stmt:bind(book_id, shelf_id)
+    local row = firstRow(stmt, rowOrNil)
+    return row ~= nil
 end
 
 function Database:getShelfSyncStats()

@@ -288,20 +288,6 @@ function ShelfSync:deleteLocalBook(entry, delete_sdr, download_dir)
         if delete_sdr then
             deleteSdr(entry.local_path)
         end
-        -- Clean up empty series subfolder (one level under download_dir only)
-        local parent = entry.local_path:match("^(.*)/[^/]+$")
-        if parent and parent ~= "" and normalizePathForCompare(parent) ~= normalizePathForCompare(download_dir) then
-            if isPathUnderDirectory(parent, download_dir) then
-                local is_empty = true
-                for child in lfs.dir(parent) do
-                    if child ~= "." and child ~= ".." then is_empty = false; break end
-                end
-                if is_empty then
-                    lfs.rmdir(parent)
-                    logger.info("GrimmLink ShelfSync: removed empty series folder:", parent)
-                end
-            end
-        end
     elseif attr and attr.mode ~= "file" then
         logger.warn("GrimmLink ShelfSync: skip delete (local path is not a file):", entry.local_path)
         return false, "local_path_not_file"
@@ -326,6 +312,9 @@ function ShelfSync:processPendingShelfRemovals(shelf_id, download_dir, delete_sd
                     deleted_ok = self:deleteLocalBook(tracked, delete_sdr, download_dir)
                 end
                 if deleted_ok then
+                    if tracked then
+                        self:removeBookMetadata(tracked, shelf_id)
+                    end
                     self.db:deletePendingShelfRemoval(entry.book_id)
                     result.deleted = result.deleted + 1
                 else
@@ -577,17 +566,7 @@ function ShelfSync:prepareSyncPlan(opts)
                 result.failed = result.failed + 1
                 result.errors[#result.errors + 1] = "Invalid filename for bookId=" .. tostring(book_id)
             else
-                local target_dir = download_dir
-                if book.seriesName and book.seriesName ~= "" then
-                    local series_folder = sanitizeFilename(book.seriesName)
-                    if series_folder then
-                        local series_dir = joinPath(download_dir, series_folder)
-                        if ensureDirectory(series_dir) then
-                            target_dir = series_dir
-                        end
-                    end
-                end
-                local dest_path = uniquePath(target_dir, filename)
+                local dest_path = uniquePath(download_dir, filename)
                 plan.download_queue[#plan.download_queue + 1] = {
                     book      = book,
                     book_id   = book_id,
@@ -702,6 +681,7 @@ function ShelfSync:runCleanupPhase(cleanup, result, progress_fn)
                 end
                 local delete_ok, delete_err = self:deleteLocalBook(entry, cleanup.delete_sdr, cleanup.download_dir)
                 if delete_ok then
+                    self:removeBookMetadata(entry, cleanup.shelf_id)
                     result.deleted = result.deleted + 1
                 else
                     result.failed = result.failed + 1
@@ -759,6 +739,14 @@ function ShelfSync:syncShelf(opts)
     return result
 end
 
+-- Normalize a local path for consistent metadata key matching.
+local function normalizePath(path)
+    if not path or path == "" then return nil end
+    local p = tostring(path):gsub("\\", "/"):gsub("/+", "/")
+    if #p > 1 then p = p:gsub("/$", "") end
+    return p
+end
+
 --- Write a metadata index JSON file to download_dir after sync.
 -- Source of truth for GrimmLink-managed metadata; survives bookinfo_cache rescans.
 function ShelfSync:writeMetadataIndex(shelf_id, download_dir)
@@ -767,20 +755,27 @@ function ShelfSync:writeMetadataIndex(shelf_id, download_dir)
     if #entries == 0 then return nil end
 
     local index = {}
+    local skipped = 0
     for _, e in ipairs(entries) do
-        if e.local_path and e.local_path ~= "" then
-            local dir = e.local_path:match("^(.*)/[^/]+$") or ""
-            local fname = e.local_path:match("([^/]+)$") or ""
-            index[#index + 1] = {
-                bookId       = e.book_id,
-                directory    = dir,
-                filename     = fname,
-                title        = e.remote_title,
-                author       = e.remote_author,
-                series       = e.remote_series_name,
-                seriesIndex  = e.remote_series_number,
-                format       = e.remote_format,
-            }
+        local norm = normalizePath(e.local_path)
+        if norm then
+            local file_attr = lfs.attributes(norm)
+            if file_attr and file_attr.mode == "file" then
+                local dir = norm:match("^(.*)/[^/]+$") or ""
+                local fname = norm:match("([^/]+)$") or ""
+                index[#index + 1] = {
+                    bookId       = e.book_id,
+                    directory    = dir,
+                    filename     = fname,
+                    title        = e.remote_title,
+                    author       = e.remote_author,
+                    series       = e.remote_series_name,
+                    seriesIndex  = e.remote_series_number,
+                    format       = e.remote_format,
+                }
+            else
+                skipped = skipped + 1
+            end
         end
     end
 
@@ -797,56 +792,352 @@ function ShelfSync:writeMetadataIndex(shelf_id, download_dir)
     end
     fh:write(encoded)
     fh:close()
-    logger.info("GrimmLink ShelfSync: wrote metadata index:", index_path, "(", #index, "entries)")
+    logger.info("GrimmLink ShelfSync: wrote metadata index:", index_path,
+        "| entries:", #index, "| skipped_missing:", skipped)
     return index_path
 end
 
---- Upsert series metadata into KOReader's bookinfo_cache.sqlite3.
--- This lets SimpleUI's "Browse by Series" feature work for GrimmLink-synced books.
-function ShelfSync:upsertBookInfoCache(shelf_id)
-    if not self.db or not shelf_id then return 0 end
-
+-- Open bookinfo_cache.sqlite3, validate schema, return conn or nil.
+local function openBookInfoCache()
     local cache_path = DataStorage:getSettingsDir() .. "/cache/bookinfo_cache.sqlite3"
     local attr = lfs.attributes(cache_path)
     if not attr then
-        logger.info("GrimmLink ShelfSync: bookinfo_cache.sqlite3 not found, skipping upsert")
-        return 0
+        logger.info("GrimmLink: bookinfo_cache.sqlite3 not found, skipping")
+        return nil, cache_path
     end
 
     local ok_open, cache_conn = pcall(SQ3.open, cache_path)
     if not ok_open or not cache_conn then
-        logger.warn("GrimmLink ShelfSync: cannot open bookinfo_cache:", tostring(cache_conn))
-        return 0
+        logger.warn("GrimmLink: cannot open bookinfo_cache:", tostring(cache_conn))
+        return nil, cache_path
     end
 
-    local entries = self.db:getAllShelfSyncEntries(shelf_id)
-    local updated = 0
-
-    for _, e in ipairs(entries) do
-        if e.local_path and e.local_path ~= "" and e.remote_series_name and e.remote_series_name ~= "" then
-            local dir = e.local_path:match("^(.*)/[^/]+$") or ""
-            local fname = e.local_path:match("([^/]+)$") or ""
-            if fname ~= "" then
-                local stmt = cache_conn:prepare([[
-                    UPDATE bookinfo SET series = ?, series_index = ?
-                    WHERE directory = ? AND filename = ?
-                ]])
-                if stmt then
-                    stmt:bind(e.remote_series_name, e.remote_series_number, dir, fname)
-                    if stmt:step() == SQ3.DONE then
-                        updated = updated + 1
-                    end
-                    stmt:close()
-                end
+    -- Rule 25/26: inspect schema before writing
+    local has_bookinfo = false
+    local columns = {}
+    local pragma_ok, pragma_err = pcall(function()
+        local stmt = cache_conn:prepare("PRAGMA table_info(bookinfo)")
+        if stmt then
+            for row in stmt:rows() do
+                columns[row[2]] = true
             end
+            stmt:close()
+            has_bookinfo = columns["directory"] and columns["filename"]
+        end
+    end)
+    if not pragma_ok then
+        logger.warn("GrimmLink: PRAGMA check failed:", tostring(pragma_err))
+        cache_conn:close()
+        return nil, cache_path
+    end
+    if not has_bookinfo then
+        logger.warn("GrimmLink: bookinfo table missing or schema mismatch, skipping")
+        cache_conn:close()
+        return nil, cache_path
+    end
+
+    return cache_conn, cache_path, columns
+end
+
+-- Backup bookinfo_cache.sqlite3 once before first GrimmLink write.
+local _backup_done = false
+local function backupBookInfoCacheOnce(cache_path)
+    if _backup_done then return end
+    local backup_path = cache_path .. ".grimmlink_backup"
+    if not lfs.attributes(backup_path) then
+        local src = io.open(cache_path, "rb")
+        if src then
+            local dst = io.open(backup_path, "wb")
+            if dst then
+                dst:write(src:read("*a"))
+                dst:close()
+                logger.info("GrimmLink: backed up bookinfo_cache to", backup_path)
+            end
+            src:close()
         end
     end
+    _backup_done = true
+end
 
-    cache_conn:close()
-    if updated > 0 then
-        logger.info("GrimmLink ShelfSync: updated", updated, "bookinfo_cache entries with series metadata")
+--- Upsert display metadata into KOReader's bookinfo_cache.sqlite3.
+-- Updates: title, authors, series, series_index, keywords.
+-- Inserts a minimal valid row if no existing row matches.
+function ShelfSync:upsertBookInfoCache(shelf_id)
+    if not self.db or not shelf_id then return { inserted = 0, updated = 0, skipped = 0 } end
+
+    local cache_conn, cache_path, columns = openBookInfoCache()
+    if not cache_conn then return { inserted = 0, updated = 0, skipped = 0 } end
+
+    backupBookInfoCacheOnce(cache_path)
+
+    local entries = self.db:getAllShelfSyncEntries(shelf_id)
+    local counts = { inserted = 0, updated = 0, skipped = 0 }
+
+    local has_series = columns["series"]
+    local has_series_index = columns["series_index"]
+    local has_keywords = columns["keywords"]
+
+    cache_conn:exec("BEGIN TRANSACTION")
+
+    for _, e in ipairs(entries) do
+        local norm = normalizePath(e.local_path)
+        if not norm then
+            counts.skipped = counts.skipped + 1
+            goto continue
+        end
+        local file_attr = lfs.attributes(norm)
+        if not file_attr or file_attr.mode ~= "file" then
+            counts.skipped = counts.skipped + 1
+            goto continue
+        end
+
+        local dir = norm:match("^(.*)/[^/]+$") or ""
+        local fname = norm:match("([^/]+)$") or ""
+        if fname == "" then
+            counts.skipped = counts.skipped + 1
+            goto continue
+        end
+
+        -- Check if row exists
+        local exists = false
+        local check_stmt = cache_conn:prepare("SELECT 1 FROM bookinfo WHERE directory = ? AND filename = ?")
+        if check_stmt then
+            check_stmt:bind(dir, fname)
+            for _ in check_stmt:rows() do exists = true; break end
+            check_stmt:close()
+        end
+
+        if exists then
+            -- Build dynamic UPDATE based on available columns and data
+            local sets = {}
+            local vals = {}
+            if e.remote_title and e.remote_title ~= "" then
+                sets[#sets + 1] = "title = ?"
+                vals[#vals + 1] = e.remote_title
+            end
+            if e.remote_author and e.remote_author ~= "" then
+                sets[#sets + 1] = "authors = ?"
+                vals[#vals + 1] = e.remote_author
+            end
+            if has_series and e.remote_series_name and e.remote_series_name ~= "" then
+                sets[#sets + 1] = "series = ?"
+                vals[#vals + 1] = e.remote_series_name
+            end
+            if has_series_index and e.remote_series_number then
+                sets[#sets + 1] = "series_index = ?"
+                vals[#vals + 1] = e.remote_series_number
+            end
+            if #sets > 0 then
+                vals[#vals + 1] = dir
+                vals[#vals + 1] = fname
+                local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ") .. " WHERE directory = ? AND filename = ?"
+                local upd_stmt = cache_conn:prepare(sql)
+                if upd_stmt then
+                    upd_stmt:bind(unpack(vals))
+                    upd_stmt:step()
+                    upd_stmt:close()
+                    counts.updated = counts.updated + 1
+                end
+            else
+                counts.skipped = counts.skipped + 1
+            end
+        else
+            -- Insert minimal valid row
+            local col_names = { "directory", "filename" }
+            local placeholders = { "?", "?" }
+            local vals = { dir, fname }
+            if e.remote_title and e.remote_title ~= "" then
+                col_names[#col_names + 1] = "title"
+                placeholders[#placeholders + 1] = "?"
+                vals[#vals + 1] = e.remote_title
+            end
+            if e.remote_author and e.remote_author ~= "" then
+                col_names[#col_names + 1] = "authors"
+                placeholders[#placeholders + 1] = "?"
+                vals[#vals + 1] = e.remote_author
+            end
+            if has_series and e.remote_series_name and e.remote_series_name ~= "" then
+                col_names[#col_names + 1] = "series"
+                placeholders[#placeholders + 1] = "?"
+                vals[#vals + 1] = e.remote_series_name
+            end
+            if has_series_index and e.remote_series_number then
+                col_names[#col_names + 1] = "series_index"
+                placeholders[#placeholders + 1] = "?"
+                vals[#vals + 1] = e.remote_series_number
+            end
+            if columns["has_meta"] then
+                col_names[#col_names + 1] = "has_meta"
+                placeholders[#placeholders + 1] = "?"
+                vals[#vals + 1] = "Y"
+            end
+            local sql = "INSERT INTO bookinfo (" .. table.concat(col_names, ", ") ..
+                ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
+            local ins_stmt = cache_conn:prepare(sql)
+            if ins_stmt then
+                ins_stmt:bind(unpack(vals))
+                ins_stmt:step()
+                ins_stmt:close()
+                counts.inserted = counts.inserted + 1
+            end
+        end
+
+        ::continue::
     end
-    return updated
+
+    cache_conn:exec("COMMIT")
+    cache_conn:close()
+
+    logger.info("GrimmLink: bookinfo_cache upsert complete",
+        "| inserted:", counts.inserted,
+        "| updated:", counts.updated,
+        "| skipped:", counts.skipped)
+    return counts
+end
+
+--- Delete a single book's row from bookinfo_cache.sqlite3.
+function ShelfSync:deleteFromBookInfoCache(local_path)
+    local norm = normalizePath(local_path)
+    if not norm then return false end
+    local dir = norm:match("^(.*)/[^/]+$") or ""
+    local fname = norm:match("([^/]+)$") or ""
+    if fname == "" then return false end
+
+    local cache_conn = openBookInfoCache()
+    if not cache_conn then return false end
+
+    local stmt = cache_conn:prepare("DELETE FROM bookinfo WHERE directory = ? AND filename = ?")
+    local ok = false
+    if stmt then
+        stmt:bind(dir, fname)
+        ok = stmt:step() == SQ3.DONE
+        stmt:close()
+    end
+    cache_conn:close()
+    if ok then
+        logger.info("GrimmLink: removed bookinfo_cache row:", dir .. "/" .. fname)
+    end
+    return ok
+end
+
+--- Rebuild bookinfo_cache from grimmlink_metadata_index.json.
+-- Use when CoverBrowser rescan has overwritten GrimmLink metadata.
+function ShelfSync:rebuildBookInfoCacheFromIndex(download_dir)
+    local index_path = joinPath(download_dir, "grimmlink_metadata_index.json")
+    local fh = io.open(index_path, "r")
+    if not fh then
+        logger.warn("GrimmLink: metadata index not found:", index_path)
+        return { inserted = 0, updated = 0, skipped = 0, error = "index_not_found" }
+    end
+    local raw = fh:read("*a")
+    fh:close()
+
+    local ok_decode, index = pcall(json.decode, raw)
+    if not ok_decode or type(index) ~= "table" then
+        logger.warn("GrimmLink: failed to parse metadata index")
+        return { inserted = 0, updated = 0, skipped = 0, error = "parse_failed" }
+    end
+
+    local cache_conn, cache_path, columns = openBookInfoCache()
+    if not cache_conn then
+        return { inserted = 0, updated = 0, skipped = 0, error = "cache_unavailable" }
+    end
+
+    backupBookInfoCacheOnce(cache_path)
+
+    local has_series = columns["series"]
+    local has_series_index = columns["series_index"]
+    local counts = { inserted = 0, updated = 0, skipped = 0 }
+
+    cache_conn:exec("BEGIN TRANSACTION")
+
+    for _, entry in ipairs(index) do
+        local dir = entry.directory or ""
+        local fname = entry.filename or ""
+        if fname == "" then
+            counts.skipped = counts.skipped + 1
+            goto rebuild_continue
+        end
+        local full_path = dir ~= "" and (dir .. "/" .. fname) or fname
+        local file_attr = lfs.attributes(full_path)
+        if not file_attr or file_attr.mode ~= "file" then
+            counts.skipped = counts.skipped + 1
+            goto rebuild_continue
+        end
+
+        local exists = false
+        local chk = cache_conn:prepare("SELECT 1 FROM bookinfo WHERE directory = ? AND filename = ?")
+        if chk then
+            chk:bind(dir, fname)
+            for _ in chk:rows() do exists = true; break end
+            chk:close()
+        end
+
+        if exists then
+            local sets, vals = {}, {}
+            if entry.title and entry.title ~= "" then
+                sets[#sets + 1] = "title = ?"; vals[#vals + 1] = entry.title
+            end
+            if entry.author and entry.author ~= "" then
+                sets[#sets + 1] = "authors = ?"; vals[#vals + 1] = entry.author
+            end
+            if has_series and entry.series and entry.series ~= "" then
+                sets[#sets + 1] = "series = ?"; vals[#vals + 1] = entry.series
+            end
+            if has_series_index and entry.seriesIndex then
+                sets[#sets + 1] = "series_index = ?"; vals[#vals + 1] = entry.seriesIndex
+            end
+            if #sets > 0 then
+                vals[#vals + 1] = dir; vals[#vals + 1] = fname
+                local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ") .. " WHERE directory = ? AND filename = ?"
+                local s = cache_conn:prepare(sql)
+                if s then s:bind(unpack(vals)); s:step(); s:close(); counts.updated = counts.updated + 1 end
+            end
+        else
+            local col_names = { "directory", "filename" }
+            local placeholders = { "?", "?" }
+            local vals = { dir, fname }
+            if entry.title then col_names[#col_names+1]="title"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.title end
+            if entry.author then col_names[#col_names+1]="authors"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.author end
+            if has_series and entry.series then col_names[#col_names+1]="series"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.series end
+            if has_series_index and entry.seriesIndex then col_names[#col_names+1]="series_index"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.seriesIndex end
+            if columns["has_meta"] then col_names[#col_names+1]="has_meta"; placeholders[#placeholders+1]="?"; vals[#vals+1]="Y" end
+            local sql = "INSERT INTO bookinfo (" .. table.concat(col_names, ", ") .. ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
+            local s = cache_conn:prepare(sql)
+            if s then s:bind(unpack(vals)); s:step(); s:close(); counts.inserted = counts.inserted + 1 end
+        end
+
+        ::rebuild_continue::
+    end
+
+    cache_conn:exec("COMMIT")
+    cache_conn:close()
+
+    logger.info("GrimmLink: bookinfo_cache rebuild complete",
+        "| inserted:", counts.inserted, "| updated:", counts.updated, "| skipped:", counts.skipped)
+    return counts
+end
+
+--- Remove a book from metadata tracking (called on shelf remove).
+-- Adds tombstone and deletes from bookinfo_cache.
+-- The caller is responsible for rewriting the metadata index after
+-- the batch operation completes (writeMetadataIndex in finishSync).
+function ShelfSync:removeBookMetadata(entry, shelf_id)
+    if not entry or not entry.book_id then return end
+
+    if self.db and self.db.addShelfSyncTombstone then
+        self.db:addShelfSyncTombstone({
+            book_id = entry.book_id,
+            shelf_id = shelf_id,
+            local_path = entry.local_path,
+            remote_title = entry.remote_title,
+            remote_series_name = entry.remote_series_name,
+        })
+    end
+
+    if entry.local_path and entry.local_path ~= "" then
+        self:deleteFromBookInfoCache(entry.local_path)
+    end
 end
 
 return ShelfSync
