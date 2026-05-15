@@ -209,6 +209,8 @@ Database.schema_sql = {
             remote_author TEXT,
             remote_format TEXT,
             remote_file_size_kb INTEGER,
+            remote_series_name TEXT,
+            remote_series_number REAL,
             local_path TEXT,
             downloaded_at INTEGER,
             last_seen_in_shelf_at INTEGER,
@@ -264,7 +266,18 @@ function Database:repairSchema()
         end
     end
 
+    self:_migrateShelfSyncSeriesColumns()
     return true
+end
+
+function Database:_migrateShelfSyncSeriesColumns()
+    local stmt = self.conn and self.conn:prepare("SELECT remote_series_name FROM shelf_sync_map LIMIT 0")
+    if stmt then
+        stmt:close()
+        return
+    end
+    self:_exec("ALTER TABLE shelf_sync_map ADD COLUMN remote_series_name TEXT")
+    self:_exec("ALTER TABLE shelf_sync_map ADD COLUMN remote_series_number REAL")
 end
 
 function Database:init(db_name)
@@ -735,12 +748,14 @@ local function mapShelfEntry(row)
         remote_author = row[6],
         remote_format = row[7],
         remote_file_size_kb = tonumber(row[8]) or row[8],
-        local_path = row[9],
-        downloaded_at = tonumber(row[10]) or row[10],
-        last_seen_in_shelf_at = tonumber(row[11]) or row[11],
-        downloaded_by_grimmlink = (tonumber(row[12]) or 0) == 1 and 1 or 0,
-        created_at = tonumber(row[13]) or row[13],
-        updated_at = tonumber(row[14]) or row[14],
+        remote_series_name = row[9],
+        remote_series_number = tonumber(row[10]),
+        local_path = row[11],
+        downloaded_at = tonumber(row[12]) or row[12],
+        last_seen_in_shelf_at = tonumber(row[13]) or row[13],
+        downloaded_by_grimmlink = (tonumber(row[14]) or 0) == 1 and 1 or 0,
+        created_at = tonumber(row[15]) or row[15],
+        updated_at = tonumber(row[16]) or row[16],
     }
 end
 
@@ -748,8 +763,9 @@ function Database:getShelfSyncEntry(book_id)
     local stmt = self.conn and self.conn:prepare(
         [[
             SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
-                   remote_format, remote_file_size_kb, local_path, downloaded_at,
-                   last_seen_in_shelf_at, downloaded_by_grimmlink, created_at, updated_at
+                   remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
+                   local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
+                   created_at, updated_at
             FROM shelf_sync_map
             WHERE book_id = ?
         ]]
@@ -765,8 +781,9 @@ function Database:getShelfSyncEntryByLocalPath(local_path)
     local stmt = self.conn and self.conn:prepare(
         [[
             SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
-                   remote_format, remote_file_size_kb, local_path, downloaded_at,
-                   last_seen_in_shelf_at, downloaded_by_grimmlink, created_at, updated_at
+                   remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
+                   local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
+                   created_at, updated_at
             FROM shelf_sync_map
             WHERE local_path = ?
         ]]
@@ -782,9 +799,9 @@ function Database:upsertShelfSyncEntry(entry)
     local sql = [[
         INSERT INTO shelf_sync_map (
             book_id, shelf_id, remote_filename, remote_title, remote_author,
-            remote_format, remote_file_size_kb, local_path, downloaded_at,
-            last_seen_in_shelf_at, downloaded_by_grimmlink, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
+            local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(book_id) DO UPDATE SET
             shelf_id = excluded.shelf_id,
             remote_filename = excluded.remote_filename,
@@ -792,6 +809,8 @@ function Database:upsertShelfSyncEntry(entry)
             remote_author = excluded.remote_author,
             remote_format = excluded.remote_format,
             remote_file_size_kb = excluded.remote_file_size_kb,
+            remote_series_name = excluded.remote_series_name,
+            remote_series_number = excluded.remote_series_number,
             local_path = excluded.local_path,
             downloaded_at = excluded.downloaded_at,
             last_seen_in_shelf_at = excluded.last_seen_in_shelf_at,
@@ -810,6 +829,8 @@ function Database:upsertShelfSyncEntry(entry)
         entry.remote_author,
         entry.remote_format,
         entry.remote_file_size_kb,
+        entry.remote_series_name,
+        entry.remote_series_number,
         entry.local_path,
         entry.downloaded_at or nowEpoch(),
         entry.last_seen_in_shelf_at or nowEpoch(),
@@ -825,8 +846,9 @@ function Database:getAllShelfSyncEntries(shelf_id)
     local stmt = self.conn and self.conn:prepare(
         [[
             SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
-                   remote_format, remote_file_size_kb, local_path, downloaded_at,
-                   last_seen_in_shelf_at, downloaded_by_grimmlink, created_at, updated_at
+                   remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
+                   local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
+                   created_at, updated_at
             FROM shelf_sync_map
             WHERE shelf_id = ?
             ORDER BY updated_at DESC

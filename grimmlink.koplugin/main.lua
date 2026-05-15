@@ -2593,10 +2593,11 @@ function Grimmlink:_broadcastSyncResult(result)
     if not Event then return end
     if (result.synced or 0) == 0 and (result.deleted or 0) == 0 then return end
     local ev = Event:new("GrimmLinkShelfSyncComplete", {
-        synced       = result.synced or 0,
-        deleted      = result.deleted or 0,
-        skipped      = result.skipped or 0,
-        download_dir = self.download_dir,
+        synced              = result.synced or 0,
+        deleted             = result.deleted or 0,
+        skipped             = result.skipped or 0,
+        download_dir        = self.download_dir,
+        metadata_index_path = result.metadata_index_path,
     })
     local function _emit()
         if UIManager and type(UIManager.broadcastEvent) == "function" then
@@ -2719,6 +2720,15 @@ function Grimmlink:syncShelfNow(silent)
                 end)
             end)
         end
+        -- Write metadata index + update bookinfo_cache for series browsing
+        local index_path
+        pcall(function()
+            index_path = self.shelf_sync:writeMetadataIndex(self.shelf_id, self.download_dir)
+        end)
+        pcall(function()
+            self.shelf_sync:upsertBookInfoCache(self.shelf_id)
+        end)
+        result.metadata_index_path = index_path
         self._shelf_sync_running = false
         if not silent then
             self:_showSyncCompletionSummary(result)
@@ -2760,6 +2770,16 @@ function Grimmlink:syncShelfNow(silent)
                 end)
             end)
         end
+        -- Write metadata index + update bookinfo_cache for series browsing
+        local index_path
+        pcall(function()
+            index_path = grimmlink_self.shelf_sync:writeMetadataIndex(
+                grimmlink_self.shelf_id, grimmlink_self.download_dir)
+        end)
+        pcall(function()
+            grimmlink_self.shelf_sync:upsertBookInfoCache(grimmlink_self.shelf_id)
+        end)
+        result.metadata_index_path = index_path
         grimmlink_self._shelf_sync_running = false
         if not silent then
             grimmlink_self:_showSyncCompletionSummary(result)

@@ -1,4 +1,6 @@
 local DataStorage = require("datastorage")
+local SQ3 = require("lua-ljsqlite3/init")
+local json = require("json")
 local lfs = require("lfs")
 local logger = require("logger")
 
@@ -286,6 +288,20 @@ function ShelfSync:deleteLocalBook(entry, delete_sdr, download_dir)
         if delete_sdr then
             deleteSdr(entry.local_path)
         end
+        -- Clean up empty series subfolder (one level under download_dir only)
+        local parent = entry.local_path:match("^(.*)/[^/]+$")
+        if parent and parent ~= "" and normalizePathForCompare(parent) ~= normalizePathForCompare(download_dir) then
+            if isPathUnderDirectory(parent, download_dir) then
+                local is_empty = true
+                for child in lfs.dir(parent) do
+                    if child ~= "." and child ~= ".." then is_empty = false; break end
+                end
+                if is_empty then
+                    lfs.rmdir(parent)
+                    logger.info("GrimmLink ShelfSync: removed empty series folder:", parent)
+                end
+            end
+        end
     elseif attr and attr.mode ~= "file" then
         logger.warn("GrimmLink ShelfSync: skip delete (local path is not a file):", entry.local_path)
         return false, "local_path_not_file"
@@ -456,6 +472,8 @@ function ShelfSync:prepareSyncPlan(opts)
                     remote_author = existing.remote_author or book.author,
                     remote_format = existing.remote_format or book.fileFormat,
                     remote_file_size_kb = existing.remote_file_size_kb or book.fileSizeKb,
+                    remote_series_name = book.seriesName or existing.remote_series_name,
+                    remote_series_number = book.seriesNumber or existing.remote_series_number,
                     local_path = existing.local_path,
                     downloaded_at = existing.downloaded_at,
                     last_seen_in_shelf_at = sync_start,
@@ -494,6 +512,8 @@ function ShelfSync:prepareSyncPlan(opts)
                                 remote_author = existing.remote_author or book.author,
                                 remote_format = existing.remote_format or book.fileFormat,
                                 remote_file_size_kb = existing.remote_file_size_kb or book.fileSizeKb,
+                                remote_series_name = book.seriesName or existing.remote_series_name,
+                                remote_series_number = book.seriesNumber or existing.remote_series_number,
                                 local_path = cached_path,
                                 downloaded_at = existing.downloaded_at,
                                 last_seen_in_shelf_at = sync_start,
@@ -532,6 +552,8 @@ function ShelfSync:prepareSyncPlan(opts)
                             remote_author = book.author,
                             remote_format = book.fileFormat,
                             remote_file_size_kb = book.fileSizeKb,
+                            remote_series_name = book.seriesName,
+                            remote_series_number = book.seriesNumber,
                             local_path = candidate_path,
                             downloaded_at = os.time(),
                             last_seen_in_shelf_at = sync_start,
@@ -555,7 +577,17 @@ function ShelfSync:prepareSyncPlan(opts)
                 result.failed = result.failed + 1
                 result.errors[#result.errors + 1] = "Invalid filename for bookId=" .. tostring(book_id)
             else
-                local dest_path = uniquePath(download_dir, filename)
+                local target_dir = download_dir
+                if book.seriesName and book.seriesName ~= "" then
+                    local series_folder = sanitizeFilename(book.seriesName)
+                    if series_folder then
+                        local series_dir = joinPath(download_dir, series_folder)
+                        if ensureDirectory(series_dir) then
+                            target_dir = series_dir
+                        end
+                    end
+                end
+                local dest_path = uniquePath(target_dir, filename)
                 plan.download_queue[#plan.download_queue + 1] = {
                     book      = book,
                     book_id   = book_id,
@@ -597,6 +629,8 @@ function ShelfSync:executeDownload(item, shelf_id, sync_start, download_opts)
             remote_author        = book.author,
             remote_format        = book.fileFormat,
             remote_file_size_kb  = book.fileSizeKb,
+            remote_series_name   = book.seriesName,
+            remote_series_number = book.seriesNumber,
             local_path           = item.dest_path,
             downloaded_at        = os.time(),
             last_seen_in_shelf_at = sync_start,
@@ -640,6 +674,8 @@ function ShelfSync:recordDownload(item, shelf_id, sync_start)
         remote_author        = book.author,
         remote_format        = book.fileFormat,
         remote_file_size_kb  = book.fileSizeKb,
+        remote_series_name   = book.seriesName,
+        remote_series_number = book.seriesNumber,
         local_path           = item.dest_path,
         downloaded_at        = os.time(),
         last_seen_in_shelf_at = sync_start,
@@ -721,6 +757,96 @@ function ShelfSync:syncShelf(opts)
     self:runCleanupPhase(plan.cleanup, result, progress)
 
     return result
+end
+
+--- Write a metadata index JSON file to download_dir after sync.
+-- Source of truth for GrimmLink-managed metadata; survives bookinfo_cache rescans.
+function ShelfSync:writeMetadataIndex(shelf_id, download_dir)
+    if not self.db or not shelf_id then return nil end
+    local entries = self.db:getAllShelfSyncEntries(shelf_id)
+    if #entries == 0 then return nil end
+
+    local index = {}
+    for _, e in ipairs(entries) do
+        if e.local_path and e.local_path ~= "" then
+            local dir = e.local_path:match("^(.*)/[^/]+$") or ""
+            local fname = e.local_path:match("([^/]+)$") or ""
+            index[#index + 1] = {
+                bookId       = e.book_id,
+                directory    = dir,
+                filename     = fname,
+                title        = e.remote_title,
+                author       = e.remote_author,
+                series       = e.remote_series_name,
+                seriesIndex  = e.remote_series_number,
+                format       = e.remote_format,
+            }
+        end
+    end
+
+    local index_path = joinPath(download_dir, "grimmlink_metadata_index.json")
+    local ok, encoded = pcall(json.encode, index)
+    if not ok then
+        logger.warn("GrimmLink ShelfSync: failed to encode metadata index:", encoded)
+        return nil
+    end
+    local fh = io.open(index_path, "w")
+    if not fh then
+        logger.warn("GrimmLink ShelfSync: cannot write metadata index:", index_path)
+        return nil
+    end
+    fh:write(encoded)
+    fh:close()
+    logger.info("GrimmLink ShelfSync: wrote metadata index:", index_path, "(", #index, "entries)")
+    return index_path
+end
+
+--- Upsert series metadata into KOReader's bookinfo_cache.sqlite3.
+-- This lets SimpleUI's "Browse by Series" feature work for GrimmLink-synced books.
+function ShelfSync:upsertBookInfoCache(shelf_id)
+    if not self.db or not shelf_id then return 0 end
+
+    local cache_path = DataStorage:getSettingsDir() .. "/cache/bookinfo_cache.sqlite3"
+    local attr = lfs.attributes(cache_path)
+    if not attr then
+        logger.info("GrimmLink ShelfSync: bookinfo_cache.sqlite3 not found, skipping upsert")
+        return 0
+    end
+
+    local ok_open, cache_conn = pcall(SQ3.open, cache_path)
+    if not ok_open or not cache_conn then
+        logger.warn("GrimmLink ShelfSync: cannot open bookinfo_cache:", tostring(cache_conn))
+        return 0
+    end
+
+    local entries = self.db:getAllShelfSyncEntries(shelf_id)
+    local updated = 0
+
+    for _, e in ipairs(entries) do
+        if e.local_path and e.local_path ~= "" and e.remote_series_name and e.remote_series_name ~= "" then
+            local dir = e.local_path:match("^(.*)/[^/]+$") or ""
+            local fname = e.local_path:match("([^/]+)$") or ""
+            if fname ~= "" then
+                local stmt = cache_conn:prepare([[
+                    UPDATE bookinfo SET series = ?, series_index = ?
+                    WHERE directory = ? AND filename = ?
+                ]])
+                if stmt then
+                    stmt:bind(e.remote_series_name, e.remote_series_number, dir, fname)
+                    if stmt:step() == SQ3.DONE then
+                        updated = updated + 1
+                    end
+                    stmt:close()
+                end
+            end
+        end
+    end
+
+    cache_conn:close()
+    if updated > 0 then
+        logger.info("GrimmLink ShelfSync: updated", updated, "bookinfo_cache entries with series metadata")
+    end
+    return updated
 end
 
 return ShelfSync
