@@ -881,108 +881,72 @@ function ShelfSync:upsertBookInfoCache(shelf_id)
 
     for _, e in ipairs(entries) do
         local norm = normalizePath(e.local_path)
-        if not norm then
-            counts.skipped = counts.skipped + 1
-            goto continue
-        end
-        local file_attr = lfs.attributes(norm)
-        if not file_attr or file_attr.mode ~= "file" then
-            counts.skipped = counts.skipped + 1
-            goto continue
-        end
-
-        local dir = norm:match("^(.*)/[^/]+$") or ""
-        local fname = norm:match("([^/]+)$") or ""
-        if fname == "" then
-            counts.skipped = counts.skipped + 1
-            goto continue
-        end
-
-        -- Check if row exists
-        local exists = false
-        local check_stmt = cache_conn:prepare("SELECT 1 FROM bookinfo WHERE directory = ? AND filename = ?")
-        if check_stmt then
-            check_stmt:bind(dir, fname)
-            for _ in check_stmt:rows() do exists = true; break end
-            check_stmt:close()
-        end
-
-        if exists then
-            -- Build dynamic UPDATE based on available columns and data
-            local sets = {}
-            local vals = {}
-            if e.remote_title and e.remote_title ~= "" then
-                sets[#sets + 1] = "title = ?"
-                vals[#vals + 1] = e.remote_title
-            end
-            if e.remote_author and e.remote_author ~= "" then
-                sets[#sets + 1] = "authors = ?"
-                vals[#vals + 1] = e.remote_author
-            end
-            if has_series and e.remote_series_name and e.remote_series_name ~= "" then
-                sets[#sets + 1] = "series = ?"
-                vals[#vals + 1] = e.remote_series_name
-            end
-            if has_series_index and e.remote_series_number then
-                sets[#sets + 1] = "series_index = ?"
-                vals[#vals + 1] = e.remote_series_number
-            end
-            if #sets > 0 then
-                vals[#vals + 1] = dir
-                vals[#vals + 1] = fname
-                local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ") .. " WHERE directory = ? AND filename = ?"
-                local upd_stmt = cache_conn:prepare(sql)
-                if upd_stmt then
-                    upd_stmt:bind(unpack(vals))
-                    upd_stmt:step()
-                    upd_stmt:close()
-                    counts.updated = counts.updated + 1
+        local file_attr = norm and lfs.attributes(norm)
+        if norm and file_attr and file_attr.mode == "file" then
+            local dir = norm:match("^(.*)/[^/]+$") or ""
+            local fname = norm:match("([^/]+)$") or ""
+            if fname ~= "" then
+                local exists = false
+                local check_stmt = cache_conn:prepare("SELECT 1 FROM bookinfo WHERE directory = ? AND filename = ?")
+                if check_stmt then
+                    check_stmt:bind(dir, fname)
+                    for _ in check_stmt:rows() do exists = true; break end
+                    check_stmt:close()
                 end
-            else
-                counts.skipped = counts.skipped + 1
-            end
-        else
-            -- Insert minimal valid row
-            local col_names = { "directory", "filename" }
-            local placeholders = { "?", "?" }
-            local vals = { dir, fname }
-            if e.remote_title and e.remote_title ~= "" then
-                col_names[#col_names + 1] = "title"
-                placeholders[#placeholders + 1] = "?"
-                vals[#vals + 1] = e.remote_title
-            end
-            if e.remote_author and e.remote_author ~= "" then
-                col_names[#col_names + 1] = "authors"
-                placeholders[#placeholders + 1] = "?"
-                vals[#vals + 1] = e.remote_author
-            end
-            if has_series and e.remote_series_name and e.remote_series_name ~= "" then
-                col_names[#col_names + 1] = "series"
-                placeholders[#placeholders + 1] = "?"
-                vals[#vals + 1] = e.remote_series_name
-            end
-            if has_series_index and e.remote_series_number then
-                col_names[#col_names + 1] = "series_index"
-                placeholders[#placeholders + 1] = "?"
-                vals[#vals + 1] = e.remote_series_number
-            end
-            if columns["has_meta"] then
-                col_names[#col_names + 1] = "has_meta"
-                placeholders[#placeholders + 1] = "?"
-                vals[#vals + 1] = "Y"
-            end
-            local sql = "INSERT INTO bookinfo (" .. table.concat(col_names, ", ") ..
-                ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
-            local ins_stmt = cache_conn:prepare(sql)
-            if ins_stmt then
-                ins_stmt:bind(unpack(vals))
-                ins_stmt:step()
-                ins_stmt:close()
-                counts.inserted = counts.inserted + 1
-            end
-        end
 
-        ::continue::
+                if exists then
+                    local sets = {}
+                    local vals = {}
+                    if e.remote_title and e.remote_title ~= "" then
+                        sets[#sets + 1] = "title = ?"; vals[#vals + 1] = e.remote_title
+                    end
+                    if e.remote_author and e.remote_author ~= "" then
+                        sets[#sets + 1] = "authors = ?"; vals[#vals + 1] = e.remote_author
+                    end
+                    if has_series and e.remote_series_name and e.remote_series_name ~= "" then
+                        sets[#sets + 1] = "series = ?"; vals[#vals + 1] = e.remote_series_name
+                    end
+                    if has_series_index and e.remote_series_number then
+                        sets[#sets + 1] = "series_index = ?"; vals[#vals + 1] = e.remote_series_number
+                    end
+                    if #sets > 0 then
+                        vals[#vals + 1] = dir; vals[#vals + 1] = fname
+                        local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ") .. " WHERE directory = ? AND filename = ?"
+                        local upd_stmt = cache_conn:prepare(sql)
+                        if upd_stmt then
+                            upd_stmt:bind(unpack(vals)); upd_stmt:step(); upd_stmt:close()
+                            counts.updated = counts.updated + 1
+                        else counts.skipped = counts.skipped + 1 end
+                    else counts.skipped = counts.skipped + 1 end
+                else
+                    local col_names = { "directory", "filename" }
+                    local placeholders = { "?", "?" }
+                    local vals = { dir, fname }
+                    if e.remote_title and e.remote_title ~= "" then
+                        col_names[#col_names+1]="title"; placeholders[#placeholders+1]="?"; vals[#vals+1]=e.remote_title
+                    end
+                    if e.remote_author and e.remote_author ~= "" then
+                        col_names[#col_names+1]="authors"; placeholders[#placeholders+1]="?"; vals[#vals+1]=e.remote_author
+                    end
+                    if has_series and e.remote_series_name and e.remote_series_name ~= "" then
+                        col_names[#col_names+1]="series"; placeholders[#placeholders+1]="?"; vals[#vals+1]=e.remote_series_name
+                    end
+                    if has_series_index and e.remote_series_number then
+                        col_names[#col_names+1]="series_index"; placeholders[#placeholders+1]="?"; vals[#vals+1]=e.remote_series_number
+                    end
+                    if columns["has_meta"] then
+                        col_names[#col_names+1]="has_meta"; placeholders[#placeholders+1]="?"; vals[#vals+1]="Y"
+                    end
+                    local sql = "INSERT INTO bookinfo (" .. table.concat(col_names, ", ") ..
+                        ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
+                    local ins_stmt = cache_conn:prepare(sql)
+                    if ins_stmt then
+                        ins_stmt:bind(unpack(vals)); ins_stmt:step(); ins_stmt:close()
+                        counts.inserted = counts.inserted + 1
+                    else counts.skipped = counts.skipped + 1 end
+                end
+            else counts.skipped = counts.skipped + 1 end
+        else counts.skipped = counts.skipped + 1 end
     end
 
     cache_conn:exec("COMMIT")
@@ -1054,60 +1018,53 @@ function ShelfSync:rebuildBookInfoCacheFromIndex(download_dir)
     for _, entry in ipairs(index) do
         local dir = entry.directory or ""
         local fname = entry.filename or ""
-        if fname == "" then
-            counts.skipped = counts.skipped + 1
-            goto rebuild_continue
-        end
         local full_path = dir ~= "" and (dir .. "/" .. fname) or fname
-        local file_attr = lfs.attributes(full_path)
-        if not file_attr or file_attr.mode ~= "file" then
-            counts.skipped = counts.skipped + 1
-            goto rebuild_continue
-        end
+        local file_attr = fname ~= "" and lfs.attributes(full_path)
+        if fname ~= "" and file_attr and file_attr.mode == "file" then
+            local exists = false
+            local chk = cache_conn:prepare("SELECT 1 FROM bookinfo WHERE directory = ? AND filename = ?")
+            if chk then
+                chk:bind(dir, fname)
+                for _ in chk:rows() do exists = true; break end
+                chk:close()
+            end
 
-        local exists = false
-        local chk = cache_conn:prepare("SELECT 1 FROM bookinfo WHERE directory = ? AND filename = ?")
-        if chk then
-            chk:bind(dir, fname)
-            for _ in chk:rows() do exists = true; break end
-            chk:close()
-        end
-
-        if exists then
-            local sets, vals = {}, {}
-            if entry.title and entry.title ~= "" then
-                sets[#sets + 1] = "title = ?"; vals[#vals + 1] = entry.title
-            end
-            if entry.author and entry.author ~= "" then
-                sets[#sets + 1] = "authors = ?"; vals[#vals + 1] = entry.author
-            end
-            if has_series and entry.series and entry.series ~= "" then
-                sets[#sets + 1] = "series = ?"; vals[#vals + 1] = entry.series
-            end
-            if has_series_index and entry.seriesIndex then
-                sets[#sets + 1] = "series_index = ?"; vals[#vals + 1] = entry.seriesIndex
-            end
-            if #sets > 0 then
-                vals[#vals + 1] = dir; vals[#vals + 1] = fname
-                local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ") .. " WHERE directory = ? AND filename = ?"
+            if exists then
+                local sets, vals = {}, {}
+                if entry.title and entry.title ~= "" then
+                    sets[#sets + 1] = "title = ?"; vals[#vals + 1] = entry.title
+                end
+                if entry.author and entry.author ~= "" then
+                    sets[#sets + 1] = "authors = ?"; vals[#vals + 1] = entry.author
+                end
+                if has_series and entry.series and entry.series ~= "" then
+                    sets[#sets + 1] = "series = ?"; vals[#vals + 1] = entry.series
+                end
+                if has_series_index and entry.seriesIndex then
+                    sets[#sets + 1] = "series_index = ?"; vals[#vals + 1] = entry.seriesIndex
+                end
+                if #sets > 0 then
+                    vals[#vals + 1] = dir; vals[#vals + 1] = fname
+                    local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ") .. " WHERE directory = ? AND filename = ?"
+                    local s = cache_conn:prepare(sql)
+                    if s then s:bind(unpack(vals)); s:step(); s:close(); counts.updated = counts.updated + 1 end
+                end
+            else
+                local col_names = { "directory", "filename" }
+                local placeholders = { "?", "?" }
+                local vals = { dir, fname }
+                if entry.title then col_names[#col_names+1]="title"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.title end
+                if entry.author then col_names[#col_names+1]="authors"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.author end
+                if has_series and entry.series then col_names[#col_names+1]="series"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.series end
+                if has_series_index and entry.seriesIndex then col_names[#col_names+1]="series_index"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.seriesIndex end
+                if columns["has_meta"] then col_names[#col_names+1]="has_meta"; placeholders[#placeholders+1]="?"; vals[#vals+1]="Y" end
+                local sql = "INSERT INTO bookinfo (" .. table.concat(col_names, ", ") .. ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
                 local s = cache_conn:prepare(sql)
-                if s then s:bind(unpack(vals)); s:step(); s:close(); counts.updated = counts.updated + 1 end
+                if s then s:bind(unpack(vals)); s:step(); s:close(); counts.inserted = counts.inserted + 1 end
             end
         else
-            local col_names = { "directory", "filename" }
-            local placeholders = { "?", "?" }
-            local vals = { dir, fname }
-            if entry.title then col_names[#col_names+1]="title"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.title end
-            if entry.author then col_names[#col_names+1]="authors"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.author end
-            if has_series and entry.series then col_names[#col_names+1]="series"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.series end
-            if has_series_index and entry.seriesIndex then col_names[#col_names+1]="series_index"; placeholders[#placeholders+1]="?"; vals[#vals+1]=entry.seriesIndex end
-            if columns["has_meta"] then col_names[#col_names+1]="has_meta"; placeholders[#placeholders+1]="?"; vals[#vals+1]="Y" end
-            local sql = "INSERT INTO bookinfo (" .. table.concat(col_names, ", ") .. ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
-            local s = cache_conn:prepare(sql)
-            if s then s:bind(unpack(vals)); s:step(); s:close(); counts.inserted = counts.inserted + 1 end
+            counts.skipped = counts.skipped + 1
         end
-
-        ::rebuild_continue::
     end
 
     cache_conn:exec("COMMIT")
