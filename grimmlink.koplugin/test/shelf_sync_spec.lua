@@ -66,9 +66,26 @@ package.preload["lfs"] = function()
     }
 end
 
+package.preload["json"] = function()
+    return {
+        encode = function(t) return "{}" end,
+        decode = function(s) return {} end,
+    }
+end
+
+package.preload["lua-ljsqlite3/init"] = function()
+    return {
+        OK = 0,
+        DONE = 101,
+        open = function() return nil end,
+    }
+end
+
 package.loaded["datastorage"] = nil
 package.loaded["logger"] = nil
 package.loaded["lfs"] = nil
+package.loaded["json"] = nil
+package.loaded["lua-ljsqlite3/init"] = nil
 package.loaded["grimmlink_shelf_sync"] = nil
 local ShelfSync = require("grimmlink_shelf_sync")
 
