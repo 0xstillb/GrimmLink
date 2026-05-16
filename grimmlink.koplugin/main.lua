@@ -2482,7 +2482,7 @@ function Grimmlink:_showSyncProgress(idx, total, title, progress)
         local pct = progress.pct or 0
         local bytes = progress.bytes or 0
 
-        -- Size + percentage on one line:  62%  —  131.2 / 200.8 MB
+        -- Size + percentage on one line:  62%  -  131.2 / 200.8 MB
         if progress.total and progress.total > 0 then
             lines[#lines + 1] = string.format("%d%%  -  %.1f / %.1f MB",
                 pct, bytes / (1024 * 1024), progress.total / (1024 * 1024))
@@ -2490,7 +2490,7 @@ function Grimmlink:_showSyncProgress(idx, total, title, progress)
             lines[#lines + 1] = string.format("%.1f MB", bytes / (1024 * 1024))
         end
 
-        -- Progress bar:  █████████░░░░░░
+        -- Progress bar
         local bar_w = 15
         local filled = math.floor(pct / 100 * bar_w)
         if filled > bar_w then filled = bar_w end
@@ -2551,29 +2551,36 @@ end
 function Grimmlink:_showSyncCompletionSummary(result)
     self:_closeSyncProgress()
     local lines = {}
-    lines[#lines + 1] = _("Shelf Sync Complete")
-    lines[#lines + 1] = "----------------"
-    if (result.synced or 0) > 0 then
-        lines[#lines + 1] = T(_("Downloaded:  %1"), result.synced)
+    local synced  = result.synced or 0
+    local skipped = result.skipped or 0
+    local deleted = result.deleted or 0
+    local failed  = result.failed or 0
+    local total   = synced + skipped + deleted + failed
+
+    if result.cancelled then
+        lines[#lines + 1] = _("Shelf Sync Cancelled")
+    else
+        lines[#lines + 1] = _("Shelf Sync Complete")
     end
-    if (result.skipped or 0) > 0 then
-        lines[#lines + 1] = T(_("Already on device:  %1"), result.skipped)
-    end
-    if (result.deleted or 0) > 0 then
-        lines[#lines + 1] = T(_("Removed:  %1"), result.deleted)
-    end
-    if (result.failed or 0) > 0 then
-        lines[#lines + 1] = T(_("Failed:  %1"), result.failed)
-    end
-    if (result.cancelled) then
-        lines[#lines + 1] = ""
-        lines[#lines + 1] = _("(Cancelled by user)")
-    end
-    if (result.synced or 0) == 0 and (result.failed or 0) == 0
-       and (result.deleted or 0) == 0 and not result.cancelled then
-        lines[#lines + 1] = ""
+    lines[#lines + 1] = "---------------------------"
+
+    if total == 0 and not result.cancelled then
         lines[#lines + 1] = _("Everything is up to date.")
+    else
+        local items = {}
+        if synced > 0 then items[#items + 1] = { _("Downloaded"), synced } end
+        if deleted > 0 then items[#items + 1] = { _("Removed"), deleted } end
+        if failed > 0 then  items[#items + 1] = { _("Failed"), failed } end
+        local max_len = 0
+        for _, v in ipairs(items) do
+            if #v[1] > max_len then max_len = #v[1] end
+        end
+        for _, v in ipairs(items) do
+            local pad = string.rep(" ", max_len - #v[1] + 2)
+            lines[#lines + 1] = "\xE2\x96\xB6 " .. v[1] .. pad .. tostring(v[2])
+        end
     end
+
     if type(result.errors) == "table" and #result.errors > 0 then
         lines[#lines + 1] = ""
         local first_err = safeToString(result.errors[1] or "")
@@ -3422,71 +3429,35 @@ function Grimmlink:addToMainMenu(menu_items)
         sorting_hint = "tools",
         sub_item_table = {
             {
-                text = _("Connection"),
-                sub_item_table = {
-                    { text = _("Setup"), callback = function() self:configureConnection() end },
-                    {
-                        text = _("Advanced"),
-                        sub_item_table = {
-                            { text = _("Server URL"), callback = function() self:configureServerUrl() end },
-                            { text = _("Username"), callback = function() self:configureUsername() end },
-                            { text = _("Password"), callback = function() self:configurePassword() end },
-                        },
-                    },
-                    { text = _("Test Connection"), callback = function() self:testConnection() end },
-                },
+                text = _("Enable GrimmLink"),
+                keep_menu_open = true,
+                checked_func = function() return self.enabled end,
+                callback = function()
+                    self.enabled = not self.enabled
+                    self:saveSetting("enabled", self.enabled)
+                end,
             },
             {
-                text = _("Sync"),
-                sub_item_table = {
-                    {
-                        text = _("Sync Pending Now"),
-                        callback = function() self:syncPendingNow(false) end,
-                    },
-                    {
-                        text = _("Sync Shelf Now"),
-                        callback = function() self:syncShelfNow(false) end,
-                    },
-                    {
-                        text = _("Sync PDF Bridge Now"),
-                        enabled_func = function()
-                            return self.current_session and self.current_session.book_id ~= nil and self:isPdfWebReaderBridgeEnabled()
-                        end,
-                        callback = function()
-                            self:syncPdfWebProgress(false)
-                        end,
-                    },
-                },
+                text = _("Setup Connection"),
+                callback = function() self:configureConnection() end,
             },
             {
-                text = _("PDF Web Reader Bridge"),
-                sub_item_table = {
-                    {
-                        text = _("Enable PDF Bridge"),
-                        checked_func = function()
-                            return self.pdf_web_reader_bridge_enabled
-                        end,
-                        callback = function()
-                            self.pdf_web_reader_bridge_enabled = not self.pdf_web_reader_bridge_enabled
-                            self:saveSetting("pdf_web_reader_bridge_enabled", self.pdf_web_reader_bridge_enabled)
-                        end,
-                    },
-                    {
-                        text = _("PDF Bridge Status"),
-                        callback = function()
-                            self:showPdfBridgeStatus()
-                        end,
-                    },
-                },
+                text = _("Test Connection"),
+                keep_menu_open = true,
+                callback = function() self:testConnection() end,
             },
             {
+                separator = true,
                 text = _("Shelf Sync"),
                 sub_item_table = {
                     {
+                        text = _("Sync Now"),
+                        callback = function() self:syncShelfNow(false) end,
+                    },
+                    {
                         text = _("Enable Shelf Sync"),
-                        checked_func = function()
-                            return self.shelf_sync_enabled
-                        end,
+                        keep_menu_open = true,
+                        checked_func = function() return self.shelf_sync_enabled end,
                         callback = function()
                             self.shelf_sync_enabled = not self.shelf_sync_enabled
                             self:saveSetting("shelf_sync_enabled", self.shelf_sync_enabled)
@@ -3497,97 +3468,87 @@ function Grimmlink:addToMainMenu(menu_items)
                             local name = self.shelf_name and self.shelf_name ~= "" and self.shelf_name or _("(none)")
                             return T(_("Select Shelf: %1"), name)
                         end,
-                        callback = function()
-                            self:showShelfPicker()
-                        end,
+                        callback = function() self:showShelfPicker() end,
                     },
                     {
-                        text_func = function()
-                            local dir = self.download_dir and self.download_dir ~= "" and self.download_dir or _("(auto)")
-                            return T(_("Download Directory: %1"), dir)
-                        end,
-                        callback = function()
-                            self:configureDownloadDir()
-                        end,
+                        separator = true,
+                        text = _("Download Settings"),
+                        sub_item_table = {
+                            {
+                                text_func = function()
+                                    local dir = self.download_dir and self.download_dir ~= "" and self.download_dir or _("(auto)")
+                                    return T(_("Download Directory: %1"), dir)
+                                end,
+                                callback = function() self:configureDownloadDir() end,
+                            },
+                            {
+                                text = _("Original Filenames"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.shelf_use_original_filename end,
+                                callback = function()
+                                    self.shelf_use_original_filename = not self.shelf_use_original_filename
+                                    self:saveSetting("shelf_use_original_filename", self.shelf_use_original_filename)
+                                end,
+                            },
+                        },
                     },
                     {
-                        text = _("Original Filenames"),
-                        checked_func = function()
-                            return self.shelf_use_original_filename
-                        end,
-                        callback = function()
-                            self.shelf_use_original_filename = not self.shelf_use_original_filename
-                            self:saveSetting("shelf_use_original_filename", self.shelf_use_original_filename)
-                        end,
-                    },
-                    {
-                        text = _("Auto-sync on Resume"),
-                        checked_func = function()
-                            return self.auto_sync_shelf_on_resume
-                        end,
-                        callback = function()
-                            self.auto_sync_shelf_on_resume = not self.auto_sync_shelf_on_resume
-                            self:saveSetting("auto_sync_shelf_on_resume", self.auto_sync_shelf_on_resume)
-                        end,
-                    },
-                    {
-                        text = _("Fast Sync (Short Cache)"),
-                        checked_func = function()
-                            return self.shelf_fast_sync_enabled
-                        end,
-                        callback = function()
-                            self.shelf_fast_sync_enabled = not self.shelf_fast_sync_enabled
-                            self:saveSetting("shelf_fast_sync_enabled", self.shelf_fast_sync_enabled)
-                        end,
-                    },
-                    {
-                        text_func = function()
-                            return T(_("Fast Sync Cache Seconds: %1"), tonumber(self.shelf_fast_sync_cache_seconds) or 15)
-                        end,
-                        callback = function()
-                            self:showNumberInput(_("Fast Sync Cache Seconds"), self.shelf_fast_sync_cache_seconds or 15, _("Recommended: 10-30"), function(value)
-                                local normalized = math.floor(tonumber(value) or 15)
-                                if normalized < 0 then
-                                    normalized = 0
-                                end
-                                if normalized > 120 then
-                                    normalized = 120
-                                end
-                                self:saveSetting("shelf_fast_sync_cache_seconds", normalized)
-                            end)
-                        end,
-                    },
-                    {
-                        text = _("Two-way Shelf Delete Sync"),
-                        checked_func = function()
-                            return self.two_way_shelf_delete_sync
-                        end,
-                        callback = function()
-                            self.two_way_shelf_delete_sync = not self.two_way_shelf_delete_sync
-                            self:saveSetting("two_way_shelf_delete_sync", self.two_way_shelf_delete_sync)
-                        end,
-                    },
-                    {
-                        text = _("Delete .sdr When Removing"),
-                        checked_func = function()
-                            return self.delete_sdr_on_book_delete
-                        end,
-                        callback = function()
-                            self.delete_sdr_on_book_delete = not self.delete_sdr_on_book_delete
-                            self:saveSetting("delete_sdr_on_book_delete", self.delete_sdr_on_book_delete)
-                        end,
-                    },
-                    {
-                        text = _("Shelf ID (Advanced)"),
-                        callback = function()
-                            self:showNumberInput(_("Shelf ID"), self.shelf_id or 0, _("Enter shelf id"), function(value)
-                                self:saveSetting("shelf_id", value)
-                                self:saveSetting("shelf_name", "")
-                            end)
-                        end,
+                        text = _("Sync Behavior"),
+                        sub_item_table = {
+                            {
+                                text = _("Auto-sync on Resume"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.auto_sync_shelf_on_resume end,
+                                callback = function()
+                                    self.auto_sync_shelf_on_resume = not self.auto_sync_shelf_on_resume
+                                    self:saveSetting("auto_sync_shelf_on_resume", self.auto_sync_shelf_on_resume)
+                                end,
+                            },
+                            {
+                                text = _("Fast Sync (Short Cache)"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.shelf_fast_sync_enabled end,
+                                callback = function()
+                                    self.shelf_fast_sync_enabled = not self.shelf_fast_sync_enabled
+                                    self:saveSetting("shelf_fast_sync_enabled", self.shelf_fast_sync_enabled)
+                                end,
+                            },
+                            {
+                                text_func = function()
+                                    return T(_("Cache Duration: %1s"), tonumber(self.shelf_fast_sync_cache_seconds) or 15)
+                                end,
+                                callback = function()
+                                    self:showNumberInput(_("Fast Sync Cache Seconds"), self.shelf_fast_sync_cache_seconds or 15, _("Recommended: 10-30"), function(value)
+                                        local normalized = math.floor(tonumber(value) or 15)
+                                        if normalized < 0 then normalized = 0 end
+                                        if normalized > 120 then normalized = 120 end
+                                        self:saveSetting("shelf_fast_sync_cache_seconds", normalized)
+                                    end)
+                                end,
+                            },
+                            {
+                                text = _("Two-way Delete Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.two_way_shelf_delete_sync end,
+                                callback = function()
+                                    self.two_way_shelf_delete_sync = not self.two_way_shelf_delete_sync
+                                    self:saveSetting("two_way_shelf_delete_sync", self.two_way_shelf_delete_sync)
+                                end,
+                            },
+                            {
+                                text = _("Delete .sdr on Remove"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.delete_sdr_on_book_delete end,
+                                callback = function()
+                                    self.delete_sdr_on_book_delete = not self.delete_sdr_on_book_delete
+                                    self:saveSetting("delete_sdr_on_book_delete", self.delete_sdr_on_book_delete)
+                                end,
+                            },
+                        },
                     },
                     {
                         text = _("Rebuild SimpleUI metadata cache"),
+                        keep_menu_open = true,
                         callback = function()
                             if not self.shelf_sync or not self.download_dir then
                                 self:showMessage(_("Shelf sync not configured."), 3)
@@ -3607,97 +3568,112 @@ function Grimmlink:addToMainMenu(menu_items)
                 },
             },
             {
-                text = _("Auto Update"),
+                text = _("Sync Progress Now"),
+                callback = function() self:syncPendingNow(false) end,
+            },
+            {
+                separator = true,
+                text = _("Settings"),
                 sub_item_table = {
                     {
-                        text = _("Enable Auto Update"),
-                        checked_func = function()
-                            return self.auto_update_enabled
-                        end,
-                        callback = function()
-                            self.auto_update_enabled = not self.auto_update_enabled
-                            self:saveSetting("auto_update_enabled", self.auto_update_enabled)
-                        end,
+                        text = _("Connection"),
+                        sub_item_table = {
+                            { text = _("Server URL"), callback = function() self:configureServerUrl() end },
+                            { text = _("Username"), callback = function() self:configureUsername() end },
+                            { text = _("Password"), callback = function() self:configurePassword() end },
+                        },
                     },
                     {
-                        text = _("Check on Startup"),
-                        checked_func = function()
-                            return self.check_update_on_startup
-                        end,
-                        callback = function()
-                            self.check_update_on_startup = not self.check_update_on_startup
-                            self:saveSetting("check_update_on_startup", self.check_update_on_startup)
-                        end,
+                        text = _("PDF Web Reader Bridge"),
+                        sub_item_table = {
+                            {
+                                text = _("Enable PDF Bridge"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.pdf_web_reader_bridge_enabled end,
+                                callback = function()
+                                    self.pdf_web_reader_bridge_enabled = not self.pdf_web_reader_bridge_enabled
+                                    self:saveSetting("pdf_web_reader_bridge_enabled", self.pdf_web_reader_bridge_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Sync PDF Bridge Now"),
+                                enabled_func = function()
+                                    return self.current_session and self.current_session.book_id ~= nil and self:isPdfWebReaderBridgeEnabled()
+                                end,
+                                callback = function() self:syncPdfWebProgress(false) end,
+                            },
+                            {
+                                text = _("PDF Bridge Status"),
+                                keep_menu_open = true,
+                                callback = function() self:showPdfBridgeStatus() end,
+                            },
+                        },
                     },
                     {
-                        text = _("Update Channel"),
+                        text = _("Auto Update"),
+                        sub_item_table = {
+                            {
+                                text = _("Enable Auto Update"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.auto_update_enabled end,
+                                callback = function()
+                                    self.auto_update_enabled = not self.auto_update_enabled
+                                    self:saveSetting("auto_update_enabled", self.auto_update_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Check on Startup"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.check_update_on_startup end,
+                                callback = function()
+                                    self.check_update_on_startup = not self.check_update_on_startup
+                                    self:saveSetting("check_update_on_startup", self.check_update_on_startup)
+                                end,
+                            },
+                            {
+                                text = _("Update Channel"),
+                                callback = function()
+                                    self:showTextInput(_("Update Channel"), self.update_channel, _("stable or prerelease"), false, function(value)
+                                        self:saveSetting("update_channel", normalizeUpdateChannel(value))
+                                    end)
+                                end,
+                            },
+                            {
+                                text = _("Check for Updates Now"),
+                                callback = function() self:checkForUpdates(false) end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("Shelf ID (Advanced)"),
                         callback = function()
-                            self:showTextInput(_("Update Channel"), self.update_channel, _("stable or prerelease"), false, function(value)
-                                self:saveSetting("update_channel", normalizeUpdateChannel(value))
+                            self:showNumberInput(_("Shelf ID"), self.shelf_id or 0, _("Enter shelf id"), function(value)
+                                self:saveSetting("shelf_id", value)
+                                self:saveSetting("shelf_name", "")
                             end)
                         end,
                     },
                     {
-                        text = _("Check for Updates Now"),
-                        callback = function()
-                            self:checkForUpdates(false)
-                        end,
-                    },
-                },
-            },
-            {
-                text = _("Maintenance"),
-                sub_item_table = {
-                    {
-                        text = _("Quick Cleanup (Recommended)"),
-                        callback = function()
-                            self:runQuickCleanupWithConfirm()
-                        end,
-                    },
-                    {
-                        text = _("Clear Sync Queues (Progress + Sessions)"),
-                        callback = function()
-                            self:clearSyncQueuesWithConfirm()
-                        end,
-                    },
-                    {
-                        text = _("Advanced Cleanup"),
+                        text = _("Maintenance"),
                         sub_item_table = {
                             {
-                                text = _("Clear Update Cache"),
-                                callback = function()
-                                    self:clearUpdateCacheWithConfirm()
-                                end,
+                                text = _("Quick Cleanup"),
+                                callback = function() self:runQuickCleanupWithConfirm() end,
                             },
                             {
-                                text = _("Clear Unmatched Book Cache"),
-                                callback = function()
-                                    self:clearUnmatchedBookCacheWithConfirm()
-                                end,
+                                text = _("Clear Sync Queues"),
+                                callback = function() self:clearSyncQueuesWithConfirm() end,
                             },
                             {
-                                text = _("Clear All Book Cache"),
-                                callback = function()
-                                    self:clearAllBookCacheWithConfirm()
-                                end,
-                            },
-                            {
-                                text = _("Clear Not Found Hashes"),
-                                callback = function()
-                                    self:clearNotFoundHashesWithConfirm()
-                                end,
-                            },
-                            {
-                                text = _("Clear Pending Progress Queue"),
-                                callback = function()
-                                    self:clearPendingProgressQueueWithConfirm()
-                                end,
-                            },
-                            {
-                                text = _("Clear Pending Session Queue"),
-                                callback = function()
-                                    self:clearPendingSessionsQueueWithConfirm()
-                                end,
+                                text = _("Advanced Cleanup"),
+                                sub_item_table = {
+                                    { text = _("Clear Update Cache"), callback = function() self:clearUpdateCacheWithConfirm() end },
+                                    { text = _("Clear Unmatched Book Cache"), callback = function() self:clearUnmatchedBookCacheWithConfirm() end },
+                                    { text = _("Clear All Book Cache"), callback = function() self:clearAllBookCacheWithConfirm() end },
+                                    { text = _("Clear Not Found Hashes"), callback = function() self:clearNotFoundHashesWithConfirm() end },
+                                    { text = _("Clear Pending Progress"), callback = function() self:clearPendingProgressQueueWithConfirm() end },
+                                    { text = _("Clear Pending Sessions"), callback = function() self:clearPendingSessionsQueueWithConfirm() end },
+                                },
                             },
                         },
                     },
