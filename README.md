@@ -14,6 +14,22 @@
 
 ---
 
+## Grimmory Ecosystem
+
+<p align="center">
+  <img src="assets/grimmory-ecosystem.png" alt="Grimmory Ecosystem" width="100%">
+</p>
+
+---
+
+## GrimmLink Flow
+
+<p align="center">
+  <img src="assets/grimmlink-flow.png" alt="GrimmLink Flow" width="100%">
+</p>
+
+---
+
 ## What is GrimmLink?
 
 GrimmLink syncs your reading progress, sessions, and library between [KOReader](https://koreader.rocks/) and [Grimmory Fork by 0xStillb](https://github.com/0xstillb/grimmory) server. It supports EPUB, PDF, CBZ, and other KOReader-compatible formats.
@@ -38,6 +54,8 @@ GrimmLink syncs your reading progress, sessions, and library between [KOReader](
    - KOReader Username
    - Password
 5. Run **Test Connection** to verify.
+
+> **Optional UI Enhancement** -- Install [SimpleUI](https://github.com/0xstillb/simpleui.koplugin) for a polished KOReader home screen with quick GrimmLink actions (Shelf Sync, Manual Sync, Upload Now, Log View).
 
 > The plugin generates `x-auth-key` internally from your password. You never need to enter an auth key, token, or MD5 hash.
 
