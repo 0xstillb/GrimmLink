@@ -2484,7 +2484,7 @@ function Grimmlink:_showSyncProgress(idx, total, title, progress)
 
         -- Size + percentage on one line:  62%  —  131.2 / 200.8 MB
         if progress.total and progress.total > 0 then
-            lines[#lines + 1] = string.format("%d%%  —  %.1f / %.1f MB",
+            lines[#lines + 1] = string.format("%d%%  -  %.1f / %.1f MB",
                 pct, bytes / (1024 * 1024), progress.total / (1024 * 1024))
         elseif bytes > 0 then
             lines[#lines + 1] = string.format("%.1f MB", bytes / (1024 * 1024))
@@ -2552,7 +2552,7 @@ function Grimmlink:_showSyncCompletionSummary(result)
     self:_closeSyncProgress()
     local lines = {}
     lines[#lines + 1] = _("Shelf Sync Complete")
-    lines[#lines + 1] = "————————————————"
+    lines[#lines + 1] = "----------------"
     if (result.synced or 0) > 0 then
         lines[#lines + 1] = T(_("Downloaded:  %1"), result.synced)
     end
@@ -2721,9 +2721,10 @@ function Grimmlink:syncShelfNow(silent)
             end)
         end
         -- Write metadata index + update bookinfo_cache for series browsing
+        local resolved_dir = self.shelf_sync:resolveDownloadDir(self.download_dir)
         local index_path
         pcall(function()
-            index_path = self.shelf_sync:writeMetadataIndex(self.shelf_id, self.download_dir)
+            index_path = self.shelf_sync:writeMetadataIndex(self.shelf_id, resolved_dir)
         end)
         pcall(function()
             self.shelf_sync:upsertBookInfoCache(self.shelf_id)
@@ -2771,10 +2772,11 @@ function Grimmlink:syncShelfNow(silent)
             end)
         end
         -- Write metadata index + update bookinfo_cache for series browsing
+        local resolved_dir = grimmlink_self.shelf_sync:resolveDownloadDir(grimmlink_self.download_dir)
         local index_path
         pcall(function()
             index_path = grimmlink_self.shelf_sync:writeMetadataIndex(
-                grimmlink_self.shelf_id, grimmlink_self.download_dir)
+                grimmlink_self.shelf_id, resolved_dir)
         end)
         pcall(function()
             grimmlink_self.shelf_sync:upsertBookInfoCache(grimmlink_self.shelf_id)
@@ -3203,7 +3205,7 @@ function Grimmlink:onGrimmLinkSyncShelf()
 end
 
 function Grimmlink:testConnection()
-    if not self:requireReady({ require_api = true, silent = true }) then
+    if not self:requireReady({ require_api = true }) then
         return false
     end
 
@@ -3232,9 +3234,9 @@ function Grimmlink:init()
 
     self.db = Database and type(Database.new) == "function" and Database:new() or nil
     if self.db and type(self.db.init) == "function" then
-        local db_ok = self.db:init()
-        if not db_ok then
-            self:logErr("GrimmLink failed to initialize database")
+        local ok, err = pcall(self.db.init, self.db)
+        if not ok then
+            self:logErr("GrimmLink database init error:", tostring(err))
         end
     else
         self:logErr("GrimmLink database module unavailable")
