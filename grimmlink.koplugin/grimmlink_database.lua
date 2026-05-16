@@ -283,11 +283,18 @@ function Database:repairSchema()
 end
 
 function Database:_migrateShelfSyncSeriesColumns()
-    local stmt = self.conn and self.conn:prepare("SELECT remote_series_name FROM shelf_sync_map LIMIT 0")
+    local has_column = false
+    local stmt = self.conn and self.conn:prepare("PRAGMA table_info(shelf_sync_map)")
     if stmt then
+        for row in stmt:rows() do
+            if row[2] == "remote_series_name" then
+                has_column = true
+                break
+            end
+        end
         stmt:close()
-        return
     end
+    if has_column then return end
     self:_exec("ALTER TABLE shelf_sync_map ADD COLUMN remote_series_name TEXT")
     self:_exec("ALTER TABLE shelf_sync_map ADD COLUMN remote_series_number REAL")
 end

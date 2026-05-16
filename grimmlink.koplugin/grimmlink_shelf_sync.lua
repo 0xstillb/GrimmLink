@@ -1,6 +1,4 @@
 local DataStorage = require("datastorage")
-local SQ3 = require("lua-ljsqlite3/init")
-local json = require("json")
 local lfs = require("lfs")
 local logger = require("logger")
 
@@ -780,6 +778,7 @@ function ShelfSync:writeMetadataIndex(shelf_id, download_dir)
     end
 
     local index_path = joinPath(download_dir, "grimmlink_metadata_index.json")
+    local json = require("json")
     local ok, encoded = pcall(json.encode, index)
     if not ok then
         logger.warn("GrimmLink ShelfSync: failed to encode metadata index:", encoded)
@@ -799,13 +798,14 @@ end
 
 -- Open bookinfo_cache.sqlite3, validate schema, return conn or nil.
 local function openBookInfoCache()
-    local cache_path = DataStorage:getSettingsDir() .. "/cache/bookinfo_cache.sqlite3"
+    local cache_path = DataStorage:getSettingsDir() .. "/bookinfo_cache.sqlite3"
     local attr = lfs.attributes(cache_path)
     if not attr then
         logger.info("GrimmLink: bookinfo_cache.sqlite3 not found, skipping")
         return nil, cache_path
     end
 
+    local SQ3 = require("lua-ljsqlite3/init")
     local ok_open, cache_conn = pcall(SQ3.open, cache_path)
     if not ok_open or not cache_conn then
         logger.warn("GrimmLink: cannot open bookinfo_cache:", tostring(cache_conn))
@@ -884,6 +884,7 @@ function ShelfSync:upsertBookInfoCache(shelf_id)
         local file_attr = norm and lfs.attributes(norm)
         if norm and file_attr and file_attr.mode == "file" then
             local dir = norm:match("^(.*)/[^/]+$") or ""
+            if dir ~= "" and not dir:match("/$") then dir = dir .. "/" end
             local fname = norm:match("([^/]+)$") or ""
             if fname ~= "" then
                 local exists = false
@@ -970,6 +971,7 @@ function ShelfSync:deleteFromBookInfoCache(local_path)
     local cache_conn = openBookInfoCache()
     if not cache_conn then return false end
 
+    local SQ3 = require("lua-ljsqlite3/init")
     local stmt = cache_conn:prepare("DELETE FROM bookinfo WHERE directory = ? AND filename = ?")
     local ok = false
     if stmt then
@@ -996,6 +998,7 @@ function ShelfSync:rebuildBookInfoCacheFromIndex(download_dir)
     local raw = fh:read("*a")
     fh:close()
 
+    local json = require("json")
     local ok_decode, index = pcall(json.decode, raw)
     if not ok_decode or type(index) ~= "table" then
         logger.warn("GrimmLink: failed to parse metadata index")
