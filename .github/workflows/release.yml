@@ -26,12 +26,16 @@ jobs:
 
       - name: Compile gettext translations
         run: |
-          sudo apt-get install -y gettext
-          find grimmlink.koplugin/locale -name "*.po" | while read po; do
-            mo="${po%.po}.mo"
-            echo "Compiling $po -> $mo"
-            msgfmt "$po" -o "$mo"
-          done
+          if [ -d grimmlink.koplugin/locale ]; then
+            sudo apt-get install -y gettext
+            find grimmlink.koplugin/locale -name "*.po" | while read po; do
+              mo="${po%.po}.mo"
+              echo "Compiling $po -> $mo"
+              msgfmt "$po" -o "$mo"
+            done
+          else
+            echo "No locale directory found, skipping translations"
+          fi
 
       - name: Create plugin archives
         id: assets

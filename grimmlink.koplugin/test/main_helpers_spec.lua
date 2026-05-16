@@ -806,18 +806,21 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("hash-8", plugin.db.book_cache_calls[1].file_hash)
     end)
 
-    it("shows guided and advanced connection labels in the menu", function()
+    it("shows connection and settings items in the restructured menu", function()
         local plugin = newPlugin()
         local menu = {}
         plugin:addToMainMenu(menu)
 
-        local connection_menu = findMenuItem(menu.grimmlink.sub_item_table, "Connection")
-        assert.is_not_nil(connection_menu)
-        local setup_item = findMenuItem(connection_menu.sub_item_table, "Setup")
+        local top = menu.grimmlink.sub_item_table
+        local setup_item = findMenuItem(top, "Setup Connection")
         assert.is_not_nil(setup_item)
-        local advanced_item = findMenuItem(connection_menu.sub_item_table, "Advanced")
-        assert.is_not_nil(advanced_item)
-        local password_item = findMenuItem(advanced_item.sub_item_table, "Password")
+        local test_item = findMenuItem(top, "Test Connection")
+        assert.is_not_nil(test_item)
+        local settings_menu = findMenuItem(top, "Settings")
+        assert.is_not_nil(settings_menu)
+        local connection_menu = findMenuItem(settings_menu.sub_item_table, "Connection")
+        assert.is_not_nil(connection_menu)
+        local password_item = findMenuItem(connection_menu.sub_item_table, "Password")
         assert.is_not_nil(password_item)
     end)
 
