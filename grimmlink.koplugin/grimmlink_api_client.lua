@@ -3,12 +3,17 @@ local https = require("ssl.https")
 local ltn12 = require("ltn12")
 local json = require("json")
 local logger = require("logger")
+local lfs = require("lfs")
+local _ok_ffi, ffi = pcall(require, "ffi")
+if not _ok_ffi then ffi = nil end
+if ffi then pcall(ffi.cdef, "int system(const char *command);") end
 
 local unpack_values = table.unpack or unpack
 
 local APIClient = {
     timeout = 25,
     secure_logs = false,
+    debug_logging = false,
 }
 
 local function redact_urls(message)
@@ -50,11 +55,12 @@ function APIClient:new(o)
     return o
 end
 
-function APIClient:init(server_url, username, password, secure_logs)
+function APIClient:init(server_url, username, password, debug_logging)
     self.server_url = tostring(server_url or "")
     self.username = tostring(username or "")
     self.password = tostring(password or "")
-    self.secure_logs = secure_logs == true
+    self.debug_logging = debug_logging == true
+    self.secure_logs = debug_logging == true
 
     if self.server_url:sub(-1) == "/" then
         self.server_url = self.server_url:sub(1, -2)
@@ -84,7 +90,7 @@ function APIClient:log(level, ...)
     elseif level == "err" then
         logger.err(unpack_values(args))
     elseif level == "dbg" then
-        logger.dbg(unpack_values(args))
+        if self.debug_logging then logger.dbg(unpack_values(args)) end
     else
         logger.info(unpack_values(args))
     end
@@ -457,13 +463,11 @@ function APIClient:isAsyncDownloadAvailable()
     if self._async_available ~= nil then
         return self._async_available
     end
-    local ok, ffi = pcall(require, "ffi")
-    if not ok or not ffi then
+    if not ffi then
         self:log("warn", "GrimmLink: FFI not available, async download disabled")
         self._async_available = false
         return false
     end
-    pcall(ffi.cdef, "int system(const char *command);")
     -- Check if curl or wget exists.
     local has_tool = ffi.C.system("command -v curl >/dev/null 2>&1") == 0
                   or ffi.C.system("command -v wget >/dev/null 2>&1") == 0
@@ -489,7 +493,6 @@ function APIClient:startAsyncDownload(book_id, dest_path, opts)
         return nil, "Server URL not configured"
     end
 
-    local lfs = require("lfs")
     local tmp_path    = dest_path .. ".tmp"
     local pid_path    = dest_path .. ".pid"
     local code_path   = dest_path .. ".exitcode"
@@ -578,8 +581,6 @@ fi
     -- shell & operator has no effect.  We bypass that by calling the C
     -- system() function directly via FFI.  system("cmd &") forks a
     -- background shell and returns immediately.
-    local ffi = require("ffi")
-    pcall(ffi.cdef, "int system(const char *command);")
     ffi.C.system("chmod +x " .. shquote(script_path))
     ffi.C.system("sh " .. shquote(script_path) .. " </dev/null >/dev/null 2>&1 &")
     self:log("info", "GrimmLink: async download launched via ffi.C.system, script=" .. script_path)
@@ -602,7 +603,6 @@ end
 -- exit_code: nil while running, number on completion (0=ok, 127=no curl/wget)
 function APIClient:pollAsyncDownload(handle)
     if not handle then return "failed", 0, 0, nil end
-    local lfs = require("lfs")
 
     -- Check how many bytes have been written so far.
     local attr = lfs.attributes(handle.tmp_path)
@@ -672,8 +672,6 @@ function APIClient:cancelAsyncDownload(handle)
 
     -- Try to read the PID and kill the curl process.
     -- Use ffi.C.system to bypass KOReader's blocking os.execute wrapper.
-    local ffi = require("ffi")
-    pcall(ffi.cdef, "int system(const char *command);")
     local f = io.open(handle.pid_path, "r")
     if f then
         local pid_str = f:read("*l")

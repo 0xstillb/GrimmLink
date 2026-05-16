@@ -265,7 +265,7 @@ function Grimmlink:requireReady(opts)
     return false
 end
 
-function Grimmlink:invokeSafely(_label, fn, args, _opts)
+function Grimmlink:invokeSafely(_label, fn, args)
     if type(fn) ~= "function" then
         return nil, false
     end
