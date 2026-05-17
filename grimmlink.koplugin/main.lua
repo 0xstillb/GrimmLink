@@ -3241,6 +3241,32 @@ function Grimmlink:registerDispatcherActions()
     end)
 end
 
+function Grimmlink:registerSimpleUIAction()
+    local ok, QA = pcall(require, "sui_quickactions")
+    if not ok or not QA or type(QA.register) ~= "function" then
+        return
+    end
+    local icon_path = self.plugin_dir .. "/icons/sync.svg"
+    local grimmlink = self
+    pcall(function()
+        QA.register({
+            id = "grimmlink_sync",
+            label = _("GrimmLink"),
+            icon = icon_path,
+            is_in_place = true,
+            execute = function(ctx)
+                if grimmlink.shelf_sync_enabled and grimmlink.shelf_id then
+                    grimmlink:runAfterUiSettles(function()
+                        grimmlink:syncShelfNow(false)
+                    end)
+                else
+                    grimmlink:syncPendingNow(false)
+                end
+            end,
+        })
+    end)
+end
+
 function Grimmlink:onGrimmLinkSyncPending()
     self:syncPendingNow(false)
 end
@@ -3353,6 +3379,7 @@ function Grimmlink:init()
         self.updater:setAllowPrerelease(self.allow_prerelease_updates)
     end
     self:registerDispatcherActions()
+    self:registerSimpleUIAction()
     self:maybeCheckForUpdatesOnStartup()
     return true
 end
