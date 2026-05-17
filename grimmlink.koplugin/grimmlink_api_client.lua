@@ -57,6 +57,7 @@ end
 
 function APIClient:init(server_url, username, password, debug_logging)
     self.server_url = tostring(server_url or "")
+    self.fallback_url = nil
     self.username = tostring(username or "")
     self.password = tostring(password or "")
     self.debug_logging = debug_logging == true
@@ -64,6 +65,14 @@ function APIClient:init(server_url, username, password, debug_logging)
 
     if self.server_url:sub(-1) == "/" then
         self.server_url = self.server_url:sub(1, -2)
+    end
+end
+
+function APIClient:setFallbackUrl(url)
+    if url and url ~= "" then
+        self.fallback_url = tostring(url):gsub("/$", "")
+    else
+        self.fallback_url = nil
     end
 end
 
@@ -205,6 +214,22 @@ function APIClient:request(method, path, body, extra_headers, timeout_sec)
     }
 
     if type(code) ~= "number" then
+        -- Connection failed — try fallback URL if available
+        if self.fallback_url and self.fallback_url ~= "" and self.fallback_url ~= self.server_url and not self._in_fallback then
+            self:log("info", "GrimmLink API: primary failed, trying fallback:", self.fallback_url)
+            local orig_url = self.server_url
+            self.server_url = self.fallback_url
+            self._in_fallback = true
+            local fb_ok, fb_code, fb_resp, fb_headers = self:request(method, path, body, extra_headers, timeout_sec)
+            self._in_fallback = nil
+            if fb_ok or type(fb_code) == "number" then
+                -- Fallback succeeded (got HTTP response) — keep using it
+                self:log("info", "GrimmLink API: fallback succeeded, switching to:", self.fallback_url)
+                return fb_ok, fb_code, fb_resp, fb_headers
+            end
+            -- Both failed — restore original and report
+            self.server_url = orig_url
+        end
         local error_message = tostring(code or ok or "connection failed")
         self:log("warn", "GrimmLink API request failed:", error_message)
         return false, nil, error_message

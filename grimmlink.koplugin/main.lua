@@ -45,6 +45,8 @@ local Grimmlink = WidgetContainer:extend{
 local DEFAULTS = {
     enabled = true,
     server_url = "",
+    remote_url = "",
+    home_ssid = "",
     username = "",
     password = "",
     device_name = "KOReader",
@@ -272,9 +274,26 @@ function Grimmlink:invokeSafely(_label, fn, args)
     return pcall(fn, unpack_values(args or {}))
 end
 
+function Grimmlink:resolveServerUrl()
+    if self.home_ssid == "" or self.remote_url == "" then
+        return self.server_url
+    end
+    local ok, nw = pcall(function() return NetworkMgr:getCurrentNetwork() end)
+    if ok and nw and nw.ssid == self.home_ssid then
+        return self.server_url
+    end
+    return self.remote_url
+end
+
 function Grimmlink:refreshApiClient()
     if self.api and type(self.api.init) == "function" then
-        self.api:init(self.server_url, self.username, self.password, self.debug_logging)
+        local primary = self:resolveServerUrl()
+        self.api:init(primary, self.username, self.password, self.debug_logging)
+        -- Set fallback: if primary is local, fallback is remote; and vice versa
+        if self.remote_url ~= "" and self.server_url ~= "" then
+            local fallback = (primary == self.server_url) and self.remote_url or self.server_url
+            self.api:setFallbackUrl(fallback)
+        end
         return true
     end
     return false
@@ -490,10 +509,34 @@ function Grimmlink:showNumberInput(title, current_value, hint, on_save)
 end
 
 function Grimmlink:configureServerUrl()
-    self:showTextInput(_("Grimmory Server URL"), self.server_url, "http://192.168.1.100:6060", false, function(value)
+    self:showTextInput(_("Local URL (home network)"), self.server_url, "http://192.168.1.100:6060", false, function(value)
         local normalized = safeToString(value):gsub("/$", "")
         self:saveSetting("server_url", normalized)
-        self:showMessage(_("Server URL saved"), 2)
+        self:refreshApiClient()
+        self:showMessage(_("Local URL saved"), 2)
+    end)
+end
+
+function Grimmlink:configureRemoteUrl()
+    self:showTextInput(_("Remote URL (external)"), self.remote_url, "https://grimmory.example.com", false, function(value)
+        local normalized = safeToString(value):gsub("/$", "")
+        self:saveSetting("remote_url", normalized)
+        self:refreshApiClient()
+        self:showMessage(_("Remote URL saved"), 2)
+    end)
+end
+
+function Grimmlink:configureHomeSSID()
+    local current_ssid = ""
+    pcall(function()
+        local nw = NetworkMgr:getCurrentNetwork()
+        if nw and nw.ssid then current_ssid = nw.ssid end
+    end)
+    local hint = current_ssid ~= "" and T(_("Current: %1"), current_ssid) or _("Enter home WiFi name")
+    self:showTextInput(_("Home SSID"), self.home_ssid, hint, false, function(value)
+        self:saveSetting("home_ssid", safeToString(value))
+        self:refreshApiClient()
+        self:showMessage(_("Home SSID saved"), 2)
     end)
 end
 
@@ -538,7 +581,7 @@ function Grimmlink:configureConnection()
         password = self.password or "",
     }
 
-    self:showTextInput(_("Grimmory Server URL"), pending.server_url, "http://192.168.1.100:6060", false, function(server_url)
+    self:showTextInput(_("Local URL (home network)"), pending.server_url, "http://192.168.1.100:6060", false, function(server_url)
         pending.server_url = safeToString(server_url)
         self:showTextInput(_("KOReader Username"), pending.username, _("Enter username"), false, function(username)
             pending.username = safeToString(username)
@@ -2394,22 +2437,23 @@ function Grimmlink:runQuickCleanupWithConfirm()
 end
 
 function Grimmlink:maybeCheckForUpdatesOnStartup()
-    if self.check_update_on_startup and self.auto_update_enabled then
+    if not self.check_update_on_startup then return end
+    -- Delay check to allow network to connect after startup
+    self:runAfterUiSettles(function()
+        if not self:isOnline() then return end
         local result = self:checkForUpdates(true, { force_refresh = true })
         if result and result.available and result.release_info then
             local from_version = safeToString(result.current_version) or _("unknown")
             local to_version = safeToString(result.latest_version) or _("unknown")
-            self:runAfterUiSettles(function()
-                self:showConfirmAction(
-                    T(_("Update available: %1 -> %2\nInstall now?"), from_version, to_version),
-                    _("Update"),
-                    function()
-                        self:installUpdate(result.release_info)
-                    end
-                )
-            end)
+            self:showConfirmAction(
+                T(_("Update available: %1 -> %2\nInstall now?"), from_version, to_version),
+                _("Update"),
+                function()
+                    self:installUpdate(result.release_info)
+                end
+            )
         end
-    end
+    end)
 end
 
 function Grimmlink:showAbout()
@@ -3222,11 +3266,14 @@ function Grimmlink:testConnection()
     end
     local success, response = self.api:testAuth()
     if success then
-        self:showMessage(_("Connection successful"), 2)
+        local used_url = self.api.server_url or ""
+        local mode = (used_url == self.server_url) and _("local") or _("remote")
+        self:showMessage(T(_("Connection successful (%1)\n%2"), mode, used_url), 3)
         return true
     end
 
-    self:showMessage(T(_("Connection failed:\n%1"), safeToString(response)), 4)
+    local used_url = self.api.server_url or ""
+    self:showMessage(T(_("Connection failed:\n%1\n\nURL: %2"), safeToString(response), used_url), 4)
     return false
 end
 
@@ -3263,6 +3310,8 @@ function Grimmlink:init()
     self.enabled = self:readSetting("enabled", DEFAULTS.enabled)
     local legacy_auth_key = self.db and self.db:getPluginSetting("auth_key") or nil
     self.server_url = self:readSetting("server_url", DEFAULTS.server_url)
+    self.remote_url = self:readSetting("remote_url", DEFAULTS.remote_url)
+    self.home_ssid = self:readSetting("home_ssid", DEFAULTS.home_ssid)
     self.username = self:readSetting("username", DEFAULTS.username)
     self.password = self:readSetting("password", legacy_auth_key or DEFAULTS.password)
     self.device_name = self:readSetting("device_name", self:defaultDeviceName())
@@ -3332,6 +3381,7 @@ end
 
 function Grimmlink:onResume()
     self:ensureMainMenuRegistered()
+    self:refreshApiClient()
     if self:isOnline() then
         self:syncPendingNow(true)
     end
@@ -3436,15 +3486,6 @@ function Grimmlink:addToMainMenu(menu_items)
                     self.enabled = not self.enabled
                     self:saveSetting("enabled", self.enabled)
                 end,
-            },
-            {
-                text = _("Setup Connection"),
-                callback = function() self:configureConnection() end,
-            },
-            {
-                text = _("Test Connection"),
-                keep_menu_open = true,
-                callback = function() self:testConnection() end,
             },
             {
                 separator = true,
@@ -3578,9 +3619,13 @@ function Grimmlink:addToMainMenu(menu_items)
                     {
                         text = _("Connection"),
                         sub_item_table = {
-                            { text = _("Server URL"), callback = function() self:configureServerUrl() end },
+                            { text = _("Setup Connection"), callback = function() self:configureConnection() end },
+                            { text = _("Local URL"), callback = function() self:configureServerUrl() end },
+                            { text = _("Remote URL"), callback = function() self:configureRemoteUrl() end },
+                            { text = _("Home SSID"), callback = function() self:configureHomeSSID() end },
                             { text = _("Username"), callback = function() self:configureUsername() end },
                             { text = _("Password"), callback = function() self:configurePassword() end },
+                            { text = _("Test Connection"), keep_menu_open = true, callback = function() self:testConnection() end },
                         },
                     },
                     {
