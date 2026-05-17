@@ -297,6 +297,10 @@ local function newApi()
         self.init_args = { ... }
     end
 
+    function api:setFallbackUrl(url)
+        self.fallback_url = url
+    end
+
     function api:testAuth()
         self.calls[#self.calls + 1] = { name = "testAuth" }
         return self.next_auth.success, self.next_auth.response, self.next_auth.code
@@ -352,6 +356,8 @@ local function newPlugin(overrides)
     local plugin = {
         enabled = true,
         server_url = "http://example.com",
+        remote_url = "",
+        home_ssid = "",
         username = "reader",
         password = "secret-password",
         device_name = "KOReader",
@@ -812,14 +818,14 @@ describe("GrimmLink helper methods", function()
         plugin:addToMainMenu(menu)
 
         local top = menu.grimmlink.sub_item_table
-        local setup_item = findMenuItem(top, "Setup Connection")
-        assert.is_not_nil(setup_item)
-        local test_item = findMenuItem(top, "Test Connection")
-        assert.is_not_nil(test_item)
         local settings_menu = findMenuItem(top, "Settings")
         assert.is_not_nil(settings_menu)
         local connection_menu = findMenuItem(settings_menu.sub_item_table, "Connection")
         assert.is_not_nil(connection_menu)
+        local setup_item = findMenuItem(connection_menu.sub_item_table, "Setup Connection")
+        assert.is_not_nil(setup_item)
+        local test_item = findMenuItem(connection_menu.sub_item_table, "Test Connection")
+        assert.is_not_nil(test_item)
         local password_item = findMenuItem(connection_menu.sub_item_table, "Password")
         assert.is_not_nil(password_item)
     end)
