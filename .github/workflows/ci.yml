@@ -25,6 +25,7 @@ jobs:
 
       - name: Install test dependencies
         run: |
+          luarocks install lua-term 0.7-1 || true
           luarocks install busted
           luarocks install luacov
           luarocks install luacov-cobertura
