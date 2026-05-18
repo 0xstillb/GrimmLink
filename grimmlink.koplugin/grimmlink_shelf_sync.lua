@@ -9,15 +9,15 @@ if not _ok_lfs then
     lfs = {
         attributes = function(path)
             if not path or path == "" then return nil end
+            local ok = os.execute("test -d " .. shellEscape(path))
+            if ok == 0 or ok == true then
+                return { size = 0, mode = "directory" }
+            end
             local f = io.open(path, "r")
             if f then
                 local size = f:seek("end") or 0
                 f:close()
                 return { size = size, mode = "file" }
-            end
-            local ok = os.execute("test -d " .. shellEscape(path))
-            if ok == 0 or ok == true then
-                return { size = 0, mode = "directory" }
             end
             return nil
         end,
