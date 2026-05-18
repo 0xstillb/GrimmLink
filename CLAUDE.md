@@ -15,31 +15,21 @@ gh pr create --repo 0xstillb/grimmlink --base main ...
 
 ## Release Workflow
 
-ทำตามลำดับนี้ทุกครั้ง:
+CI (`release.yml`) จัดการทุกอย่างอัตโนมัติเมื่อ push tag — **ห้าม manual create release เด็ดขาด**
 
 ```bash
-# 1. merge ถึง main แล้ว pull
-git pull origin main
-
-# 2. tag
-git tag v<X.Y.Z>
-git push origin v<X.Y.Z>
-
-# 3. generate version files (ต้อง tag ก่อนเสมอ)
-bash generate-version.sh
-git add grimmlink.koplugin/plugin_version.lua grimmlink.koplugin/_meta.lua
-git commit -m "chore: generate version files for v<X.Y.Z>"
+# 1. update CHANGELOG.md ใส่ version ใหม่
+# 2. commit + push ถึง main
+git add CHANGELOG.md
+git commit -m "chore: bump version to v<X.Y.Z>"
 git push origin main
 
-# 4. สร้าง zip ด้วย git archive เท่านั้น (ห้ามใช้ PowerShell Compress-Archive)
-git archive --format=zip v<X.Y.Z> grimmlink.koplugin/ -o grimmlink.koplugin.zip
-
-# 5. create release พร้อม attach zip
-gh release create v<X.Y.Z> grimmlink.koplugin.zip \
-  --repo 0xstillb/grimmlink \
-  --title "v<X.Y.Z>" \
-  --notes "..."
-
-# 6. ลบ zip ทิ้ง
-rm grimmlink.koplugin.zip
+# 3. push tag → CI จัดการทุกอย่าง (generate-version, zip, release)
+git tag v<X.Y.Z>
+git push origin v<X.Y.Z>
 ```
+
+CI จะทำให้เอง:
+- รัน `generate-version.sh`
+- สร้าง `grimmlink.koplugin.zip` และ `grimmlink-v<X.Y.Z>.zip`
+- สร้าง GitHub Release พร้อม assets และ changelog

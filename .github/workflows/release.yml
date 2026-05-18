@@ -88,6 +88,8 @@ jobs:
             CHANGELOG.md
           body: ${{ steps.changelog.outputs.changelog }}
           draft: false
+          make_latest: true
+          fail_on_unmatched_files: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
