@@ -180,8 +180,10 @@ function ShelfSync:resolveDownloadDir(setting_value)
 
     -- Auto-detect a sensible KOReader books directory, then dedicate a
     -- subfolder to GrimmLink downloads so synced books stay grouped together.
+    -- /mnt/us/documents is Kindle-specific and indexed by Kindle's native library.
     local data_dir = DataStorage:getDataDir()
     local candidates = {
+        "/mnt/us/documents",
         data_dir .. "/books",
         data_dir,
     }
