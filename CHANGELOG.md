@@ -3,7 +3,8 @@
 # [v1.3.2]
 
 ### Fixes
-- Kindle compatibility: lfs fallback `attributes()` now checks `test -d` before `io.open()` — on Linux `io.open()` succeeds on directories causing shelf sync to dump books into the settings folder instead of the correct data directory
+- Kindle compatibility: lfs fallback `attributes()` now checks `test -d` before `io.open()` — on Linux `io.open()` succeeds on directories causing shelf sync to resolve the wrong download path
+- Kindle compatibility: shelf sync now downloads books to `/mnt/us/documents/Book/` so Kindle's native library indexes them automatically
 
 # [v1.3.1]
 
