@@ -1,5 +1,10 @@
 # Changelog
 
+# [v1.3.1]
+
+### Fixes
+- Kindle compatibility: make `lfs` (LuaFileSystem) optional so the plugin loads on Kindle KOReader builds where the module is unavailable — previously caused "GrimmLink is still starting up" on every action
+
 # [v1.2.0]
 
 ### Features
