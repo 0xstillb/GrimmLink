@@ -1,5 +1,54 @@
 local DataStorage = require("datastorage")
-local lfs = require("lfs")
+local _ok_lfs, lfs = pcall(require, "lfs")
+if not _ok_lfs then
+    -- Minimal lfs fallback for platforms where the module is unavailable (e.g. some Kindle builds).
+    -- Uses io + os.execute (POSIX tools available on KOReader/Kindle Linux).
+    local function shellEscape(path)
+        return "'" .. tostring(path):gsub("'", "'\\''") .. "'"
+    end
+    lfs = {
+        attributes = function(path)
+            if not path or path == "" then return nil end
+            local f = io.open(path, "r")
+            if f then
+                local size = f:seek("end") or 0
+                f:close()
+                return { size = size, mode = "file" }
+            end
+            local ok = os.execute("test -d " .. shellEscape(path))
+            if ok == 0 or ok == true then
+                return { size = 0, mode = "directory" }
+            end
+            return nil
+        end,
+        mkdir = function(path)
+            if not path or path == "" then return nil, "invalid path" end
+            local ok = os.execute("mkdir " .. shellEscape(path))
+            if ok == 0 or ok == true then return true end
+            return nil, "mkdir failed"
+        end,
+        dir = function(path)
+            if not path or path == "" then return function() return nil end end
+            local handle = io.popen("ls -a " .. shellEscape(path) .. " 2>/dev/null")
+            if not handle then return function() return nil end end
+            local entries = {}
+            for line in handle:lines() do
+                entries[#entries + 1] = line
+            end
+            handle:close()
+            local i = 0
+            return function()
+                i = i + 1
+                return entries[i]
+            end
+        end,
+        rmdir = function(path)
+            if not path or path == "" then return false end
+            local ok = os.execute("rmdir " .. shellEscape(path))
+            return ok == 0 or ok == true
+        end,
+    }
+end
 local logger = require("logger")
 
 local ShelfSync = {}

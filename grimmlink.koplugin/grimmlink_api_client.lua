@@ -3,7 +3,8 @@ local https = require("ssl.https")
 local ltn12 = require("ltn12")
 local json = require("json")
 local logger = require("logger")
-local lfs = require("lfs")
+local _ok_lfs, lfs = pcall(require, "lfs")
+if not _ok_lfs then lfs = nil end
 local _ok_ffi, ffi = pcall(require, "ffi")
 if not _ok_ffi then ffi = nil end
 if ffi then pcall(ffi.cdef, "int system(const char *command);") end
@@ -630,13 +631,23 @@ function APIClient:pollAsyncDownload(handle)
     if not handle then return "failed", 0, 0, nil end
 
     -- Check how many bytes have been written so far.
-    local attr = lfs.attributes(handle.tmp_path)
-    local bytes_so_far = attr and attr.size or 0
+    local bytes_so_far = 0
+    if lfs then
+        local attr = lfs.attributes(handle.tmp_path)
+        bytes_so_far = attr and attr.size or 0
+    else
+        local f = io.open(handle.tmp_path, "r")
+        if f then bytes_so_far = f:seek("end") or 0; f:close() end
+    end
     local total_bytes  = handle.expected_bytes
 
     -- Check if downloader has finished by looking for the exit code file.
-    local code_attr = lfs.attributes(handle.code_path)
-    if code_attr then
+    local code_exists = lfs and lfs.attributes(handle.code_path)
+    if not code_exists then
+        local f = io.open(handle.code_path, "r")
+        if f then code_exists = true; f:close() end
+    end
+    if code_exists then
         local f = io.open(handle.code_path, "r")
         if f then
             local code_str = f:read("*l")
