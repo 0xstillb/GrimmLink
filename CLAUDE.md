@@ -18,7 +18,7 @@ gh pr create --repo 0xstillb/grimmlink --base main ...
 CI (`release.yml`) จัดการทุกอย่างอัตโนมัติเมื่อ push tag — **ห้าม manual create release เด็ดขาด**
 
 ```bash
-# 1. update CHANGELOG.md ใส่ version ใหม่
+# 1. update CHANGELOG.md ใส่ version ใหม่ — ต้องทำก่อน tag เสมอ
 # 2. commit + push ถึง main
 git add CHANGELOG.md
 git commit -m "chore: bump version to v<X.Y.Z>"
