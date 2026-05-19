@@ -1,10 +1,5 @@
 # Changelog
 
-# [v1.3.3]
-
-### Features
-- SimpleUI top menu: GrimmLink now registers a quick action button — add it via Settings → Quick Actions
-
 # [v1.3.2]
 
 ### Fixes
