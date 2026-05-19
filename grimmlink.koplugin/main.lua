@@ -44,6 +44,7 @@ local Grimmlink = WidgetContainer:extend{
 
 local DEFAULTS = {
     enabled = true,
+    settings_tab_enabled = true,
     server_url = "",
     remote_url = "",
     home_ssid = "",
@@ -1679,6 +1680,61 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id, book_f
     end
 end
 
+function Grimmlink:manualPullProgress()
+    if not self.current_session then
+        self:showMessage(_("No book currently open"), 3)
+        return
+    end
+    if not self:isOnline() then
+        self:showMessage(_("Not connected to server"), 3)
+        return
+    end
+    if not self:refreshApiClient() then
+        return
+    end
+
+    local file_hash    = self.current_session.file_hash
+    local file_path    = self.current_session.file_path
+    local book_id      = self.current_session.book_id
+    local book_file_id = self.current_session.book_file_id
+
+    if not file_hash or not book_id then
+        self:showMessage(_("Book not registered on server"), 3)
+        return
+    end
+
+    self:showMessage(_("Fetching remote progress…"), 2)
+
+    local success, remote, code = self.api:getProgress(file_hash)
+    if not success then
+        local _, api_error_class = self:classifyApiOutcome(code, remote)
+        if api_error_class == "permanent_not_found" then
+            self:showMessage(_("No remote progress found for this book"), 3)
+        else
+            self:showMessage(T(_("Fetch failed:\n%1"), safeToString(remote)), 4)
+        end
+        return
+    end
+
+    local remote_snapshot = self:normalizeRemoteProgress(remote)
+    if not remote_snapshot then
+        self:showMessage(_("No remote progress found for this book"), 3)
+        return
+    end
+
+    remote_snapshot.bookHash    = file_hash
+    remote_snapshot.bookId      = remote_snapshot.bookId      or book_id
+    remote_snapshot.bookFileId  = remote_snapshot.bookFileId  or book_file_id
+    remote_snapshot.fileFormat  = remote_snapshot.fileFormat  or self:getBookType(file_path)
+    remote_snapshot.document    = remote_snapshot.document    or file_hash
+    remote_snapshot.file_path   = file_path
+    remote_snapshot.source      = remote_snapshot.source or remote_snapshot.device or "KOReader"
+
+    local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id, book_file_id)
+
+    self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, "native")
+end
+
 function Grimmlink:maybePullPdfWebProgress(file_hash, file_path, book_id, book_file_id, silent)
     if not self.db or not self:isPdfWebReaderBridgeEnabled() or not file_hash or file_hash == "" or not book_id then
         return
@@ -2164,7 +2220,15 @@ function Grimmlink:installUpdate(release_info)
         self:showMessage(T(_("Update failed:\n%1"), safeToString(err)), 4)
         return false, err
     end
-    self:showMessage(_("Update installed. Restart KOReader to finish."), 4)
+    local dialog = ConfirmBox:new{
+        text        = _("Update installed.\n\nRestart KOReader now to apply it?"),
+        ok_text     = _("Restart Now"),
+        cancel_text = _("Later"),
+        ok_callback = function()
+            UIManager:restartKOReader()
+        end,
+    }
+    UIManager:show(dialog)
     return true
 end
 
@@ -3277,6 +3341,85 @@ function Grimmlink:testConnection()
     return false
 end
 
+-- ---------------------------------------------------------------------------
+-- Dedicated menu-bar tab injection
+-- ---------------------------------------------------------------------------
+function Grimmlink:installSettingsTab()
+    local ok_fm_menu, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
+    if not ok_fm_menu or not FileManagerMenu then
+        self:logWarn("GrimmLink: FileManagerMenu unavailable; settings tab not installed")
+        return false
+    end
+
+    FileManagerMenu.__grimmlink_tab_plugin = self
+
+    if FileManagerMenu.__grimmlink_tab_patched then
+        return true
+    end
+    FileManagerMenu.__grimmlink_tab_patched = true
+
+    local function normalizeTabField(value)
+        if type(value) ~= "string" then return "" end
+        return value:lower():gsub("[%s_%-]+", "")
+    end
+
+    local function findInsertPos(tab_table)
+        local tools_pos = nil
+        for i, tab in ipairs(tab_table or {}) do
+            local id   = normalizeTabField(tab.id)
+            local name = normalizeTabField(tab.name)
+            local icon = normalizeTabField(tab.icon)
+            if id == "quicksettings" or name == "quicksettings" or icon == "quicksettings" then
+                return i + 1
+            end
+            if id == "tools" or name == "tools" or icon == "appbar.tools" or icon == "appbartools" then
+                tools_pos = i + 1
+            end
+        end
+        return tools_pos or 1
+    end
+
+    local orig_set_update_item_table = FileManagerMenu.setUpdateItemTable
+    FileManagerMenu.setUpdateItemTable = function(menu_self)
+        if type(orig_set_update_item_table) == "function" then
+            orig_set_update_item_table(menu_self)
+        end
+
+        local plugin_self = FileManagerMenu.__grimmlink_tab_plugin
+        if not plugin_self or plugin_self.settings_tab_enabled == false then
+            return
+        end
+        if type(menu_self.tab_item_table) ~= "table" then
+            return
+        end
+
+        for _, tab in ipairs(menu_self.tab_item_table) do
+            if type(tab) == "table" and tab._grimmlink_settings_tab == true then
+                return
+            end
+        end
+
+        local build_fn = plugin_self.buildTabItems
+        if type(build_fn) ~= "function" then return end
+
+        local ok_items, tab_items = pcall(build_fn, plugin_self)
+        if not ok_items or type(tab_items) ~= "table" then
+            if plugin_self.logWarn then
+                plugin_self:logWarn("GrimmLink: failed to build settings tab", tostring(tab_items))
+            end
+            return
+        end
+
+        tab_items.icon = tab_items.icon or "appbar.navigation"
+        tab_items.text = tab_items.text or _("GrimmLink")
+        tab_items._grimmlink_settings_tab = true
+
+        table.insert(menu_self.tab_item_table, findInsertPos(menu_self.tab_item_table), tab_items)
+    end
+
+    return true
+end
+
 function Grimmlink:init()
     self.plugin_dir = detectPluginDir()
 
@@ -3308,6 +3451,8 @@ function Grimmlink:init()
     self.updater = Updater and type(Updater.new) == "function" and Updater:new() or nil
 
     self.enabled = self:readSetting("enabled", DEFAULTS.enabled)
+    self.settings_tab_enabled = self:readSetting("settings_tab_enabled", DEFAULTS.settings_tab_enabled)
+    self:installSettingsTab()
     local legacy_auth_key = self.db and self.db:getPluginSetting("auth_key") or nil
     self.server_url = self:readSetting("server_url", DEFAULTS.server_url)
     self.remote_url = self:readSetting("remote_url", DEFAULTS.remote_url)
@@ -3613,9 +3758,44 @@ function Grimmlink:addToMainMenu(menu_items)
                 callback = function() self:syncPendingNow(false) end,
             },
             {
+                text = _("Pull Remote Progress"),
+                enabled_func = function()
+                    return self.current_session ~= nil
+                        and self.current_session.book_id ~= nil
+                end,
+                callback = function() self:manualPullProgress() end,
+            },
+            {
                 separator = true,
                 text = _("Settings"),
                 sub_item_table = {
+                    {
+                        text = _("Settings Tab"),
+                        help_text = _("Show or hide the dedicated GrimmLink tab in the menu bar.\nWhen hidden, GrimmLink settings remain accessible via Tools > GrimmLink.\nTakes effect after a restart."),
+                        keep_menu_open = true,
+                        checked_func = function()
+                            return self.settings_tab_enabled
+                        end,
+                        callback = function()
+                            local on = self.settings_tab_enabled
+                            self.settings_tab_enabled = not on
+                            self:saveSetting("settings_tab_enabled", self.settings_tab_enabled)
+                            UIManager:show(ConfirmBox:new{
+                                text = T(
+                                    _("The GrimmLink settings tab will be %1 after restart.\n\nRestart now?"),
+                                    on and _("hidden") or _("shown")
+                                ),
+                                ok_text     = _("Restart"),
+                                cancel_text = _("Later"),
+                                ok_callback = function()
+                                    if self.db and type(self.db.flush) == "function" then
+                                        pcall(self.db.flush, self.db)
+                                    end
+                                    UIManager:restartKOReader()
+                                end,
+                            })
+                        end,
+                    },
                     {
                         text = _("Connection"),
                         sub_item_table = {
@@ -3730,6 +3910,30 @@ function Grimmlink:addToMainMenu(menu_items)
             },
         },
     }
+end
+
+-- ---------------------------------------------------------------------------
+-- Dedicated settings tab support
+-- ---------------------------------------------------------------------------
+-- buildTabItems() reuses addToMainMenu() to produce the tab's item list.
+-- A menu-tab injector can call this when settings_tab_enabled is true.
+function Grimmlink:buildTabItems()
+    if self._tab_item_cache then
+        return self._tab_item_cache
+    end
+    local fake_items = {}
+    self:addToMainMenu(fake_items)
+    local entry = fake_items.grimmlink
+    self._tab_item_cache = entry and entry.sub_item_table or {}
+    return self._tab_item_cache
+end
+
+function Grimmlink:clearTabItemsCache()
+    self._tab_item_cache = nil
+end
+
+function Grimmlink:onTeardown()
+    self:clearTabItemsCache()
 end
 
 return Grimmlink

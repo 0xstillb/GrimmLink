@@ -1,5 +1,12 @@
 # Changelog
 
+# [v1.3.3]
+
+### Features
+- Settings Tab: inject a dedicated GrimmLink tab into the KOReader menu bar (toggleable via Settings → Settings Tab; takes effect after restart)
+- Reader menu: new "Pull Remote Progress" item opens the local/remote conflict dialog for the current book
+- Update install: replaced silent toast with a ConfirmBox offering "Restart Now" or "Later"
+
 # [v1.3.2]
 
 ### Fixes
