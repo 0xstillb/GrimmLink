@@ -125,6 +125,27 @@ describe("GrimmLink shelf sync download directory", function()
         assert.are.equal("/storage/emulated/0/BooksCustom", dir)
     end)
 
+    it("builds safe filename from extension when fileFormat is missing", function()
+        local sync = ShelfSync:new({}, {})
+        local filename = sync:buildSafeFilename({
+            bookId = 77,
+            title = "Magic Format",
+            fileName = "Magic Format.pdf",
+            extension = "pdf",
+        }, false)
+        assert.are.equal("Magic Format_77.pdf", filename)
+    end)
+
+    it("builds safe filename from mime-type fileFormat values", function()
+        local sync = ShelfSync:new({}, {})
+        local filename = sync:buildSafeFilename({
+            bookId = 78,
+            title = "Mime Format",
+            fileFormat = "application/pdf",
+        }, false)
+        assert.are.equal("Mime Format_78.pdf", filename)
+    end)
+
     it("removes nested .sdr directories when delete_sdr is enabled", function()
         local deleted_entry = nil
         local sync = ShelfSync:new({

@@ -324,23 +324,277 @@ function APIClient:submitSessionBatch(book_id, book_hash, book_type, device, dev
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
-function APIClient:getShelves()
-    local success, code, response = self:request("GET", "/api/koreader/shelves")
-    if success and type(response) == "table" then
+local function readPrefix(path, max_bytes)
+    local fh = io.open(path, "rb")
+    if not fh then
+        return nil
+    end
+    local data = fh:read(max_bytes or 512)
+    fh:close()
+    return data
+end
+
+local function readTail(path, max_bytes)
+    local fh = io.open(path, "rb")
+    if not fh then
+        return nil
+    end
+    local size = fh:seek("end")
+    if not size then
+        fh:close()
+        return nil
+    end
+    local window = tonumber(max_bytes) or 4096
+    if window < 256 then
+        window = 256
+    end
+    local start = size - window
+    if start < 0 then
+        start = 0
+    end
+    fh:seek("set", start)
+    local data = fh:read("*a")
+    fh:close()
+    return data
+end
+
+local function looksLikeTextErrorPayload(prefix)
+    local sample = tostring(prefix or ""):lower()
+    if sample == "" then
+        return false
+    end
+    if sample:find("<!doctype html", 1, true) then return true end
+    if sample:find("<html", 1, true) then return true end
+    if sample:find("{\"timestamp\":", 1, true) then return true end
+    if sample:find("\"status\":", 1, true) and sample:find("\"error\":", 1, true) then return true end
+    return false
+end
+
+local function canonicalFormatToken(value)
+    local raw = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if raw == "" then
+        return nil
+    end
+
+    raw = raw:lower():gsub("^%.", ""):gsub("[?#].*$", "")
+    local slash_value = raw:match("/([%w%+%-%.]+)$")
+    if slash_value and slash_value ~= "" then
+        raw = slash_value
+    end
+
+    if raw == "epub+zip" or raw == "x-epub+zip" then return "epub" end
+    if raw == "x-pdf" then return "pdf" end
+    if raw == "octet-stream" or raw == "binary" then return nil end
+    return raw ~= "" and raw or nil
+end
+
+local function isZipLikeExpectedFormat(fmt)
+    local value = canonicalFormatToken(fmt)
+    return value == "epub" or value == "cbz" or value == "zip"
+end
+
+local function isPdfExpectedFormat(fmt)
+    local value = canonicalFormatToken(fmt)
+    return value == "pdf"
+end
+
+local function hasPrefix(data, signature)
+    if type(data) ~= "string" or type(signature) ~= "string" then
+        return false
+    end
+    return data:sub(1, #signature) == signature
+end
+
+local function normalizeBookFormat(value)
+    local token = canonicalFormatToken(value)
+    if not token then
+        return nil
+    end
+    return token:upper()
+end
+
+local function extractExtension(value)
+    local raw = tostring(value or ""):gsub("[?#].*$", "")
+    if raw == "" then
+        return nil
+    end
+    local ext = raw:match("%.([%w%+%-]+)$") or raw:match("^([%w%+%-]+)$")
+    if not ext or ext == "" then
+        return nil
+    end
+    return canonicalFormatToken(ext)
+end
+
+local function inferExpectedFormat(expected_format, dest_path)
+    local normalized = canonicalFormatToken(expected_format)
+    if normalized then
+        return normalized
+    end
+    local inferred = extractExtension(dest_path)
+    if inferred then
+        return inferred
+    end
+    return nil
+end
+
+local function hasPdfEofMarker(path)
+    local tail = readTail(path, 8192)
+    if type(tail) ~= "string" or tail == "" then
+        return false
+    end
+    return tail:find("%%EOF", 1, true) ~= nil
+end
+
+local function normalizeShelfType(value)
+    local shelf_type = tostring(value or "regular"):lower()
+    if shelf_type ~= "magic" then
+        return "regular"
+    end
+    return shelf_type
+end
+
+function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks)
+    return {
+        schemaVersion = 1,
+        syncMode = "incremental",
+        bookId = tonumber(book_id) or book_id,
+        bookHash = book_hash,
+        bookFileId = tonumber(book_file_id) or book_file_id,
+        fileFormat = file_format or "EPUB",
+        device = device,
+        deviceId = device_id,
+        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        rating = rating,
+        annotations = annotations or {},
+        bookmarks = bookmarks or {},
+    }
+end
+
+function APIClient:submitMetadataBatch(payload)
+    local success, code, response = self:request("POST", "/api/koreader/syncs/metadata", payload)
+    if success then
         return true, response, code
     end
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
-function APIClient:getShelfBooks(shelf_id)
-    local success, code, response = self:request(
-        "GET",
-        "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books"
+function APIClient:normalizeShelfObject(shelf)
+    if type(shelf) ~= "table" then
+        return nil
+    end
+    local shelf_id = tonumber(shelf.id or shelf.shelfId or shelf.shelf_id)
+    local shelf_type = normalizeShelfType(shelf.type or shelf.shelf_type)
+    local normalized = {
+        id = shelf_id,
+        shelfId = shelf_id,
+        name = shelf.name or shelf.title,
+        type = shelf_type,
+        shelfType = shelf_type,
+        bookCount = shelf.bookCount or shelf.book_count,
+        description = shelf.description,
+        visibility = shelf.visibility,
+    }
+    return normalized
+end
+
+function APIClient:normalizeShelfBookObject(book)
+    if type(book) ~= "table" then
+        return nil
+    end
+    local resolved_file_name = book.fileName or book.originalFileName or book.original_file_name
+    local extension = extractExtension(book.extension) or extractExtension(resolved_file_name)
+    local format = normalizeBookFormat(
+        book.fileFormat or book.file_format or book.bookType or book.book_type or extension
     )
+    local normalized = {
+        bookId = tonumber(book.bookId or book.id or book.book_id),
+        bookFileId = tonumber(book.bookFileId or book.book_file_id),
+        title = book.title,
+        author = book.author,
+        fileName = resolved_file_name,
+        originalFileName = book.originalFileName or book.fileName or book.original_file_name,
+        extension = extension,
+        fileFormat = format,
+        fileSizeKb = tonumber(book.fileSizeKb or book.file_size_kb),
+        fileSize = tonumber(book.fileSize or book.file_size),
+        seriesName = book.seriesName or book.series_name,
+        seriesNumber = tonumber(book.seriesNumber or book.series_number),
+        bookHash = book.bookHash or book.hash,
+        hash = book.hash or book.bookHash,
+    }
+    return normalized
+end
+
+function APIClient:getShelves(shelf_type)
+    local path = "/api/koreader/shelves"
+    local normalized_type = normalizeShelfType(shelf_type)
+    if shelf_type ~= nil and shelf_type ~= "" then
+        path = path .. "?type=" .. self:_urlEncode(normalized_type)
+    end
+
+    local success, code, response = self:request("GET", path)
     if success and type(response) == "table" then
-        return true, response, code
+        local raw_list = response
+        if type(response.content) == "table" then
+            raw_list = response.content
+        elseif type(response.items) == "table" then
+            raw_list = response.items
+        end
+
+        local normalized = {}
+        if type(raw_list) == "table" then
+            for _, shelf in ipairs(raw_list) do
+                local normalized_shelf = self:normalizeShelfObject(shelf)
+                if normalized_shelf then
+                    normalized[#normalized + 1] = normalized_shelf
+                end
+            end
+        end
+        return true, normalized, code
     end
     return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
+function APIClient:getShelfBooks(shelf_id, shelf_type)
+    local normalized_type = normalizeShelfType(shelf_type)
+    local primary_path = "/api/koreader/shelves/" .. normalized_type .. "/" .. tostring(shelf_id) .. "/books"
+    local success, code, response = self:request(
+        "GET",
+        primary_path
+    )
+
+    -- Backward compatibility for older backends without typed shelf route.
+    if not success and normalized_type == "regular" and tonumber(code) == 404 then
+        success, code, response = self:request(
+            "GET",
+            "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books"
+        )
+    end
+
+    if success and type(response) == "table" then
+        local raw_list = response
+        if type(response.content) == "table" then
+            raw_list = response.content
+        elseif type(response.items) == "table" then
+            raw_list = response.items
+        end
+
+        local normalized_books = {}
+        if type(raw_list) == "table" then
+            for _, book in ipairs(raw_list) do
+                local normalized_book = self:normalizeShelfBookObject(book)
+                if normalized_book then
+                    normalized_books[#normalized_books + 1] = normalized_book
+                end
+            end
+        end
+        return true, normalized_books, code
+    end
+    return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
+function APIClient:getBooksInShelf(shelf_id, shelf_type)
+    return self:getShelfBooks(shelf_id, shelf_type)
 end
 
 --- Download a book file with progress reporting.
@@ -363,6 +617,7 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec_or_opts)
     end
 
     local tmp_path = dest_path .. ".tmp"
+    local expected_format = inferExpectedFormat(opts.expected_format, dest_path)
     local file, err = io.open(tmp_path, "wb")
     if not file then
         return false, "Cannot open temp file: " .. tostring(err)
@@ -433,7 +688,7 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec_or_opts)
     end
 
     -- Use a custom sink instead of ltn12.sink.file so we can track progress.
-    local ok, code = protocol.request{
+    local ok, code, response_headers = protocol.request{
         url = url,
         method = "GET",
         headers = {
@@ -461,6 +716,48 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec_or_opts)
         local msg = "Download failed: HTTP " .. tostring(code or ok or "connection failed")
         self:log("warn", "GrimmLink download error:", msg)
         return false, msg
+    end
+
+    if bytes_written <= 0 then
+        os.remove(tmp_path)
+        return false, "Downloaded file is empty"
+    end
+
+    local content_type = ""
+    if type(response_headers) == "table" then
+        content_type = tostring(response_headers["content-type"] or response_headers["Content-Type"] or ""):lower()
+    end
+    if content_type:find("text/html", 1, true) or content_type:find("application/json", 1, true) then
+        os.remove(tmp_path)
+        return false, "Downloaded payload is not a book file (content-type=" .. content_type .. ")"
+    end
+
+    local prefix = readPrefix(tmp_path, 512)
+    if looksLikeTextErrorPayload(prefix) then
+        os.remove(tmp_path)
+        return false, "Downloaded payload looks like an error page"
+    end
+    if isZipLikeExpectedFormat(expected_format) and not hasPrefix(prefix, "PK\003\004") then
+        os.remove(tmp_path)
+        return false, "Downloaded file signature is invalid for EPUB/CBZ"
+    end
+    if isPdfExpectedFormat(expected_format) and not hasPrefix(prefix, "%PDF-") then
+        os.remove(tmp_path)
+        return false, "Downloaded file signature is invalid for PDF"
+    end
+    if isPdfExpectedFormat(expected_format) and not hasPdfEofMarker(tmp_path) then
+        os.remove(tmp_path)
+        return false, "Downloaded PDF appears incomplete (missing EOF marker)"
+    end
+
+    local expected_size_kb = tonumber(opts.expected_size_kb) or 0
+    if expected_size_kb > 0 then
+        local expected_bytes = expected_size_kb * 1024
+        local min_reasonable = math.max(4096, math.floor(expected_bytes * 0.10))
+        if bytes_written < min_reasonable then
+            os.remove(tmp_path)
+            return false, "Downloaded file is unexpectedly small (" .. tostring(bytes_written) .. " bytes)"
+        end
     end
 
     local rename_ok, rename_err = os.rename(tmp_path, dest_path)
@@ -523,6 +820,7 @@ function APIClient:startAsyncDownload(book_id, dest_path, opts)
     local pid_path    = dest_path .. ".pid"
     local code_path   = dest_path .. ".exitcode"
     local script_path = dest_path .. ".dl.sh"
+    local expected_format = inferExpectedFormat(opts.expected_format, dest_path)
 
     -- Remove stale artifacts from a previous interrupted download.
     os.remove(tmp_path)
@@ -618,6 +916,7 @@ fi
         code_path       = code_path,
         script_path     = script_path,
         expected_bytes  = opts.expected_size_kb and (tonumber(opts.expected_size_kb) or 0) * 1024 or nil,
+        expected_format = expected_format,
         started_at      = os.time(),
         timeout         = timeout,
     }
@@ -659,6 +958,40 @@ function APIClient:pollAsyncDownload(handle)
             if handle.script_path then os.remove(handle.script_path) end
 
             if exit_code == 0 then
+                local prefix = readPrefix(handle.tmp_path, 512)
+                if looksLikeTextErrorPayload(prefix) then
+                    self:log("warn", "GrimmLink: async payload looks like an error page")
+                    os.remove(handle.tmp_path)
+                    return "failed", bytes_so_far, total_bytes, exit_code
+                end
+                if isZipLikeExpectedFormat(handle.expected_format) and not hasPrefix(prefix, "PK\003\004") then
+                    self:log("warn", "GrimmLink: async payload signature invalid for EPUB/CBZ")
+                    os.remove(handle.tmp_path)
+                    return "failed", bytes_so_far, total_bytes, exit_code
+                end
+                if isPdfExpectedFormat(handle.expected_format) and not hasPrefix(prefix, "%PDF-") then
+                    self:log("warn", "GrimmLink: async payload signature invalid for PDF")
+                    os.remove(handle.tmp_path)
+                    return "failed", bytes_so_far, total_bytes, exit_code
+                end
+                if isPdfExpectedFormat(handle.expected_format) and not hasPdfEofMarker(handle.tmp_path) then
+                    self:log("warn", "GrimmLink: async payload appears incomplete for PDF (missing EOF marker)")
+                    os.remove(handle.tmp_path)
+                    return "failed", bytes_so_far, total_bytes, exit_code
+                end
+                if bytes_so_far <= 0 then
+                    self:log("warn", "GrimmLink: async payload is empty")
+                    os.remove(handle.tmp_path)
+                    return "failed", bytes_so_far, total_bytes, exit_code
+                end
+                if handle.expected_bytes and handle.expected_bytes > 0 then
+                    local min_reasonable = math.max(4096, math.floor(handle.expected_bytes * 0.10))
+                    if bytes_so_far < min_reasonable then
+                        self:log("warn", "GrimmLink: async payload unexpectedly small")
+                        os.remove(handle.tmp_path)
+                        return "failed", bytes_so_far, total_bytes, exit_code
+                    end
+                end
                 -- Download succeeded. Rename tmp → final.
                 local rename_ok, rename_err = os.rename(handle.tmp_path, handle.dest_path)
                 if rename_ok then
@@ -729,10 +1062,55 @@ function APIClient:cancelAsyncDownload(handle)
     end
 end
 
-function APIClient:removeBookFromShelf(shelf_id, book_id)
+function APIClient:removeBookFromShelf(shelf_id, book_id, shelf_type)
+    local normalized_type = normalizeShelfType(shelf_type)
+    local typed_path = "/api/koreader/shelves/" .. normalized_type .. "/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove"
+
+    local success, code, response = self:request("POST", typed_path)
+
+    if not success and normalized_type == "regular" and tonumber(code) == 404 then
+        success, code, response = self:request(
+            "POST",
+            "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove"
+        )
+    end
+
+    if success then
+        return true, response, code
+    end
+    return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
+function APIClient:getSupportedReadStatuses()
+    local success, code, response = self:request("GET", "/api/koreader/books/read-statuses")
+    if success and type(response) == "table" then
+        local raw = response
+        if type(response.statuses) == "table" then
+            raw = response.statuses
+        end
+        if type(raw) ~= "table" then
+            return false, "invalid_status_payload", code
+        end
+        local statuses = {}
+        for _, value in ipairs(raw) do
+            if value ~= nil and tostring(value) ~= "" then
+                statuses[#statuses + 1] = tostring(value):upper()
+            end
+        end
+        return true, statuses, code
+    end
+    return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
+function APIClient:updateBookReadStatus(book_id, status)
+    local normalized_book_id = normalizeNumericId(book_id)
+    local payload = {
+        status = status and tostring(status):upper() or nil,
+    }
     local success, code, response = self:request(
-        "POST",
-        "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove"
+        "PUT",
+        "/api/koreader/books/" .. normalized_book_id .. "/status",
+        payload
     )
     if success then
         return true, response, code
