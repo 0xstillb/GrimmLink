@@ -3047,10 +3047,49 @@ function Grimmlink:syncPendingSessions(silent, limit)
 end
 
 local function parseIsoOrNil(value)
-    if type(value) ~= "string" or value == "" then
+    if value == nil then
         return nil
     end
-    return value
+
+    if type(value) == "number" then
+        return toIso8601(value)
+    end
+
+    if type(value) ~= "string" then
+        return nil
+    end
+
+    local trimmed = value:match("^%s*(.-)%s*$")
+    if trimmed == "" then
+        return nil
+    end
+
+    -- Common KOReader timestamp format: "YYYY-MM-DD HH:MM:SS"
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$") then
+        return (trimmed:gsub(" ", "T")) .. "Z"
+    end
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d%.%d+$") then
+        return (trimmed:gsub(" ", "T")) .. "Z"
+    end
+
+    -- Already ISO-local without timezone: append Z for Instant parsing.
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d$") then
+        return trimmed .. "Z"
+    end
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+$") then
+        return trimmed .. "Z"
+    end
+
+    -- Keep explicit timezone ISO strings as-is.
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.?%d*[Zz]$") then
+        return trimmed
+    end
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.?%d*[%+%-]%d%d:%d%d$") then
+        return trimmed
+    end
+
+    -- Unknown format: omit timestamp to avoid backend JSON parse failures.
+    return nil
 end
 
 function Grimmlink:buildMetadataRatingPayload(row, payload)
@@ -4168,12 +4207,21 @@ end
 function Grimmlink:_broadcastSyncResult(result)
     if not Event then return end
     if (result.synced or 0) == 0 and (result.deleted or 0) == 0 then return end
+    local event_shelf_type = normalizeShelfType(
+        (result and result.shelf_type)
+        or self._active_sync_shelf_type
+        or self.shelf_type
+        or "regular"
+    )
+    local event_download_dir = (result and result.download_dir)
+        or self._active_sync_download_dir
+        or self:getShelfSyncTargetDownloadDir(event_shelf_type)
     local ev = Event:new("GrimmLinkShelfSyncComplete", {
         synced              = result.synced or 0,
         deleted             = result.deleted or 0,
         skipped             = result.skipped or 0,
-        shelf_type          = self._active_sync_shelf_type or self.shelf_type or "regular",
-        download_dir        = self._active_sync_download_dir or self.download_dir,
+        shelf_type          = event_shelf_type,
+        download_dir        = event_download_dir,
         metadata_index_path = result.metadata_index_path,
     })
     local function _emit()
@@ -4439,6 +4487,8 @@ function Grimmlink:syncShelfNow(silent, opts)
     local result = plan.result
     local queue  = plan.download_queue or {}
     local total  = #queue
+    result.shelf_type = active_shelf_type
+    result.download_dir = active_download_dir
 
     -- Nothing to download → finish immediately.
     if total == 0 then
@@ -4827,7 +4877,14 @@ function Grimmlink:getCachedShelfBooks(shelf_id, shelf_type, max_age_seconds)
     end
     local cache_key = normalizeShelfType(shelf_type) .. ":" .. tostring(shelf_id)
     local entry = cache_map[cache_key]
-    if type(entry) ~= "table" then
+    -- Backward compatibility with very old cache key format (shelf-id only).
+    -- IMPORTANT: only allow this fallback when shelf_type was not explicitly provided,
+    -- otherwise regular/magic caches can bleed into each other for the same shelf id.
+    local shelf_type_raw = shelf_type
+    if type(shelf_type_raw) == "string" then
+        shelf_type_raw = shelf_type_raw:gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    if type(entry) ~= "table" and (shelf_type_raw == nil or shelf_type_raw == "") then
         entry = cache_map[tostring(shelf_id)]
     end
     if type(entry) ~= "table" or type(entry.books) ~= "table" or not entry.ts then
@@ -5488,6 +5545,116 @@ function Grimmlink:buildFileManagerActionItems(path_resolver)
 end
 
 function Grimmlink:registerFileManagerHoldActions()
+    local function resolvePathFromValue(value)
+        if type(value) == "string" and value ~= "" then
+            return value
+        end
+        if type(value) == "table" then
+            local candidates = {
+                value.path,
+                value.file,
+                value.filepath,
+                value.selected_file,
+                value.selected_path,
+            }
+            for _, candidate in ipairs(candidates) do
+                if candidate and candidate ~= "" then
+                    return tostring(candidate)
+                end
+            end
+        end
+        return nil
+    end
+
+    local function registerViaFileDialogButtons()
+        local fm = nil
+        local fm_candidates = {
+            self and self.ui,
+            FileManager and FileManager.instance,
+        }
+        for _, candidate in ipairs(fm_candidates) do
+            if type(candidate) == "table" and type(candidate.addFileDialogButtons) == "function" then
+                fm = candidate
+                break
+            end
+        end
+        if not fm then
+            return false
+        end
+
+        local function closeFileDialogSafe()
+            local dialog = fm.file_dialog
+            if dialog then
+                pcall(function()
+                    UIManager:close(dialog)
+                end)
+            end
+        end
+
+        local function wrapAction(action_item)
+            if type(action_item) ~= "table" then
+                return nil
+            end
+            return {
+                text = action_item.text,
+                callback = function()
+                    closeFileDialogSafe()
+                    if type(action_item.callback) == "function" then
+                        action_item.callback()
+                    end
+                end,
+            }
+        end
+
+        local function buildRows(file_path)
+            local action_items = self:buildFileManagerActionItems(function()
+                return file_path
+            end)
+            return {
+                {}, -- separator between KOReader default actions and GrimmLink actions
+                {
+                    wrapAction(action_items[1]),
+                    wrapAction(action_items[2]),
+                    wrapAction(action_items[3]),
+                },
+                {
+                    wrapAction(action_items[4]),
+                    wrapAction(action_items[5]),
+                },
+            }
+        end
+
+        local function rowAt(index)
+            return function(file, is_file, _book_props)
+                if not is_file then
+                    return nil
+                end
+                local file_path = resolvePathFromValue(file)
+                if not file_path then
+                    return nil
+                end
+                local rows = buildRows(file_path)
+                return rows[index]
+            end
+        end
+
+        local ok, err = pcall(function()
+            fm:addFileDialogButtons("grimmlink_file_dialog_separator", rowAt(1))
+            fm:addFileDialogButtons("grimmlink_file_dialog_primary", rowAt(2))
+            fm:addFileDialogButtons("grimmlink_file_dialog_secondary", rowAt(3))
+        end)
+        if not ok then
+            self:logWarn("GrimmLink: failed to register FileManager file-dialog actions:", tostring(err))
+            return false
+        end
+
+        return true
+    end
+
+    if registerViaFileDialogButtons() then
+        return true
+    end
+
     local ok_fm_menu, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
     if not ok_fm_menu or not FileManagerMenu then
         self:logDbg("GrimmLink: FileManager hold actions unavailable")
@@ -5506,8 +5673,9 @@ function Grimmlink:registerFileManagerHoldActions()
             menu_self and menu_self.path,
         }
         for _, value in ipairs(candidates) do
-            if value and value ~= "" then
-                return tostring(value)
+            local resolved = resolvePathFromValue(value)
+            if resolved then
+                return resolved
             end
         end
         return nil
@@ -5588,19 +5756,6 @@ end
 -- Dedicated menu-bar tab injection
 -- ---------------------------------------------------------------------------
 function Grimmlink:installSettingsTab()
-    local ok_fm_menu, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
-    if not ok_fm_menu or not FileManagerMenu then
-        self:logWarn("GrimmLink: FileManagerMenu unavailable; settings tab not installed")
-        return false
-    end
-
-    FileManagerMenu.__grimmlink_tab_plugin = self
-
-    if FileManagerMenu.__grimmlink_tab_patched then
-        return true
-    end
-    FileManagerMenu.__grimmlink_tab_patched = true
-
     local function normalizeTabField(value)
         if type(value) ~= "string" then return "" end
         return value:lower():gsub("[%s_%-]+", "")
@@ -5622,45 +5777,83 @@ function Grimmlink:installSettingsTab()
         return tools_pos or 1
     end
 
-    local orig_set_update_item_table = FileManagerMenu.setUpdateItemTable
-    FileManagerMenu.setUpdateItemTable = function(menu_self)
-        if type(orig_set_update_item_table) == "function" then
-            orig_set_update_item_table(menu_self)
+    local function installOnMenuClass(MenuClass, class_label)
+        if type(MenuClass) ~= "table" then
+            return false
         end
 
-        local plugin_self = FileManagerMenu.__grimmlink_tab_plugin
-        if not plugin_self or plugin_self.settings_tab_enabled == false then
-            return
+        MenuClass.__grimmlink_tab_plugin = self
+        if MenuClass.__grimmlink_tab_patched then
+            return true
         end
-        if type(menu_self.tab_item_table) ~= "table" then
-            return
-        end
+        MenuClass.__grimmlink_tab_patched = true
 
-        for _, tab in ipairs(menu_self.tab_item_table) do
-            if type(tab) == "table" and tab._grimmlink_settings_tab == true then
+        local orig_set_update_item_table = MenuClass.setUpdateItemTable
+        MenuClass.setUpdateItemTable = function(menu_self)
+            if type(orig_set_update_item_table) == "function" then
+                orig_set_update_item_table(menu_self)
+            end
+
+            local plugin_self = MenuClass.__grimmlink_tab_plugin
+            if not plugin_self or plugin_self.settings_tab_enabled == false then
                 return
             end
-        end
-
-        local build_fn = plugin_self.buildTabItems
-        if type(build_fn) ~= "function" then return end
-
-        local ok_items, tab_items = pcall(build_fn, plugin_self)
-        if not ok_items or type(tab_items) ~= "table" then
-            if plugin_self.logWarn then
-                plugin_self:logWarn("GrimmLink: failed to build settings tab", tostring(tab_items))
+            if type(menu_self.tab_item_table) ~= "table" then
+                return
             end
-            return
+
+            for _, tab in ipairs(menu_self.tab_item_table) do
+                if type(tab) == "table" and tab._grimmlink_settings_tab == true then
+                    return
+                end
+            end
+
+            local build_fn = plugin_self.buildTabItems
+            if type(build_fn) ~= "function" then return end
+
+            local ok_items, tab_items = pcall(build_fn, plugin_self)
+            if not ok_items or type(tab_items) ~= "table" then
+                if plugin_self.logWarn then
+                    plugin_self:logWarn("GrimmLink: failed to build settings tab (" .. safeToString(class_label) .. ")", tostring(tab_items))
+                end
+                return
+            end
+
+            tab_items.icon = tab_items.icon or "appbar.navigation"
+            tab_items.text = tab_items.text or _("GrimmLink")
+            tab_items._grimmlink_settings_tab = true
+
+            table.insert(menu_self.tab_item_table, findInsertPos(menu_self.tab_item_table), tab_items)
         end
-
-        tab_items.icon = tab_items.icon or "appbar.navigation"
-        tab_items.text = tab_items.text or _("GrimmLink")
-        tab_items._grimmlink_settings_tab = true
-
-        table.insert(menu_self.tab_item_table, findInsertPos(menu_self.tab_item_table), tab_items)
+        return true
     end
 
-    return true
+    local targets = {
+        { label = "FileManagerMenu", modules = { "apps/filemanager/filemanagermenu" } },
+        { label = "ReaderMenu", modules = { "apps/reader/modules/readermenu", "readermenu" } },
+    }
+
+    local installed_any = false
+    for _, target in ipairs(targets) do
+        local menu_class = nil
+        for _, module_name in ipairs(target.modules or {}) do
+            local ok_mod, mod = pcall(require, module_name)
+            if ok_mod and type(mod) == "table" then
+                menu_class = mod
+                break
+            end
+        end
+        if menu_class then
+            installed_any = installOnMenuClass(menu_class, target.label) or installed_any
+        else
+            self:logDbg("GrimmLink: " .. safeToString(target.label) .. " unavailable; settings tab not installed for this menu")
+        end
+    end
+
+    if not installed_any then
+        self:logWarn("GrimmLink: no compatible menu class found for settings tab")
+    end
+    return installed_any
 end
 
 function Grimmlink:init()
@@ -5876,12 +6069,6 @@ function Grimmlink:addToMainMenu(menu_items)
             end,
         },
         {
-            text = _("Preview Metadata"),
-            callback = function()
-                self:showMetadataPreview()
-            end,
-        },
-        {
             text = _("Export GrimmLink Debug Info"),
             callback = function()
                 self:exportDebugInfo()
@@ -5926,179 +6113,15 @@ function Grimmlink:addToMainMenu(menu_items)
                 end,
             },
             {
-                separator = true,
-                text = _("Shelf Sync"),
+                text = _("Connection"),
                 sub_item_table = {
-                    {
-                        text = _("Sync Now"),
-                        callback = function() self:syncShelfNow(false) end,
-                    },
-                    {
-                        text = _("Enable Shelf Sync"),
-                        keep_menu_open = true,
-                        checked_func = function() return self.shelf_sync_enabled end,
-                        callback = function()
-                            self.shelf_sync_enabled = not self.shelf_sync_enabled
-                            self:saveSetting("shelf_sync_enabled", self.shelf_sync_enabled)
-                        end,
-                    },
-                    {
-                        text_func = function()
-                            local regular_name = self.selected_regular_shelf_name and self.selected_regular_shelf_name ~= "" and self.selected_regular_shelf_name or _("(none)")
-                            return T(_("Select Regular Shelf: %1"), regular_name)
-                        end,
-                        callback = function() self:showShelfPicker(false, "regular") end,
-                    },
-                    {
-                        text_func = function()
-                            local magic_name = self.selected_magic_shelf_name and self.selected_magic_shelf_name ~= "" and self.selected_magic_shelf_name or _("(none)")
-                            return T(_("Select Magic Shelf: %1"), magic_name)
-                        end,
-                        callback = function() self:showShelfPicker(false, "magic") end,
-                    },
-                    {
-                        text = _("Add Shelf by ID"),
-                        callback = function()
-                            self:promptAndValidateShelfId(true)
-                        end,
-                    },
-                    {
-                        text = _("Validate Shelf ID"),
-                        callback = function()
-                            self:promptAndValidateShelfId(false)
-                        end,
-                    },
-                    {
-                        text = _("Enable Regular Shelf Sync"),
-                        keep_menu_open = true,
-                        checked_func = function() return self.sync_regular_shelf_enabled == true end,
-                        callback = function()
-                            self.sync_regular_shelf_enabled = not (self.sync_regular_shelf_enabled == true)
-                            self:saveSetting("sync_regular_shelf_enabled", self.sync_regular_shelf_enabled)
-                        end,
-                    },
-                    {
-                        text = _("Enable Magic Shelf Sync"),
-                        keep_menu_open = true,
-                        checked_func = function() return self.sync_magic_shelf_enabled == true end,
-                        callback = function()
-                            self.sync_magic_shelf_enabled = not (self.sync_magic_shelf_enabled == true)
-                            self:saveSetting("sync_magic_shelf_enabled", self.sync_magic_shelf_enabled)
-                        end,
-                    },
-                    {
-                        separator = true,
-                        text = _("Download Settings"),
-                        sub_item_table = {
-                            {
-                                text_func = function()
-                                    local dir = self.download_dir and self.download_dir ~= "" and self.download_dir or _("(auto)")
-                                    return T(_("Download Directory: %1"), dir)
-                                end,
-                                callback = function() self:configureDownloadDir() end,
-                            },
-                            {
-                                text = _("Original Filenames"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.shelf_use_original_filename end,
-                                callback = function()
-                                    self.shelf_use_original_filename = not self.shelf_use_original_filename
-                                    self:saveSetting("shelf_use_original_filename", self.shelf_use_original_filename)
-                                end,
-                            },
-                            {
-                                text = _("Use Separate Magic Directory"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.use_separate_magic_download_dir == true end,
-                                callback = function()
-                                    self.use_separate_magic_download_dir = not (self.use_separate_magic_download_dir == true)
-                                    self:saveSetting("use_separate_magic_download_dir", self.use_separate_magic_download_dir)
-                                end,
-                            },
-                            {
-                                text_func = function()
-                                    local dir = self.magic_download_dir and self.magic_download_dir ~= "" and self.magic_download_dir or _("(same as regular)")
-                                    return T(_("Magic Download Directory: %1"), dir)
-                                end,
-                                callback = function()
-                                    self:configureMagicDownloadDir()
-                                end,
-                            },
-                        },
-                    },
-                    {
-                        text = _("Sync Behavior"),
-                        sub_item_table = {
-                            {
-                                text = _("Auto-sync on Resume"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.auto_sync_shelf_on_resume end,
-                                callback = function()
-                                    self.auto_sync_shelf_on_resume = not self.auto_sync_shelf_on_resume
-                                    self:saveSetting("auto_sync_shelf_on_resume", self.auto_sync_shelf_on_resume)
-                                end,
-                            },
-                            {
-                                text = _("Fast Sync (Short Cache)"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.shelf_fast_sync_enabled end,
-                                callback = function()
-                                    self.shelf_fast_sync_enabled = not self.shelf_fast_sync_enabled
-                                    self:saveSetting("shelf_fast_sync_enabled", self.shelf_fast_sync_enabled)
-                                end,
-                            },
-                            {
-                                text_func = function()
-                                    return T(_("Cache Duration: %1s"), tonumber(self.shelf_fast_sync_cache_seconds) or 15)
-                                end,
-                                callback = function()
-                                    self:showNumberInput(_("Fast Sync Cache Seconds"), self.shelf_fast_sync_cache_seconds or 15, _("Recommended: 10-30"), function(value)
-                                        local normalized = math.floor(tonumber(value) or 15)
-                                        if normalized < 0 then normalized = 0 end
-                                        if normalized > 120 then normalized = 120 end
-                                        self:saveSetting("shelf_fast_sync_cache_seconds", normalized)
-                                    end)
-                                end,
-                            },
-                            {
-                                text = _("Two-way Delete Sync"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.two_way_shelf_delete_sync end,
-                                callback = function()
-                                    self.two_way_shelf_delete_sync = not self.two_way_shelf_delete_sync
-                                    self:saveSetting("two_way_shelf_delete_sync", self.two_way_shelf_delete_sync)
-                                end,
-                            },
-                            {
-                                text = _("Delete .sdr on Remove"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.delete_sdr_on_book_delete end,
-                                callback = function()
-                                    self.delete_sdr_on_book_delete = not self.delete_sdr_on_book_delete
-                                    self:saveSetting("delete_sdr_on_book_delete", self.delete_sdr_on_book_delete)
-                                end,
-                            },
-                        },
-                    },
-                    {
-                        text = _("Rebuild SimpleUI metadata cache"),
-                        keep_menu_open = true,
-                        callback = function()
-                            if not self.shelf_sync or not self.download_dir then
-                                self:showMessage(_("Shelf sync not configured."), 3)
-                                return
-                            end
-                            local counts = self.shelf_sync:rebuildBookInfoCacheFromIndex(
-                                self.shelf_sync:resolveDownloadDir(self.download_dir))
-                            if counts.error then
-                                self:showMessage(T(_("Rebuild failed: %1"), counts.error), 4)
-                            else
-                                self:showMessage(T(
-                                    _("Rebuild complete\nInserted: %1  Updated: %2  Skipped: %3"),
-                                    counts.inserted, counts.updated, counts.skipped), 5)
-                            end
-                        end,
-                    },
+                    { text = _("Setup Connection"), callback = function() self:configureConnection() end },
+                    { text = _("Local URL"), callback = function() self:configureServerUrl() end },
+                    { text = _("Remote URL"), callback = function() self:configureRemoteUrl() end },
+                    { text = _("Home SSID"), callback = function() self:configureHomeSSID() end },
+                    { text = _("Username"), callback = function() self:configureUsername() end },
+                    { text = _("Password"), callback = function() self:configurePassword() end },
+                    { text = _("Test Connection"), keep_menu_open = true, callback = function() self:testConnection() end },
                 },
             },
             {
@@ -6106,6 +6129,23 @@ function Grimmlink:addToMainMenu(menu_items)
                 callback = function() self:syncPendingNow(false) end,
             },
             {
+                text = _("Sync Shelf Now"),
+                callback = function() self:syncShelfNow(false) end,
+            },
+            {
+                text = _("Sync Metadata Now"),
+                callback = function()
+                    local context = self:getCurrentDocumentContext()
+                    if context and not self:isTrackingEnabledForContext(context) then
+                        self:showTrackingDisabledMessage()
+                        return
+                    end
+                    self:extractAndQueueCurrentMetadata("manual-metadata-sync", context)
+                    self:syncPendingMetadata(false)
+                end,
+            },
+            {
+                separator = true,
                 text = _("Pull Remote Progress"),
                 enabled_func = function()
                     return self.current_session ~= nil
@@ -6132,45 +6172,174 @@ function Grimmlink:addToMainMenu(menu_items)
             },
             {
                 separator = true,
-                text = _("Settings"),
+                text = _("Advanced Setting"),
                 sub_item_table = {
                     {
-                        text = _("Settings Tab"),
-                        help_text = _("Show or hide the dedicated GrimmLink tab in the menu bar.\nWhen hidden, GrimmLink settings remain accessible via Tools > GrimmLink.\nTakes effect after a restart."),
-                        keep_menu_open = true,
-                        checked_func = function()
-                            return self.settings_tab_enabled
-                        end,
-                        callback = function()
-                            local on = self.settings_tab_enabled
-                            self.settings_tab_enabled = not on
-                            self:saveSetting("settings_tab_enabled", self.settings_tab_enabled)
-                            UIManager:show(ConfirmBox:new{
-                                text = T(
-                                    _("The GrimmLink settings tab will be %1 after restart.\n\nRestart now?"),
-                                    on and _("hidden") or _("shown")
-                                ),
-                                ok_text     = _("Restart"),
-                                cancel_text = _("Later"),
-                                ok_callback = function()
-                                    if self.db and type(self.db.flush) == "function" then
-                                        pcall(self.db.flush, self.db)
-                                    end
-                                    UIManager:restartKOReader()
-                                end,
-                            })
-                        end,
-                    },
-                    {
-                        text = _("Connection"),
+                        text = _("Shelf Sync Settings"),
                         sub_item_table = {
-                            { text = _("Setup Connection"), callback = function() self:configureConnection() end },
-                            { text = _("Local URL"), callback = function() self:configureServerUrl() end },
-                            { text = _("Remote URL"), callback = function() self:configureRemoteUrl() end },
-                            { text = _("Home SSID"), callback = function() self:configureHomeSSID() end },
-                            { text = _("Username"), callback = function() self:configureUsername() end },
-                            { text = _("Password"), callback = function() self:configurePassword() end },
-                            { text = _("Test Connection"), keep_menu_open = true, callback = function() self:testConnection() end },
+                            {
+                                text = _("Enable Shelf Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.shelf_sync_enabled end,
+                                callback = function()
+                                    self.shelf_sync_enabled = not self.shelf_sync_enabled
+                                    self:saveSetting("shelf_sync_enabled", self.shelf_sync_enabled)
+                                end,
+                            },
+                            {
+                                text_func = function()
+                                    local regular_name = self.selected_regular_shelf_name and self.selected_regular_shelf_name ~= "" and self.selected_regular_shelf_name or _("(none)")
+                                    return T(_("Select Regular Shelf: %1"), regular_name)
+                                end,
+                                callback = function() self:showShelfPicker(false, "regular") end,
+                            },
+                            {
+                                text_func = function()
+                                    local magic_name = self.selected_magic_shelf_name and self.selected_magic_shelf_name ~= "" and self.selected_magic_shelf_name or _("(none)")
+                                    return T(_("Select Magic Shelf: %1"), magic_name)
+                                end,
+                                callback = function() self:showShelfPicker(false, "magic") end,
+                            },
+                            {
+                                text = _("Enable Regular Shelf Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.sync_regular_shelf_enabled == true end,
+                                callback = function()
+                                    self.sync_regular_shelf_enabled = not (self.sync_regular_shelf_enabled == true)
+                                    self:saveSetting("sync_regular_shelf_enabled", self.sync_regular_shelf_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Enable Magic Shelf Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.sync_magic_shelf_enabled == true end,
+                                callback = function()
+                                    self.sync_magic_shelf_enabled = not (self.sync_magic_shelf_enabled == true)
+                                    self:saveSetting("sync_magic_shelf_enabled", self.sync_magic_shelf_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Download Settings"),
+                                sub_item_table = {
+                                    {
+                                        text_func = function()
+                                            local dir = self.download_dir and self.download_dir ~= "" and self.download_dir or _("(auto)")
+                                            return T(_("Download Directory: %1"), dir)
+                                        end,
+                                        callback = function() self:configureDownloadDir() end,
+                                    },
+                                    {
+                                        text = _("Original Filenames"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.shelf_use_original_filename end,
+                                        callback = function()
+                                            self.shelf_use_original_filename = not self.shelf_use_original_filename
+                                            self:saveSetting("shelf_use_original_filename", self.shelf_use_original_filename)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Use Separate Magic Directory"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.use_separate_magic_download_dir == true end,
+                                        callback = function()
+                                            self.use_separate_magic_download_dir = not (self.use_separate_magic_download_dir == true)
+                                            self:saveSetting("use_separate_magic_download_dir", self.use_separate_magic_download_dir)
+                                        end,
+                                    },
+                                    {
+                                        text_func = function()
+                                            local dir = self.magic_download_dir and self.magic_download_dir ~= "" and self.magic_download_dir or _("(same as regular)")
+                                            return T(_("Magic Download Directory: %1"), dir)
+                                        end,
+                                        callback = function()
+                                            self:configureMagicDownloadDir()
+                                        end,
+                                    },
+                                },
+                            },
+                            {
+                                text = _("Sync Behavior"),
+                                sub_item_table = {
+                                    {
+                                        text = _("Auto-sync on Resume"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.auto_sync_shelf_on_resume end,
+                                        callback = function()
+                                            self.auto_sync_shelf_on_resume = not self.auto_sync_shelf_on_resume
+                                            self:saveSetting("auto_sync_shelf_on_resume", self.auto_sync_shelf_on_resume)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Fast Sync (Short Cache)"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.shelf_fast_sync_enabled end,
+                                        callback = function()
+                                            self.shelf_fast_sync_enabled = not self.shelf_fast_sync_enabled
+                                            self:saveSetting("shelf_fast_sync_enabled", self.shelf_fast_sync_enabled)
+                                        end,
+                                    },
+                                    {
+                                        text_func = function()
+                                            return T(_("Cache Duration: %1s"), tonumber(self.shelf_fast_sync_cache_seconds) or 15)
+                                        end,
+                                        callback = function()
+                                            self:showNumberInput(_("Fast Sync Cache Seconds"), self.shelf_fast_sync_cache_seconds or 15, _("Recommended: 10-30"), function(value)
+                                                local normalized = math.floor(tonumber(value) or 15)
+                                                if normalized < 0 then normalized = 0 end
+                                                if normalized > 120 then normalized = 120 end
+                                                self:saveSetting("shelf_fast_sync_cache_seconds", normalized)
+                                            end)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Two-way Delete Sync"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.two_way_shelf_delete_sync end,
+                                        callback = function()
+                                            self.two_way_shelf_delete_sync = not self.two_way_shelf_delete_sync
+                                            self:saveSetting("two_way_shelf_delete_sync", self.two_way_shelf_delete_sync)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Delete .sdr on Remove"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.delete_sdr_on_book_delete end,
+                                        callback = function()
+                                            self.delete_sdr_on_book_delete = not self.delete_sdr_on_book_delete
+                                            self:saveSetting("delete_sdr_on_book_delete", self.delete_sdr_on_book_delete)
+                                        end,
+                                    },
+                                },
+                            },
+                            {
+                                text = _("Shelf ID Tools"),
+                                sub_item_table = {
+                                    {
+                                        text = _("Add Shelf by ID"),
+                                        callback = function()
+                                            self:promptAndValidateShelfId(true)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Validate Shelf ID"),
+                                        callback = function()
+                                            self:promptAndValidateShelfId(false)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Set Legacy Shelf ID"),
+                                        callback = function()
+                                            self:showNumberInput(_("Shelf ID"), self.shelf_id or 0, _("Enter shelf id"), function(value)
+                                                self:saveSetting("shelf_id", value)
+                                                self:saveSetting("shelf_name", "")
+                                                self:saveSetting("shelf_type", "regular")
+                                                self:saveSetting("selected_regular_shelf_id", value)
+                                                self:saveSetting("selected_regular_shelf_name", "")
+                                            end)
+                                        end,
+                                    },
+                                },
+                            },
                         },
                     },
                     {
@@ -6259,18 +6428,6 @@ function Grimmlink:addToMainMenu(menu_items)
                                 keep_menu_open = true,
                                 callback = function() end,
                             },
-                            {
-                                text = _("Sync Metadata Now"),
-                                callback = function()
-                                    local context = self:getCurrentDocumentContext()
-                                    if context and not self:isTrackingEnabledForContext(context) then
-                                        self:showTrackingDisabledMessage()
-                                        return
-                                    end
-                                    self:extractAndQueueCurrentMetadata("manual-metadata-sync", context)
-                                    self:syncPendingMetadata(false)
-                                end,
-                            },
                         },
                     },
                     {
@@ -6331,31 +6488,6 @@ function Grimmlink:addToMainMenu(menu_items)
                             {
                                 text = _("Check for Updates Now"),
                                 callback = function() self:checkForUpdates(false) end,
-                            },
-                        },
-                    },
-                    {
-                        text = _("Shelf ID (Advanced)"),
-                        sub_item_table = {
-                            {
-                                text = _("Add Shelf by ID"),
-                                callback = function() self:promptAndValidateShelfId(true) end,
-                            },
-                            {
-                                text = _("Validate Shelf ID"),
-                                callback = function() self:promptAndValidateShelfId(false) end,
-                            },
-                            {
-                                text = _("Set Legacy Shelf ID"),
-                                callback = function()
-                                    self:showNumberInput(_("Shelf ID"), self.shelf_id or 0, _("Enter shelf id"), function(value)
-                                        self:saveSetting("shelf_id", value)
-                                        self:saveSetting("shelf_name", "")
-                                        self:saveSetting("shelf_type", "regular")
-                                        self:saveSetting("selected_regular_shelf_id", value)
-                                        self:saveSetting("selected_regular_shelf_name", "")
-                                    end)
-                                end,
                             },
                         },
                     },
@@ -6428,6 +6560,33 @@ function Grimmlink:addToMainMenu(menu_items)
                                 },
                             },
                         },
+                    },
+                    {
+                        text = _("Settings Tab"),
+                        help_text = _("Show or hide the dedicated GrimmLink tab in the menu bar.\nWhen hidden, GrimmLink settings remain accessible via Tools > GrimmLink.\nTakes effect after a restart."),
+                        keep_menu_open = true,
+                        checked_func = function()
+                            return self.settings_tab_enabled
+                        end,
+                        callback = function()
+                            local on = self.settings_tab_enabled
+                            self.settings_tab_enabled = not on
+                            self:saveSetting("settings_tab_enabled", self.settings_tab_enabled)
+                            UIManager:show(ConfirmBox:new{
+                                text = T(
+                                    _("The GrimmLink settings tab will be %1 after restart.\n\nRestart now?"),
+                                    on and _("hidden") or _("shown")
+                                ),
+                                ok_text     = _("Restart"),
+                                cancel_text = _("Later"),
+                                ok_callback = function()
+                                    if self.db and type(self.db.flush) == "function" then
+                                        pcall(self.db.flush, self.db)
+                                    end
+                                    UIManager:restartKOReader()
+                                end,
+                            })
+                        end,
                     },
                 },
             },

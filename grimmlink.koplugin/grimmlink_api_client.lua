@@ -454,6 +454,16 @@ local function normalizeShelfType(value)
 end
 
 function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks)
+    local normalized_annotations = nil
+    if type(annotations) == "table" and #annotations > 0 then
+        normalized_annotations = annotations
+    end
+
+    local normalized_bookmarks = nil
+    if type(bookmarks) == "table" and #bookmarks > 0 then
+        normalized_bookmarks = bookmarks
+    end
+
     return {
         schemaVersion = 1,
         syncMode = "incremental",
@@ -465,8 +475,8 @@ function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, f
         deviceId = device_id,
         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         rating = rating,
-        annotations = annotations or {},
-        bookmarks = bookmarks or {},
+        annotations = normalized_annotations,
+        bookmarks = normalized_bookmarks,
     }
 end
 
