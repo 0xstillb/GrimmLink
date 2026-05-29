@@ -627,7 +627,7 @@ describe("GrimmLink helper methods", function()
         assert.is_true(plugin:isPdfWebReaderBridgeEnabled())
     end)
 
-    it("builds native progress payloads without bridge-specific fields", function()
+    it("builds native EPUB progress payloads without bridge-specific fields or percentage", function()
         local plugin = newPlugin()
         local payload = plugin:prepareNativeProgressPayload({
             document = "hash-1",
@@ -650,7 +650,31 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(7, payload.bookId)
         assert.are.equal(9, payload.bookFileId)
         assert.are.equal("/4", payload.location)
+        assert.is_nil(payload.percentage)
+        assert.is_nil(payload.cfi)
         assert.is_nil(payload.rawKoreaderLocation)
+    end)
+
+    it("builds native fixed-page payloads with percentage intact", function()
+        local plugin = newPlugin()
+        local payload = plugin:prepareNativeProgressPayload({
+            document = "hash-pdf",
+            bookHash = "hash-pdf",
+            bookId = 17,
+            bookFileId = 19,
+            fileFormat = "PDF",
+            progress = "40",
+            location = "40",
+            percentage = 40.0,
+            currentPage = 40,
+            totalPages = 100,
+            device = "KOReader",
+            deviceId = "device-1",
+            timestamp = 123,
+        })
+
+        assert.are.equal("PDF", payload.fileFormat)
+        assert.are.equal(40.0, payload.percentage)
     end)
 
     it("builds PDF bridge payloads with page metadata only", function()
@@ -688,6 +712,24 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("PDF", plugin:getBookType("/books/manual.pdf"))
         assert.are.equal("CBX", plugin:getBookType("/books/comic.cbz"))
         assert.are.equal("EPUB", plugin:getBookType("/books/novel.epub"))
+        assert.is_true(plugin:isReflowableFormat("/books/novel.epub", "EPUB", "EPUB"))
+        assert.is_false(plugin:isReflowableFormat("/books/manual.pdf", "PDF", "PDF"))
+        assert.is_true(plugin:isFixedPageFormat("/books/comic.cbz", "CBX", "CBX"))
+        assert.is_false(plugin:isFixedPageFormat("/books/novel.epub", "EPUB", "EPUB"))
+    end)
+
+    it("prefers xpointer over numeric current position for reflowable snapshot", function()
+        local plugin = newPlugin()
+        plugin.ui.document.getCurrentPos = function()
+            return 1
+        end
+        plugin.ui.document.getXPointer = function()
+            return "/body/4/10"
+        end
+
+        local snapshot = plugin:getCurrentProgressSnapshot("hash-xp", "/books/demo.epub", 11, 12)
+        assert.are.equal("/body/4/10", snapshot.location)
+        assert.are.equal("/body/4/10", snapshot.progress)
     end)
 
     it("calculates a deterministic book hash", function()
@@ -825,6 +867,70 @@ describe("GrimmLink helper methods", function()
         assert.is_true(tostring(dialog.title):find("Web Reader") ~= nil)
         dialog.buttons[1][2].callback()
         assert.are.equal(80, jumped_page)
+    end)
+
+    it("applies remote EPUB progress using native location only", function()
+        local plugin = newPlugin()
+        local location_jump = nil
+        local page_jump = nil
+        plugin.jumpToLocation = function(_, location, opts)
+            location_jump = { location = location, opts = opts }
+            return true
+        end
+        plugin.jumpToPage = function(_, page)
+            page_jump = page
+            return true
+        end
+
+        local applied = plugin:applyRemoteProgress({
+            fileFormat = "EPUB",
+            progress = "/remote",
+            location = "/remote",
+            percentage = 80,
+            currentPage = 80,
+            totalPages = 100,
+        })
+
+        assert.is_true(applied)
+        assert.are.equal("/remote", location_jump.location)
+        assert.is_false(location_jump.opts.allow_numeric_page)
+        assert.is_nil(page_jump)
+    end)
+
+    it("rejects remote EPUB percentage fallback without native location", function()
+        local plugin = newPlugin()
+        plugin.jumpToPage = function()
+            return true
+        end
+
+        local applied = plugin:applyRemoteProgress({
+            fileFormat = "EPUB",
+            percentage = 80,
+            currentPage = 80,
+            totalPages = 100,
+        })
+
+        assert.is_false(applied)
+        assert.are.equal("No KOReader-native location available for this book.", plugin._last_progress_apply_error)
+    end)
+
+    it("rejects numeric-only remote EPUB location to avoid jumping to first page", function()
+        local plugin = newPlugin()
+        plugin.jumpToLocation = function()
+            return true
+        end
+
+        local applied = plugin:applyRemoteProgress({
+            fileFormat = "EPUB",
+            location = "1",
+            progress = "1",
+            percentage = 80,
+            currentPage = 80,
+            totalPages = 100,
+        })
+
+        assert.is_false(applied)
+        assert.are.equal("No KOReader-native location available for this book.", plugin._last_progress_apply_error)
     end)
 
     it("queues native progress while offline and replays it later", function()

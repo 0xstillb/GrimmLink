@@ -182,6 +182,93 @@ local function isPathUnderAnyDirectory(path, roots)
     return false
 end
 
+local function safeLfsAttributes(path)
+    if not path or path == "" or not lfs or type(lfs.attributes) ~= "function" then
+        return nil
+    end
+    local ok, attr = pcall(lfs.attributes, path)
+    if ok then
+        return attr
+    end
+    return nil
+end
+
+local function safeRequireAny(names)
+    if type(names) ~= "table" then
+        return nil, nil
+    end
+    for _, name in ipairs(names) do
+        local ok, mod = pcall(require, name)
+        if ok and mod then
+            return mod, name
+        end
+    end
+    return nil, nil
+end
+
+local function addUniquePathToList(file_paths, seen_paths, file_path)
+    if type(file_paths) ~= "table" then
+        return false
+    end
+    local normalized = normalizePathForCompare(file_path)
+    if not normalized then
+        return false
+    end
+    if type(seen_paths) == "table" then
+        if seen_paths[normalized] then
+            return false
+        end
+        seen_paths[normalized] = true
+    end
+    file_paths[#file_paths + 1] = file_path
+    return true
+end
+
+local function resolveCoverSpecs(cover_specs)
+    if type(cover_specs) == "table"
+        and tonumber(cover_specs.max_cover_w)
+        and tonumber(cover_specs.max_cover_h)
+        and tonumber(cover_specs.max_cover_w) > 0
+        and tonumber(cover_specs.max_cover_h) > 0 then
+        return {
+            max_cover_w = math.floor(tonumber(cover_specs.max_cover_w)),
+            max_cover_h = math.floor(tonumber(cover_specs.max_cover_h)),
+        }
+    end
+
+    local FileManager = safeRequireAny({
+        "apps/filemanager/filemanager",
+    })
+    local fm_instance = FileManager and FileManager.instance or nil
+    local chooser_specs = fm_instance and fm_instance.file_chooser and fm_instance.file_chooser.cover_specs or nil
+    if type(chooser_specs) == "table"
+        and tonumber(chooser_specs.max_cover_w)
+        and tonumber(chooser_specs.max_cover_h)
+        and tonumber(chooser_specs.max_cover_w) > 0
+        and tonumber(chooser_specs.max_cover_h) > 0 then
+        return {
+            max_cover_w = math.floor(tonumber(chooser_specs.max_cover_w)),
+            max_cover_h = math.floor(tonumber(chooser_specs.max_cover_h)),
+        }
+    end
+
+    local ok_device, Device = pcall(require, "device")
+    local screen = ok_device and Device and Device.screen or nil
+    local width = screen and screen.getWidth and tonumber(screen:getWidth()) or nil
+    local height = screen and screen.getHeight and tonumber(screen:getHeight()) or nil
+    if width and width > 0 and height and height > 0 then
+        return {
+            max_cover_w = math.max(96, math.floor(width * 0.42)),
+            max_cover_h = math.max(128, math.floor(height * 0.52)),
+        }
+    end
+
+    return {
+        max_cover_w = 256,
+        max_cover_h = 384,
+    }
+end
+
 -- Build a safe local filename for a book.
 -- Prefers the remote filename when use_original is true and remote_filename is set.
 -- Falls back to title + book_id + extension.
@@ -530,6 +617,8 @@ function ShelfSync:prepareSyncPlan(opts)
         delete_sdr          = delete_sdr,
         remote_delete_sync  = remote_delete_sync,
         sync_start          = sync_start,
+        downloaded_files_to_refresh = {},
+        downloaded_files_to_refresh_set = {},
     }
 
     -- Classify each book.
@@ -768,6 +857,11 @@ function ShelfSync:executeDownload(item, shelf_id, sync_start, download_opts)
         if self.db.saveBookCache then
             self.db:saveBookCache(item.dest_path, "", book_id, book.title, book.author)
         end
+        self:queueDownloadedFileForRefresh(
+            item.dest_path,
+            dl_opts.downloaded_files_to_refresh,
+            dl_opts.downloaded_files_to_refresh_set
+        )
         logger.info("GrimmLink ShelfSync: downloaded bookId=" .. tostring(book_id) .. " to " .. item.dest_path)
         return true
     else
@@ -796,7 +890,7 @@ function ShelfSync:startAsyncDownload(item)
 end
 
 --- Record a completed download in the database.
-function ShelfSync:recordDownload(item, shelf_id, sync_start)
+function ShelfSync:recordDownload(item, shelf_id, sync_start, downloaded_files_to_refresh, downloaded_files_to_refresh_set)
     if not item then return end
     local book = item.book or {}
     self.db:upsertShelfSyncEntry({
@@ -818,7 +912,117 @@ function ShelfSync:recordDownload(item, shelf_id, sync_start)
     if self.db.saveBookCache then
         self.db:saveBookCache(item.dest_path, "", item.book_id, book.title, book.author)
     end
+    self:queueDownloadedFileForRefresh(item.dest_path, downloaded_files_to_refresh, downloaded_files_to_refresh_set)
     logger.info("GrimmLink ShelfSync: downloaded bookId=" .. tostring(item.book_id) .. " to " .. item.dest_path)
+end
+
+-- Add a downloaded file to the post-sync refresh queue.
+function ShelfSync:queueDownloadedFileForRefresh(file_path, file_paths, seen_paths)
+    return addUniquePathToList(file_paths, seen_paths, file_path)
+end
+
+-- Refresh KOReader cached metadata/cover for a single file.
+-- Returns: ok (bool), method_name (string), error_message (string|nil)
+function ShelfSync:refreshBookInfoForFile(file_path, opts)
+    opts = type(opts) == "table" and opts or {}
+    local normalized = normalizePathForCompare(file_path)
+    if not normalized then
+        return false, "invalid_path", "invalid_path"
+    end
+
+    local attr = safeLfsAttributes(normalized)
+    if not attr or attr.mode ~= "file" then
+        return false, "missing_file", "missing_file"
+    end
+
+    -- Keep in-memory file-browser cache coherent if BookList is available.
+    local BookList = safeRequireAny({
+        "ui/widget/booklist",
+    })
+    if BookList and type(BookList.resetBookInfoCache) == "function" then
+        pcall(BookList.resetBookInfoCache, normalized)
+    end
+
+    local FileManager = safeRequireAny({
+        "apps/filemanager/filemanager",
+    })
+    local fm_instance = FileManager and FileManager.instance or nil
+    if fm_instance and fm_instance.file_chooser and type(fm_instance.file_chooser.resetBookInfoCache) == "function" then
+        pcall(fm_instance.file_chooser.resetBookInfoCache, fm_instance.file_chooser, normalized)
+    end
+
+    local cover_specs = resolveCoverSpecs(opts.cover_specs)
+    local BookInfoManager = safeRequireAny({
+        "bookinfomanager",
+        "plugins/coverbrowser.koplugin/bookinfomanager",
+    })
+    if BookInfoManager then
+        if type(BookInfoManager.deleteBookInfo) == "function" then
+            pcall(BookInfoManager.deleteBookInfo, BookInfoManager, normalized)
+        end
+        if type(BookInfoManager.extractBookInfo) == "function" then
+            local ok_extract, extracted_or_err = pcall(BookInfoManager.extractBookInfo, BookInfoManager, normalized, cover_specs)
+            if ok_extract and extracted_or_err ~= false then
+                return true, "BookInfoManager.extractBookInfo", nil
+            end
+            local reason = ok_extract and "extract_failed" or tostring(extracted_or_err)
+            return false, "BookInfoManager.extractBookInfo", reason
+        end
+        if type(BookInfoManager.getBookInfo) == "function" then
+            local ok_info, info_or_err = pcall(BookInfoManager.getBookInfo, BookInfoManager, normalized, true)
+            if ok_info and info_or_err then
+                return true, "BookInfoManager.getBookInfo", nil
+            end
+            local reason = ok_info and "get_bookinfo_failed" or tostring(info_or_err)
+            return false, "BookInfoManager.getBookInfo", reason
+        end
+    end
+
+    -- Fallback: touch metadata via FileManagerBookInfo so KOReader can at least parse props.
+    local FileManagerBookInfo = safeRequireAny({
+        "apps/filemanager/filemanagerbookinfo",
+    })
+    if FileManagerBookInfo and type(FileManagerBookInfo.getDocProps) == "function" then
+        local shim = {
+            ui = {},
+            getCoverImage = type(FileManagerBookInfo.getCoverImage) == "function" and FileManagerBookInfo.getCoverImage or nil,
+        }
+        local ok_props, props_or_err = pcall(FileManagerBookInfo.getDocProps, shim, normalized)
+        if ok_props and props_or_err then
+            return true, "FileManagerBookInfo.getDocProps", nil
+        end
+        local reason = ok_props and "doc_props_unavailable" or tostring(props_or_err)
+        return false, "FileManagerBookInfo.getDocProps", reason
+    end
+
+    return false, "unavailable", "bookinfo_api_unavailable"
+end
+
+-- Refresh KOReader cached metadata/cover for a list of files.
+-- Returns: { total, refreshed, failed, errors = {} }
+function ShelfSync:refreshBookInfoForDownloadedFiles(file_paths, opts)
+    opts = type(opts) == "table" and opts or {}
+    local counts = { total = 0, refreshed = 0, failed = 0, errors = {} }
+    if type(file_paths) ~= "table" then
+        return counts
+    end
+
+    for _, file_path in ipairs(file_paths) do
+        counts.total = counts.total + 1
+        local ok_refresh, method_name, refresh_err = self:refreshBookInfoForFile(file_path, opts)
+        if ok_refresh then
+            counts.refreshed = counts.refreshed + 1
+        else
+            counts.failed = counts.failed + 1
+            counts.errors[#counts.errors + 1] = {
+                file_path = file_path,
+                method = method_name,
+                error = refresh_err,
+            }
+        end
+    end
+
+    return counts
 end
 
 --- Phase 3: Delete local files for books removed from the remote shelf.
@@ -897,7 +1101,10 @@ function ShelfSync:syncShelf(opts)
     -- Download sequentially (blocking — same behaviour as before).
     for i, item in ipairs(plan.download_queue) do
         progress("Downloading " .. i .. "/" .. #plan.download_queue .. ": " .. (item.title or "?"))
-        local ok, err = self:executeDownload(item, plan.cleanup.shelf_id, plan.cleanup.sync_start)
+        local ok, err = self:executeDownload(item, plan.cleanup.shelf_id, plan.cleanup.sync_start, {
+            downloaded_files_to_refresh = plan.cleanup and plan.cleanup.downloaded_files_to_refresh or nil,
+            downloaded_files_to_refresh_set = plan.cleanup and plan.cleanup.downloaded_files_to_refresh_set or nil,
+        })
         if ok then
             result.synced = result.synced + 1
         else
@@ -908,6 +1115,16 @@ function ShelfSync:syncShelf(opts)
 
     -- Phase 3: cleanup.
     self:runCleanupPhase(plan.cleanup, result, progress)
+
+    -- Blocking fallback path: refresh metadata/cover cache for newly downloaded files.
+    if plan.cleanup and type(plan.cleanup.downloaded_files_to_refresh) == "table"
+        and #plan.cleanup.downloaded_files_to_refresh > 0 then
+        local refresh_counts = self:refreshBookInfoForDownloadedFiles(plan.cleanup.downloaded_files_to_refresh, {})
+        result.bookinfo_refresh = refresh_counts
+        if refresh_counts.failed > 0 then
+            result.errors[#result.errors + 1] = "Some downloaded files could not refresh cached book information"
+        end
+    end
 
     return result
 end

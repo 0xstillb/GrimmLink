@@ -2,6 +2,14 @@
 
 # [Unreleased]
 
+### Features
+- Added automatic KOReader book info / cover cache refresh after Shelf Sync downloads so newly synced books show covers without manual refresh.
+
+### Fixes
+- KOReader native sync policy for EPUB/reflowable formats now treats KOReader-native location/progress as source of truth and suppresses reflowable percentage from native progress payloads by default (`send_reflowable_percentage=false`).
+- Remote EPUB apply path now skips percentage-to-page fallback and requires KOReader-native location; if missing, GrimmLink shows: `No KOReader-native location available for this book.`
+- Fixed-page formats (PDF/CBX family) keep existing page/percentage sync behavior, and PDF web-reader bridge remains PDF-only.
+
 # [v1.4.0]
 
 ### Features

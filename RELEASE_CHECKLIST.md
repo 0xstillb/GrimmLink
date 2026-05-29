@@ -118,41 +118,41 @@ Fill this table during device test runs.
 
 | ID | Area | Test Case | Result | Evidence / Log Ref | Notes |
 |---|---|---|---|---|---|
-| T00 | Baseline | Pull latest `ghcr.io/0xstillb/grimmory:develop` and restart stack |  |  |  |
-| T01 | Baseline | `grimmory` container status is `healthy` |  |  |  |
-| T02 | Baseline | No immediate startup exception in last 2m logs |  |  |  |
-| T03 | Core | GrimmLink plugin loads without crash |  |  |  |
-| T04 | Core | `Test Connection` works |  |  |  |
-| T05 | Core | Progress push works |  |  |  |
-| T06 | Core | Progress pull works |  |  |  |
-| T07 | Core | Conflict prompt appears/works |  |  |  |
-| T08 | Core | Long-press `Sync This Book` works |  |  |  |
-| T09 | Core | Long-press `Toggle Tracking` works |  |  |  |
-| T10 | Core | Tracking disabled skips auto sync/session/metadata |  |  |  |
-| T11 | Session | Reading session sync works online |  |  |  |
-| T12 | Session | Session queues while offline |  |  |  |
-| T13 | Session | Queued sessions flush when online |  |  |  |
-| T14 | Metadata | `Preview Metadata` works |  |  |  |
-| T15 | Metadata | `Sync Metadata Now` works |  |  |  |
-| T16 | Metadata | `metadata_sync_enabled` toggle works |  |  |  |
-| T17 | Metadata | `rating_sync_enabled` toggle works |  |  |  |
-| T18 | Metadata | `annotations_sync_enabled` toggle works |  |  |  |
-| T19 | Metadata | `bookmarks_sync_enabled` toggle works |  |  |  |
-| T20 | Metadata | Failed metadata remains pending |  |  |  |
+| T00 | Baseline | Pull latest `ghcr.io/0xstillb/grimmory:develop` and restart stack | pass |  |  |
+| T01 | Baseline | `grimmory` container status is `healthy` | pass |  |  |
+| T02 | Baseline | No immediate startup exception in last 2m logs | pass |  |  |
+| T03 | Core | GrimmLink plugin loads without crash | pass |  |  |
+| T04 | Core | `Test Connection` works | pass |  |  |
+| T05 | Core | Progress push works | pass |  |  |
+| T06 | Core | Progress pull works | pass |  |  |
+| T07 | Core | Conflict prompt appears/works | pass |  |  |
+| T08 | Core | Long-press `Sync This Book` works | pass |  |  |
+| T09 | Core | Long-press `Toggle Tracking` works | pass |  |  |
+| T10 | Core | Tracking disabled skips auto sync/session/metadata | pass |  |  |
+| T11 | Session | Reading session sync works online | pass |  |  |
+| T12 | Session | Session queues while offline | pass |  |  |
+| T13 | Session | Queued sessions flush when online | pass |  |  |
+| T14 | Metadata | `Preview Metadata` works | pass |  |  |
+| T15 | Metadata | `Sync Metadata Now` works | pass |  |  |
+| T16 | Metadata | `metadata_sync_enabled` toggle works | pass |  |  |
+| T17 | Metadata | `rating_sync_enabled` toggle works | pass |  |  |
+| T18 | Metadata | `annotations_sync_enabled` toggle works | pass |  |  |
+| T19 | Metadata | `bookmarks_sync_enabled` toggle works | pass |  |  |
+| T20 | Metadata | Failed metadata remains pending | pass |  |  |
 | T21 | Metadata | Logs/export redact note/highlight/auth key/token/payload_json |  |  |  |
-| T22 | Shelf | Regular shelf sync works |  |  |  |
-| T23 | Shelf | Magic shelf sync works |  |  |  |
-| T24 | Shelf | Regular+Magic both enabled flow works without stuck state |  |  |  |
-| T25 | Shelf | Same book in multiple shelves downloads once/reuses file |  |  |  |
-| T26 | Shelf | Removed from one shelf but kept by other shelf -> file remains |  |  |  |
-| T27 | Shelf | No server/library file deletion behavior |  |  |  |
+| T22 | Shelf | Regular shelf sync works | pass |  |  |
+| T23 | Shelf | Magic shelf sync works | pass |  |  |
+| T24 | Shelf | Regular+Magic both enabled flow works without stuck state | pass |  |  |
+| T25 | Shelf | Same book in multiple shelves downloads once/reuses file | pass |  |  |
+| T26 | Shelf | Removed from one shelf but kept by other shelf -> file remains | pass |  |  |
+| T27 | Shelf | No server/library file deletion behavior | pass |  |  |
 | T28 | Download | Low disk space path: item skipped, sync continues |  |  |  |
 | T29 | Download | No disk-space API path: sync continues without crash |  |  |  |
-| T30 | Reader | EPUB downloaded via shelf opens in KOReader |  |  |  |
-| T31 | Reader | PDF downloaded via shelf opens in KOReader |  |  |  |
-| T32 | Network | `ask_wifi_before_sync` behavior works |  |  |  |
-| T33 | Network | `sync_on_network_connected` behavior works |  |  |  |
-| T34 | Network | `network_sync_cooldown_seconds` respected |  |  |  |
+| T30 | Reader | EPUB downloaded via shelf opens in KOReader | pass |  |  |
+| T31 | Reader | PDF downloaded via shelf opens in KOReader | pass |  |  |
+| T32 | Network | `ask_wifi_before_sync` behavior works | pass |  |  |
+| T33 | Network | `sync_on_network_connected` behavior works | pass |  |  |
+| T34 | Network | `network_sync_cooldown_seconds` respected | pass |  |  |
 | T35 | Network | Duplicate sync guard prevents overlap |  |  |  |
 | T36 | Network | Local/remote URL switching works |  |  |  |
 | T37 | Network | Home SSID logic works |  |  |  |

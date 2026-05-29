@@ -87,6 +87,8 @@ local DEFAULTS = {
     two_way_shelf_delete_sync = false,
     shelf_use_original_filename = true,
     delete_sdr_on_book_delete = false,
+    refresh_bookinfo_after_shelf_sync = true,
+    refresh_bookinfo_batch_size = 20,
     auto_update_enabled = false,
     check_update_on_startup = false,
     update_channel = "stable",
@@ -98,12 +100,35 @@ local DEFAULTS = {
     annotations_sync_enabled = true,
     bookmarks_sync_enabled = true,
     metadata_retry_max = 5,
+    send_reflowable_percentage = false,
 }
 
 local DISK_SPACE_SAFETY_MARGIN_BYTES = 20 * 1024 * 1024
 local READ_STATUS_CAPABILITY_CACHE_SECONDS = 300
 local DIR_PICKER_MAX_SCAN_ENTRIES = 500
 local DIR_PICKER_MAX_SHOW_DIRS = 60
+
+local FIXED_PAGE_FORMATS = {
+    PDF = true,
+    CBX = true,
+    CBZ = true,
+    CBR = true,
+    CB7 = true,
+    DJVU = true,
+    DJV = true,
+}
+
+local REFLOWABLE_FORMATS = {
+    EPUB = true,
+    MOBI = true,
+    AZW = true,
+    AZW3 = true,
+    FB2 = true,
+    HTML = true,
+    HTM = true,
+    TXT = true,
+    DOCX = true,
+}
 
 local function safeToString(value)
     if value == nil then
@@ -114,6 +139,17 @@ end
 
 local function isNonEmpty(value)
     return value ~= nil and tostring(value) ~= ""
+end
+
+local function isNumericOnlyToken(value)
+    if value == nil then
+        return false
+    end
+    local token = tostring(value):gsub("^%s+", ""):gsub("%s+$", "")
+    if token == "" then
+        return false
+    end
+    return token:match("^[+-]?%d+%.?%d*$") ~= nil
 end
 
 local function cloneTable(source)
@@ -1151,10 +1187,69 @@ function Grimmlink:getBookType(file_path)
     if extension == "PDF" then
         return "PDF"
     end
-    if extension == "CBZ" or extension == "CBR" then
+    if extension == "CBZ" or extension == "CBR" or extension == "CB7" then
         return "CBX"
     end
+    if extension == "DJVU" or extension == "DJV" then
+        return "DJVU"
+    end
+    if extension == "MOBI" then
+        return "MOBI"
+    end
+    if extension == "AZW" or extension == "AZW3" then
+        return "AZW3"
+    end
+    if extension == "FB2" then
+        return "FB2"
+    end
+    if extension == "HTML" or extension == "HTM" then
+        return "HTML"
+    end
+    if extension == "TXT" then
+        return "TXT"
+    end
+    if extension == "DOCX" then
+        return "DOCX"
+    end
     return "EPUB"
+end
+
+function Grimmlink:normalizeFormatToken(value)
+    if value == nil then
+        return nil
+    end
+    local token = safeToString(value):gsub("^%s+", ""):gsub("%s+$", "")
+    if token == "" then
+        return nil
+    end
+    token = token:upper()
+    if token == "CBZ" or token == "CBR" or token == "CB7" then
+        return "CBX"
+    end
+    return token
+end
+
+function Grimmlink:isFixedPageFormat(file_path, book_type, file_format)
+    local format = self:normalizeFormatToken(file_format)
+        or self:normalizeFormatToken(book_type)
+        or self:normalizeFormatToken(self:getBookType(file_path))
+    return format ~= nil and FIXED_PAGE_FORMATS[format] == true
+end
+
+function Grimmlink:isReflowableFormat(file_path, book_type, file_format)
+    if self:isFixedPageFormat(file_path, book_type, file_format) then
+        return false
+    end
+    local format = self:normalizeFormatToken(file_format)
+        or self:normalizeFormatToken(book_type)
+        or self:normalizeFormatToken(self:getBookType(file_path))
+    if format == nil then
+        return true
+    end
+    if REFLOWABLE_FORMATS[format] == true then
+        return true
+    end
+    return not FIXED_PAGE_FORMATS[format]
 end
 
 function Grimmlink:calculateBookHash(file_path)
@@ -1221,33 +1316,44 @@ function Grimmlink:getCurrentProgressSnapshot(file_hash, file_path, book_id, boo
     local current_page, total_pages = self:getCurrentPageInfo()
     local document = self.ui and self.ui.document or nil
     local file_format = self:getBookType(file_path)
+    local is_fixed_page = self:isFixedPageFormat(file_path, file_format, file_format)
+    local is_reflowable = self:isReflowableFormat(file_path, file_format, file_format)
+    local allow_reflowable_percentage = self.send_reflowable_percentage == true
     local raw_location = nil
 
     if document then
         local position = safeMethodCall(document, "getCurrentPos")
         local xpointer = safeMethodCall(document, "getXPointer")
-        if file_format == "PDF" and current_page then
+        if is_fixed_page and current_page and file_format == "PDF" then
             raw_location = tostring(current_page)
         else
-            raw_location = position or xpointer
+            raw_location = xpointer
             if raw_location == nil then
                 raw_location = safeMethodCall(document, "getCurrentLocation")
             end
             if raw_location == nil then
-                raw_location = xpointer or position
+                raw_location = position
+            end
+            if is_reflowable and isNumericOnlyToken(raw_location) then
+                raw_location = nil
             end
         end
     end
 
-    if raw_location == nil and self.ui and self.ui.doc_settings then
-        raw_location = tryReadSetting(self.ui.doc_settings, "last_xpointer")
+    if (raw_location == nil or (is_reflowable and isNumericOnlyToken(raw_location))) and self.ui and self.ui.doc_settings then
+        local last_xpointer = tryReadSetting(self.ui.doc_settings, "last_xpointer")
+        if isNonEmpty(last_xpointer) and (not is_reflowable or not isNumericOnlyToken(last_xpointer)) then
+            raw_location = last_xpointer
+        end
     end
     if raw_location == nil then
-        raw_location = current_page or 0
+        if is_fixed_page and current_page then
+            raw_location = current_page
+        end
     end
 
     local percentage = nil
-    if current_page and total_pages and total_pages > 0 then
+    if current_page and total_pages and total_pages > 0 and (is_fixed_page or allow_reflowable_percentage) then
         percentage = normalizePercent((current_page / total_pages) * 100)
     end
 
@@ -1269,7 +1375,7 @@ function Grimmlink:getCurrentProgressSnapshot(file_hash, file_path, book_id, boo
         file_path = file_path,
     }
 
-    if snapshot.progress == "" and snapshot.currentPage then
+    if snapshot.progress == "" and snapshot.currentPage and is_fixed_page then
         snapshot.progress = tostring(snapshot.currentPage)
     end
     if snapshot.location == "" and snapshot.progress ~= "" then
@@ -1300,7 +1406,22 @@ function Grimmlink:normalizeRemoteProgress(remote_progress)
     normalized.progress = isNonEmpty(normalized.progress) and tostring(normalized.progress)
         or normalized.location
     normalized.source = normalized.source or normalized.device or normalized.fileFormat
-    return normalized
+    return self:applyFormatProgressPolicy(normalized)
+end
+
+function Grimmlink:applyFormatProgressPolicy(snapshot)
+    if not snapshot or type(snapshot) ~= "table" then
+        return snapshot
+    end
+
+    if self:isReflowableFormat(snapshot.file_path, snapshot.bookType, snapshot.fileFormat) then
+        if self.send_reflowable_percentage ~= true then
+            snapshot.percentage = nil
+        end
+        snapshot.cfi = nil
+    end
+
+    return snapshot
 end
 
 function Grimmlink:hasMeaningfulProgress(snapshot)
@@ -1317,15 +1438,21 @@ function Grimmlink:progressDifferenceExceeded(left, right)
         return false
     end
 
-    local percent_delta = absDifference(left.percentage, right.percentage) or 0
-    if percent_delta >= (tonumber(self.threshold_percent) or DEFAULTS.threshold_percent) then
-        return true
-    end
+    local left_reflowable = self:isReflowableFormat(left.file_path, left.bookType, left.fileFormat)
+    local right_reflowable = self:isReflowableFormat(right.file_path, right.bookType, right.fileFormat)
+    local both_reflowable = left_reflowable and right_reflowable
 
-    if left.currentPage ~= nil and right.currentPage ~= nil then
-        local page_delta = math.abs((tonumber(left.currentPage) or 0) - (tonumber(right.currentPage) or 0))
-        if page_delta >= (tonumber(self.threshold_pages) or DEFAULTS.threshold_pages) then
+    if not both_reflowable then
+        local percent_delta = absDifference(left.percentage, right.percentage) or 0
+        if percent_delta >= (tonumber(self.threshold_percent) or DEFAULTS.threshold_percent) then
             return true
+        end
+
+        if left.currentPage ~= nil and right.currentPage ~= nil then
+            local page_delta = math.abs((tonumber(left.currentPage) or 0) - (tonumber(right.currentPage) or 0))
+            if page_delta >= (tonumber(self.threshold_pages) or DEFAULTS.threshold_pages) then
+                return true
+            end
         end
     end
 
@@ -1357,6 +1484,9 @@ function Grimmlink:buildStoredLocalSnapshot(state)
         currentPage = state.local_current_page,
         totalPages = state.local_total_pages,
         timestamp = state.local_timestamp,
+        bookType = state.book_type,
+        fileFormat = state.book_type,
+        file_path = state.file_path,
     }
 end
 
@@ -1374,6 +1504,9 @@ function Grimmlink:buildStoredRemoteSnapshot(state)
         device = state.remote_device,
         deviceId = state.remote_device_id,
         source = state.remote_source,
+        bookType = state.book_type,
+        fileFormat = state.book_type,
+        file_path = state.file_path,
     }
 end
 
@@ -1539,12 +1672,16 @@ function Grimmlink:jumpToPage(page_number)
     return false
 end
 
-function Grimmlink:jumpToLocation(location)
+function Grimmlink:jumpToLocation(location, opts)
+    opts = opts or {}
     if location == nil or tostring(location) == "" then
         return false
     end
 
-    local numeric_page = tonumber(location)
+    local numeric_page = nil
+    if opts.allow_numeric_page ~= false then
+        numeric_page = tonumber(location)
+    end
     if numeric_page then
         return self:jumpToPage(numeric_page)
     end
@@ -1588,8 +1725,29 @@ function Grimmlink:applyRemoteProgress(remote_snapshot, opts)
         return false
     end
 
-    local target_page = self:getRemotePageTarget(remote_snapshot)
+    self._last_progress_apply_error = nil
     local file_format = remote_snapshot.fileFormat and tostring(remote_snapshot.fileFormat):upper() or nil
+    local book_type = remote_snapshot.bookType or file_format
+    local is_reflowable = self:isReflowableFormat(remote_snapshot.file_path, book_type, file_format)
+
+    if is_reflowable then
+        local location_value = isNonEmpty(remote_snapshot.location) and tostring(remote_snapshot.location) or nil
+        local progress_value = isNonEmpty(remote_snapshot.progress) and tostring(remote_snapshot.progress) or nil
+        local location_is_native = location_value and not isNumericOnlyToken(location_value)
+        local progress_is_native = progress_value and not isNumericOnlyToken(progress_value)
+        local native_location = location_is_native and location_value
+            or (progress_is_native and progress_value or nil)
+        if not isNonEmpty(native_location) then
+            self._last_progress_apply_error = _("No KOReader-native location available for this book.")
+            return false
+        end
+        if self:jumpToLocation(native_location, { allow_numeric_page = false }) then
+            return true
+        end
+        return false
+    end
+
+    local target_page = self:getRemotePageTarget(remote_snapshot)
     local prefer_page = opts.prefer_page == true or file_format == "PDF"
 
     if prefer_page and target_page and self:jumpToPage(target_page) then
@@ -1680,7 +1838,9 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
             self:rememberRemoteSnapshot(file_hash, remote_snapshot, mode == "pdf" and "pdf-remote-use" or "remote-use")
             self:rememberLocalSnapshot(file_hash, remote_snapshot, mode == "pdf" and "pdf-remote-use" or "remote-use")
         else
-            self:showMessage(_("Failed to jump to remote position"), 4)
+            local message = self._last_progress_apply_error or _("Failed to jump to remote position")
+            self._last_progress_apply_error = nil
+            self:showMessage(message, 4)
         end
     end
     local local_action = function()
@@ -1739,7 +1899,7 @@ function Grimmlink:classifyApiOutcome(code, response)
 end
 
 function Grimmlink:prepareNativeProgressPayload(snapshot)
-    return {
+    local payload = {
         document = snapshot.document,
         bookHash = snapshot.bookHash,
         bookId = snapshot.bookId,
@@ -1753,6 +1913,22 @@ function Grimmlink:prepareNativeProgressPayload(snapshot)
         device = snapshot.device,
         deviceId = snapshot.deviceId,
         timestamp = snapshot.timestamp,
+    }
+    self:applyFormatProgressPolicy(payload)
+    return {
+        document = payload.document,
+        bookHash = payload.bookHash,
+        bookId = payload.bookId,
+        bookFileId = payload.bookFileId,
+        fileFormat = payload.fileFormat,
+        progress = payload.progress,
+        location = payload.location,
+        percentage = payload.percentage,
+        currentPage = payload.currentPage,
+        totalPages = payload.totalPages,
+        device = payload.device,
+        deviceId = payload.deviceId,
+        timestamp = payload.timestamp,
     }
 end
 
@@ -2560,9 +2736,11 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id, book_f
         remote_snapshot.bookId = remote_snapshot.bookId or book_id
         remote_snapshot.bookFileId = remote_snapshot.bookFileId or book_file_id
         remote_snapshot.fileFormat = remote_snapshot.fileFormat or self:getBookType(file_path)
+        remote_snapshot.bookType = remote_snapshot.bookType or remote_snapshot.fileFormat
         remote_snapshot.document = remote_snapshot.document or file_hash
         remote_snapshot.file_path = file_path
         remote_snapshot.source = remote_snapshot.source or remote_snapshot.device or "KOReader"
+        self:applyFormatProgressPolicy(remote_snapshot)
     end
 
     self:rememberLocalSnapshot(file_hash, local_snapshot, "open-local")
@@ -2627,9 +2805,11 @@ function Grimmlink:manualPullProgress()
     remote_snapshot.bookId      = remote_snapshot.bookId      or book_id
     remote_snapshot.bookFileId  = remote_snapshot.bookFileId  or book_file_id
     remote_snapshot.fileFormat  = remote_snapshot.fileFormat  or self:getBookType(file_path)
+    remote_snapshot.bookType    = remote_snapshot.bookType    or remote_snapshot.fileFormat
     remote_snapshot.document    = remote_snapshot.document    or file_hash
     remote_snapshot.file_path   = file_path
     remote_snapshot.source      = remote_snapshot.source or remote_snapshot.device or "KOReader"
+    self:applyFormatProgressPolicy(remote_snapshot)
 
     local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id, book_file_id)
 
@@ -4483,6 +4663,8 @@ function Grimmlink:syncShelfNow(silent, opts)
     local result = plan.result
     local queue  = plan.download_queue or {}
     local total  = #queue
+    local downloaded_files_to_refresh = plan.cleanup and plan.cleanup.downloaded_files_to_refresh or {}
+    local downloaded_files_to_refresh_set = plan.cleanup and plan.cleanup.downloaded_files_to_refresh_set or {}
     result.shelf_type = active_shelf_type
     result.download_dir = active_download_dir
 
@@ -4506,6 +4688,7 @@ function Grimmlink:syncShelfNow(silent, opts)
             self.shelf_sync:upsertBookInfoCache(nil)
         end)
         result.metadata_index_path = index_path
+        result.bookinfo_refresh = { total = 0, refreshed = 0, failed = 0 }
         self._shelf_sync_running = false
         self._active_sync_shelf_type = nil
         self._active_sync_download_dir = nil
@@ -4549,6 +4732,138 @@ function Grimmlink:syncShelfNow(silent, opts)
         return info
     end
 
+    local function finalizeSyncState()
+        grimmlink_self._shelf_sync_running = false
+        grimmlink_self._active_sync_shelf_type = nil
+        grimmlink_self._active_sync_download_dir = nil
+        if not silent and not suppress_completion_summary then
+            grimmlink_self:_showSyncCompletionSummary(result)
+        end
+        grimmlink_self:_broadcastSyncResult(result)
+        if followup_selection and followup_selection.id and not grimmlink_self._shelf_sync_cancelled then
+            UIManager:scheduleIn(0.2, function()
+                grimmlink_self:syncShelfNow(silent, {
+                    selection_override = followup_selection,
+                    suppress_completion_summary = false,
+                    on_complete = on_complete,
+                })
+            end)
+            return
+        end
+        if on_complete then
+            pcall(on_complete, result)
+        end
+    end
+
+    local function runPostSyncBookInfoRefresh(done_callback)
+        if type(done_callback) ~= "function" then
+            return
+        end
+
+        if not grimmlink_self.refresh_bookinfo_after_shelf_sync then
+            result.bookinfo_refresh = { total = 0, refreshed = 0, failed = 0, skipped = true }
+            done_callback()
+            return
+        end
+        if type(downloaded_files_to_refresh) ~= "table" or #downloaded_files_to_refresh == 0 then
+            result.bookinfo_refresh = { total = 0, refreshed = 0, failed = 0 }
+            done_callback()
+            return
+        end
+        if not grimmlink_self.shelf_sync or type(grimmlink_self.shelf_sync.refreshBookInfoForFile) ~= "function" then
+            result.bookinfo_refresh = {
+                total = #downloaded_files_to_refresh,
+                refreshed = 0,
+                failed = #downloaded_files_to_refresh,
+                skipped = true,
+                error = "refresh_api_unavailable",
+            }
+            logger.warn("GrimmLink: shelf sync book-info refresh API unavailable")
+            done_callback()
+            return
+        end
+
+        local refresh_batch_size = math.floor(tonumber(grimmlink_self.refresh_bookinfo_batch_size) or 20)
+        if refresh_batch_size < 1 then refresh_batch_size = 1 end
+        if refresh_batch_size > 200 then refresh_batch_size = 200 end
+
+        local refresh_result = { total = #downloaded_files_to_refresh, refreshed = 0, failed = 0, errors = {} }
+        local refresh_index = 0
+        local function rebuildSimpleUiMetadataCache()
+            if not grimmlink_self.shelf_sync or type(grimmlink_self.shelf_sync.rebuildBookInfoCacheFromIndex) ~= "function" then
+                return nil
+            end
+            local rebuild_download_dir = active_download_dir
+            if type(grimmlink_self.shelf_sync.resolveDownloadDir) == "function" then
+                rebuild_download_dir = grimmlink_self.shelf_sync:resolveDownloadDir(active_download_dir)
+            end
+            local ok_rebuild, counts_or_err = pcall(
+                grimmlink_self.shelf_sync.rebuildBookInfoCacheFromIndex,
+                grimmlink_self.shelf_sync,
+                rebuild_download_dir
+            )
+            if ok_rebuild then
+                return counts_or_err
+            end
+            return { error = safeToString(counts_or_err) }
+        end
+
+        if not silent then
+            grimmlink_self:showShelfSyncMessage(_("Refreshing book info..."), 2)
+        end
+
+        local function processNextBatch()
+            if grimmlink_self._shelf_sync_cancelled then
+                result.bookinfo_refresh = refresh_result
+                done_callback()
+                return
+            end
+
+            local batch_processed = 0
+            while refresh_index < #downloaded_files_to_refresh and batch_processed < refresh_batch_size do
+                refresh_index = refresh_index + 1
+                batch_processed = batch_processed + 1
+                local file_path = downloaded_files_to_refresh[refresh_index]
+                local ok_refresh, method_name, refresh_err = grimmlink_self.shelf_sync:refreshBookInfoForFile(file_path, {})
+                if ok_refresh then
+                    refresh_result.refreshed = refresh_result.refreshed + 1
+                else
+                    refresh_result.failed = refresh_result.failed + 1
+                    refresh_result.errors[#refresh_result.errors + 1] = {
+                        file_path = file_path,
+                        method = method_name,
+                        error = refresh_err,
+                    }
+                end
+            end
+
+            if not silent then
+                grimmlink_self:showShelfSyncMessage(T(_("Refreshing covers %1 / %2"), refresh_index, refresh_result.total), 2)
+            end
+
+            if refresh_index >= #downloaded_files_to_refresh then
+                result.bookinfo_refresh = refresh_result
+                result.simpleui_cache_rebuild = rebuildSimpleUiMetadataCache()
+                if not silent then
+                    if refresh_result.failed > 0 then
+                        grimmlink_self:showShelfSyncMessage(
+                            _("Shelf sync complete. Some covers may need manual refresh."),
+                            4
+                        )
+                    else
+                        grimmlink_self:showShelfSyncMessage(_("Book info refresh complete"), 2)
+                    end
+                end
+                done_callback()
+                return
+            end
+
+            UIManager:scheduleIn(0.05, processNextBatch)
+        end
+
+        UIManager:scheduleIn(0.05, processNextBatch)
+    end
+
     -- Helper: finish sync (cleanup + summary + broadcast).
     local function finishSync()
         if not silent then
@@ -4572,26 +4887,7 @@ function Grimmlink:syncShelfNow(silent, opts)
             grimmlink_self.shelf_sync:upsertBookInfoCache(nil)
         end)
         result.metadata_index_path = index_path
-        grimmlink_self._shelf_sync_running = false
-        grimmlink_self._active_sync_shelf_type = nil
-        grimmlink_self._active_sync_download_dir = nil
-        if not silent and not suppress_completion_summary then
-            grimmlink_self:_showSyncCompletionSummary(result)
-        end
-        grimmlink_self:_broadcastSyncResult(result)
-        if followup_selection and followup_selection.id and not grimmlink_self._shelf_sync_cancelled then
-            UIManager:scheduleIn(0.2, function()
-                grimmlink_self:syncShelfNow(silent, {
-                    selection_override = followup_selection,
-                    suppress_completion_summary = false,
-                    on_complete = on_complete,
-                })
-            end)
-            return
-        end
-        if on_complete then
-            pcall(on_complete, result)
-        end
+        runPostSyncBookInfoRefresh(finalizeSyncState)
     end
 
     -- Helper: handle cancellation.
@@ -4702,7 +4998,8 @@ function Grimmlink:syncShelfNow(silent, opts)
                     elseif status == "done" then
                         pcall(grimmlink_self.shelf_sync.recordDownload,
                             grimmlink_self.shelf_sync,
-                            item, plan.cleanup.shelf_id, plan.cleanup.sync_start)
+                            item, plan.cleanup.shelf_id, plan.cleanup.sync_start,
+                            downloaded_files_to_refresh, downloaded_files_to_refresh_set)
                         result.synced = result.synced + 1
                         active_handle = nil
                         if not silent then
@@ -4736,6 +5033,8 @@ function Grimmlink:syncShelfNow(silent, opts)
                 local book = item.book or {}
                 local dl_opts = {
                     expected_size_kb = book.fileSizeKb,
+                    downloaded_files_to_refresh = downloaded_files_to_refresh,
+                    downloaded_files_to_refresh_set = downloaded_files_to_refresh_set,
                     on_progress = function(bytes_so_far, total_bytes_est)
                         if grimmlink_self._shelf_sync_cancelled then
                             return true  -- signal cancellation
@@ -5904,6 +6203,7 @@ function Grimmlink:init()
     self.debug_logging = self:readSetting("debug_logging", DEFAULTS.debug_logging)
     self.log_to_file = self:readSetting("log_to_file", DEFAULTS.log_to_file)
     self.threshold_percent = self:readSetting("threshold_percent", DEFAULTS.threshold_percent)
+    self.send_reflowable_percentage = self:readSetting("send_reflowable_percentage", DEFAULTS.send_reflowable_percentage)
     self.threshold_minutes = self:readSetting("threshold_minutes", DEFAULTS.threshold_minutes)
     self.threshold_pages = self:readSetting("threshold_pages", DEFAULTS.threshold_pages)
     self.session_min_seconds = self:readSetting("session_min_seconds", DEFAULTS.session_min_seconds)
@@ -5936,6 +6236,15 @@ function Grimmlink:init()
     self.two_way_shelf_delete_sync = self:readSetting("two_way_shelf_delete_sync", DEFAULTS.two_way_shelf_delete_sync)
     self.shelf_use_original_filename = self:readSetting("shelf_use_original_filename", DEFAULTS.shelf_use_original_filename)
     self.delete_sdr_on_book_delete = self:readSetting("delete_sdr_on_book_delete", DEFAULTS.delete_sdr_on_book_delete)
+    self.refresh_bookinfo_after_shelf_sync = self:readSetting("refresh_bookinfo_after_shelf_sync", DEFAULTS.refresh_bookinfo_after_shelf_sync)
+    self.refresh_bookinfo_batch_size = math.floor(tonumber(
+        self:readSetting("refresh_bookinfo_batch_size", DEFAULTS.refresh_bookinfo_batch_size)
+    ) or DEFAULTS.refresh_bookinfo_batch_size)
+    if self.refresh_bookinfo_batch_size < 1 then
+        self.refresh_bookinfo_batch_size = 1
+    elseif self.refresh_bookinfo_batch_size > 200 then
+        self.refresh_bookinfo_batch_size = 200
+    end
     self.auto_update_enabled = self:readSetting("auto_update_enabled", DEFAULTS.auto_update_enabled)
     self.check_update_on_startup = self:readSetting("check_update_on_startup", DEFAULTS.check_update_on_startup)
     self.update_channel = normalizeUpdateChannel(self:readSetting("update_channel", DEFAULTS.update_channel))
@@ -6303,6 +6612,38 @@ function Grimmlink:addToMainMenu(menu_items)
                                         callback = function()
                                             self.delete_sdr_on_book_delete = not self.delete_sdr_on_book_delete
                                             self:saveSetting("delete_sdr_on_book_delete", self.delete_sdr_on_book_delete)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Refresh Book Info After Download"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.refresh_bookinfo_after_shelf_sync ~= false end,
+                                        callback = function()
+                                            self.refresh_bookinfo_after_shelf_sync = not (self.refresh_bookinfo_after_shelf_sync ~= false)
+                                            self:saveSetting("refresh_bookinfo_after_shelf_sync", self.refresh_bookinfo_after_shelf_sync)
+                                        end,
+                                    },
+                                    {
+                                        text_func = function()
+                                            return T(
+                                                _("Book Info Refresh Batch Size: %1"),
+                                                tonumber(self.refresh_bookinfo_batch_size) or DEFAULTS.refresh_bookinfo_batch_size
+                                            )
+                                        end,
+                                        callback = function()
+                                            self:showNumberInput(
+                                                _("Refresh Batch Size"),
+                                                self.refresh_bookinfo_batch_size or DEFAULTS.refresh_bookinfo_batch_size,
+                                                _("Recommended: 10-40"),
+                                                function(value)
+                                                    local normalized = math.floor(
+                                                        tonumber(value) or DEFAULTS.refresh_bookinfo_batch_size
+                                                    )
+                                                    if normalized < 1 then normalized = 1 end
+                                                    if normalized > 200 then normalized = 200 end
+                                                    self:saveSetting("refresh_bookinfo_batch_size", normalized)
+                                                end
+                                            )
                                         end,
                                     },
                                 },
