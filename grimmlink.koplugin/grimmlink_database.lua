@@ -24,6 +24,17 @@ local function nowEpoch()
     return os.time()
 end
 
+local function normalizeShelfType(value)
+    local shelf_type = tostring(value or "regular"):lower()
+    if shelf_type == "" then
+        return "regular"
+    end
+    if shelf_type ~= "regular" and shelf_type ~= "magic" then
+        return "regular"
+    end
+    return shelf_type
+end
+
 local function decodeSettingValue(raw_value)
     if raw_value == nil or raw_value == "" then
         return nil
@@ -194,16 +205,74 @@ Database.schema_sql = {
         )
     ]],
     [[
+        CREATE TABLE IF NOT EXISTS book_tracking_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL DEFAULT '',
+            file_path TEXT NOT NULL DEFAULT '',
+            tracking_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER DEFAULT (strftime('%s', 'now')),
+            updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(file_hash, file_path)
+        )
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_book_tracking_hash ON book_tracking_state(file_hash)
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_book_tracking_path ON book_tracking_state(file_path)
+    ]],
+    [[
         CREATE INDEX IF NOT EXISTS idx_pending_sessions_book_hash ON pending_sessions(book_hash)
     ]],
     [[
         CREATE INDEX IF NOT EXISTS idx_pending_sessions_book_id ON pending_sessions(book_id)
     ]],
     [[
+        CREATE TABLE IF NOT EXISTS pending_metadata_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL,
+            book_id INTEGER,
+            book_file_id INTEGER,
+            item_type TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            retry_count INTEGER DEFAULT 0,
+            last_retry_at INTEGER,
+            created_at INTEGER DEFAULT (strftime('%s', 'now')),
+            updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(file_hash, item_type, dedupe_key)
+        )
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_pending_metadata_file_hash ON pending_metadata_items(file_hash)
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_pending_metadata_book_id ON pending_metadata_items(book_id)
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_pending_metadata_item_type ON pending_metadata_items(item_type)
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_pending_metadata_created_at ON pending_metadata_items(created_at)
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS synced_metadata_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL,
+            book_id INTEGER,
+            item_type TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            server_id TEXT,
+            synced_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(file_hash, item_type, dedupe_key)
+        )
+    ]],
+    [[
         CREATE TABLE IF NOT EXISTS shelf_sync_map (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            book_id INTEGER NOT NULL UNIQUE,
+            book_id INTEGER NOT NULL,
             shelf_id INTEGER NOT NULL,
+            shelf_type TEXT NOT NULL DEFAULT 'regular',
             remote_filename TEXT,
             remote_title TEXT,
             remote_author TEXT,
@@ -216,38 +285,54 @@ Database.schema_sql = {
             last_seen_in_shelf_at INTEGER,
             downloaded_by_grimmlink INTEGER DEFAULT 1,
             created_at INTEGER DEFAULT (strftime('%s', 'now')),
-            updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+            updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(book_id, shelf_id, shelf_type)
         )
     ]],
     [[
         CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_shelf_id ON shelf_sync_map(shelf_id)
     ]],
     [[
+        CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_book_id ON shelf_sync_map(book_id)
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_shelf_type ON shelf_sync_map(shelf_type)
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_local_path ON shelf_sync_map(local_path)
+    ]],
+    [[
         CREATE TABLE IF NOT EXISTS pending_shelf_removals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            book_id INTEGER NOT NULL UNIQUE,
+            book_id INTEGER NOT NULL,
             shelf_id INTEGER NOT NULL,
+            shelf_type TEXT NOT NULL DEFAULT 'regular',
             local_path TEXT,
             delete_sdr INTEGER DEFAULT 0,
             retry_count INTEGER DEFAULT 0,
             last_retry_at INTEGER,
             created_at INTEGER DEFAULT (strftime('%s', 'now')),
-            updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+            updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(book_id, shelf_id, shelf_type)
         )
     ]],
     [[
         CREATE INDEX IF NOT EXISTS idx_pending_shelf_removals_shelf_id ON pending_shelf_removals(shelf_id)
     ]],
     [[
+        CREATE INDEX IF NOT EXISTS idx_pending_shelf_removals_shelf_type ON pending_shelf_removals(shelf_type)
+    ]],
+    [[
         CREATE TABLE IF NOT EXISTS shelf_sync_tombstones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_id INTEGER NOT NULL,
             shelf_id INTEGER NOT NULL,
+            shelf_type TEXT NOT NULL DEFAULT 'regular',
             local_path TEXT,
             remote_title TEXT,
             remote_series_name TEXT,
             removed_at INTEGER DEFAULT (strftime('%s', 'now')),
-            UNIQUE(book_id, shelf_id)
+            UNIQUE(book_id, shelf_id, shelf_type)
         )
     ]],
 }
@@ -278,8 +363,303 @@ function Database:repairSchema()
         end
     end
 
+    self:_migrateMetadataSyncTables()
+    self:_migrateBookTrackingState()
+    self:_migrateShelfSyncV2()
     self:_migrateShelfSyncSeriesColumns()
     return true
+end
+
+function Database:_migrateMetadataSyncTables()
+    local migration_sql = {
+        [[
+            CREATE TABLE IF NOT EXISTS pending_metadata_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT NOT NULL,
+                book_id INTEGER,
+                book_file_id INTEGER,
+                item_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                retry_count INTEGER DEFAULT 0,
+                last_retry_at INTEGER,
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(file_hash, item_type, dedupe_key)
+            )
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_pending_metadata_file_hash ON pending_metadata_items(file_hash)
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_pending_metadata_book_id ON pending_metadata_items(book_id)
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_pending_metadata_item_type ON pending_metadata_items(item_type)
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_pending_metadata_created_at ON pending_metadata_items(created_at)
+        ]],
+        [[
+            CREATE TABLE IF NOT EXISTS synced_metadata_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT NOT NULL,
+                book_id INTEGER,
+                item_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                server_id TEXT,
+                synced_at INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(file_hash, item_type, dedupe_key)
+            )
+        ]],
+    }
+
+    for _, sql in ipairs(migration_sql) do
+        self:_exec(sql)
+    end
+end
+
+function Database:_migrateShelfSyncV2()
+    local function tableHasColumn(table_name, column_name)
+        local stmt = self.conn and self.conn:prepare("PRAGMA table_info(" .. table_name .. ")")
+        if not stmt then
+            return false
+        end
+        local found = false
+        for row in stmt:rows() do
+            if row[2] == column_name then
+                found = true
+                break
+            end
+        end
+        stmt:close()
+        return found
+    end
+
+    local function tableColumns(table_name)
+        local cols = {}
+        local stmt = self.conn and self.conn:prepare("PRAGMA table_info(" .. table_name .. ")")
+        if not stmt then
+            return cols
+        end
+        for row in stmt:rows() do
+            local name = tostring(row[2] or "")
+            if name ~= "" then
+                cols[name] = true
+            end
+        end
+        stmt:close()
+        return cols
+    end
+
+    local function colOr(cols, column_name, fallback)
+        if cols[column_name] then
+            return column_name
+        end
+        return fallback
+    end
+
+    local function migrateShelfSyncMap()
+        if tableHasColumn("shelf_sync_map", "shelf_type") then
+            return true
+        end
+
+        local cols = tableColumns("shelf_sync_map")
+        local select_sql = string.format([[
+                SELECT
+                    %s, %s, 'regular', %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s
+                FROM shelf_sync_map
+            ]],
+            colOr(cols, "book_id", "0"),
+            colOr(cols, "shelf_id", "0"),
+            colOr(cols, "remote_filename", "NULL"),
+            colOr(cols, "remote_title", "NULL"),
+            colOr(cols, "remote_author", "NULL"),
+            colOr(cols, "remote_format", "NULL"),
+            colOr(cols, "remote_file_size_kb", "NULL"),
+            colOr(cols, "remote_series_name", "NULL"),
+            colOr(cols, "remote_series_number", "NULL"),
+            colOr(cols, "local_path", "NULL"),
+            colOr(cols, "downloaded_at", "NULL"),
+            colOr(cols, "last_seen_in_shelf_at", "NULL"),
+            colOr(cols, "downloaded_by_grimmlink", "1"),
+            colOr(cols, "created_at", "strftime('%s', 'now')"),
+            colOr(cols, "updated_at", "strftime('%s', 'now')")
+        )
+
+        local migration_sql = {
+            "BEGIN IMMEDIATE TRANSACTION",
+            [[
+                CREATE TABLE IF NOT EXISTS shelf_sync_map_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    shelf_id INTEGER NOT NULL,
+                    shelf_type TEXT NOT NULL DEFAULT 'regular',
+                    remote_filename TEXT,
+                    remote_title TEXT,
+                    remote_author TEXT,
+                    remote_format TEXT,
+                    remote_file_size_kb INTEGER,
+                    remote_series_name TEXT,
+                    remote_series_number REAL,
+                    local_path TEXT,
+                    downloaded_at INTEGER,
+                    last_seen_in_shelf_at INTEGER,
+                    downloaded_by_grimmlink INTEGER DEFAULT 1,
+                    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                    UNIQUE(book_id, shelf_id, shelf_type)
+                )
+            ]],
+            [[
+                INSERT INTO shelf_sync_map_v2 (
+                    book_id, shelf_id, shelf_type, remote_filename, remote_title, remote_author,
+                    remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
+                    local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
+                    created_at, updated_at
+                )
+            ]] .. select_sql,
+            "DROP TABLE shelf_sync_map",
+            "ALTER TABLE shelf_sync_map_v2 RENAME TO shelf_sync_map",
+            "CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_shelf_id ON shelf_sync_map(shelf_id)",
+            "CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_book_id ON shelf_sync_map(book_id)",
+            "CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_shelf_type ON shelf_sync_map(shelf_type)",
+            "CREATE INDEX IF NOT EXISTS idx_shelf_sync_map_local_path ON shelf_sync_map(local_path)",
+            "COMMIT",
+        }
+
+        for _, sql in ipairs(migration_sql) do
+            if not self:_exec(sql) then
+                self:_exec("ROLLBACK")
+                logger.err("GrimmLink Database: shelf_sync_map migration failed:", self.conn and self.conn:errmsg() or "unknown")
+                return false
+            end
+        end
+        return true
+    end
+
+    local function migratePendingShelfRemovals()
+        if tableHasColumn("pending_shelf_removals", "shelf_type") then
+            return true
+        end
+
+        local cols = tableColumns("pending_shelf_removals")
+        local select_sql = string.format([[
+                SELECT
+                    %s, %s, 'regular', %s, %s, %s,
+                    %s, %s, %s
+                FROM pending_shelf_removals
+            ]],
+            colOr(cols, "book_id", "0"),
+            colOr(cols, "shelf_id", "0"),
+            colOr(cols, "local_path", "NULL"),
+            colOr(cols, "delete_sdr", "0"),
+            colOr(cols, "retry_count", "0"),
+            colOr(cols, "last_retry_at", "NULL"),
+            colOr(cols, "created_at", "strftime('%s', 'now')"),
+            colOr(cols, "updated_at", "strftime('%s', 'now')")
+        )
+
+        local migration_sql = {
+            "BEGIN IMMEDIATE TRANSACTION",
+            [[
+                CREATE TABLE IF NOT EXISTS pending_shelf_removals_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    shelf_id INTEGER NOT NULL,
+                    shelf_type TEXT NOT NULL DEFAULT 'regular',
+                    local_path TEXT,
+                    delete_sdr INTEGER DEFAULT 0,
+                    retry_count INTEGER DEFAULT 0,
+                    last_retry_at INTEGER,
+                    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                    UNIQUE(book_id, shelf_id, shelf_type)
+                )
+            ]],
+            [[
+                INSERT INTO pending_shelf_removals_v2 (
+                    book_id, shelf_id, shelf_type, local_path, delete_sdr, retry_count,
+                    last_retry_at, created_at, updated_at
+                )
+            ]] .. select_sql,
+            "DROP TABLE pending_shelf_removals",
+            "ALTER TABLE pending_shelf_removals_v2 RENAME TO pending_shelf_removals",
+            "CREATE INDEX IF NOT EXISTS idx_pending_shelf_removals_shelf_id ON pending_shelf_removals(shelf_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pending_shelf_removals_shelf_type ON pending_shelf_removals(shelf_type)",
+            "COMMIT",
+        }
+
+        for _, sql in ipairs(migration_sql) do
+            if not self:_exec(sql) then
+                self:_exec("ROLLBACK")
+                logger.err("GrimmLink Database: pending_shelf_removals migration failed:", self.conn and self.conn:errmsg() or "unknown")
+                return false
+            end
+        end
+        return true
+    end
+
+    local function migrateShelfSyncTombstones()
+        if tableHasColumn("shelf_sync_tombstones", "shelf_type") then
+            return true
+        end
+
+        local cols = tableColumns("shelf_sync_tombstones")
+        local select_sql = string.format([[
+                SELECT
+                    %s, %s, 'regular', %s, %s, %s, %s
+                FROM shelf_sync_tombstones
+            ]],
+            colOr(cols, "book_id", "0"),
+            colOr(cols, "shelf_id", "0"),
+            colOr(cols, "local_path", "NULL"),
+            colOr(cols, "remote_title", "NULL"),
+            colOr(cols, "remote_series_name", "NULL"),
+            colOr(cols, "removed_at", "strftime('%s', 'now')")
+        )
+
+        local migration_sql = {
+            "BEGIN IMMEDIATE TRANSACTION",
+            [[
+                CREATE TABLE IF NOT EXISTS shelf_sync_tombstones_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    shelf_id INTEGER NOT NULL,
+                    shelf_type TEXT NOT NULL DEFAULT 'regular',
+                    local_path TEXT,
+                    remote_title TEXT,
+                    remote_series_name TEXT,
+                    removed_at INTEGER DEFAULT (strftime('%s', 'now')),
+                    UNIQUE(book_id, shelf_id, shelf_type)
+                )
+            ]],
+            [[
+                INSERT INTO shelf_sync_tombstones_v2 (
+                    book_id, shelf_id, shelf_type, local_path, remote_title, remote_series_name, removed_at
+                )
+            ]] .. select_sql,
+            "DROP TABLE shelf_sync_tombstones",
+            "ALTER TABLE shelf_sync_tombstones_v2 RENAME TO shelf_sync_tombstones",
+            "COMMIT",
+        }
+
+        for _, sql in ipairs(migration_sql) do
+            if not self:_exec(sql) then
+                self:_exec("ROLLBACK")
+                logger.err("GrimmLink Database: shelf_sync_tombstones migration failed:", self.conn and self.conn:errmsg() or "unknown")
+                return false
+            end
+        end
+        return true
+    end
+
+    return migrateShelfSyncMap()
+        and migratePendingShelfRemovals()
+        and migrateShelfSyncTombstones()
 end
 
 function Database:_migrateShelfSyncSeriesColumns()
@@ -590,6 +970,367 @@ function Database:incrementPendingProgressRetry(id)
     return ok
 end
 
+function Database:_migrateBookTrackingState()
+    local migration_sql = {
+        [[
+            CREATE TABLE IF NOT EXISTS book_tracking_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT NOT NULL DEFAULT '',
+                file_path TEXT NOT NULL DEFAULT '',
+                tracking_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(file_hash, file_path)
+            )
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_book_tracking_hash ON book_tracking_state(file_hash)
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_book_tracking_path ON book_tracking_state(file_path)
+        ]],
+    }
+    for _, sql in ipairs(migration_sql) do
+        self:_exec(sql)
+    end
+end
+
+local function mapPendingMetadataRow(row)
+    return {
+        id = tonumber(row[1]) or row[1],
+        file_hash = row[2],
+        book_id = tonumber(row[3]) or row[3],
+        book_file_id = tonumber(row[4]) or row[4],
+        item_type = row[5],
+        dedupe_key = row[6],
+        payload_json = row[7],
+        retry_count = tonumber(row[8]) or row[8],
+        last_retry_at = tonumber(row[9]) or row[9],
+        created_at = tonumber(row[10]) or row[10],
+        updated_at = tonumber(row[11]) or row[11],
+    }
+end
+
+function Database:upsertPendingMetadataItem(item)
+    if type(item) ~= "table" then
+        return false
+    end
+
+    local payload_json = item.payload_json
+    if type(payload_json) == "table" then
+        local ok, encoded = pcall(json.encode, payload_json)
+        if not ok then
+            return false
+        end
+        payload_json = encoded
+    end
+
+    if type(payload_json) ~= "string"
+        or payload_json == ""
+        or not item.file_hash
+        or not item.item_type
+        or not item.dedupe_key then
+        return false
+    end
+
+    local sql = [[
+        INSERT INTO pending_metadata_items (
+            file_hash, book_id, book_file_id, item_type, dedupe_key, payload_json,
+            retry_count, last_retry_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+        ON CONFLICT(file_hash, item_type, dedupe_key) DO UPDATE SET
+            book_id = excluded.book_id,
+            book_file_id = excluded.book_file_id,
+            payload_json = excluded.payload_json,
+            retry_count = 0,
+            last_retry_at = NULL,
+            updated_at = excluded.updated_at
+    ]]
+    local stmt = self.conn and self.conn:prepare(sql)
+    if not stmt then
+        return false
+    end
+    local ts = nowEpoch()
+    stmt:bind(
+        item.file_hash,
+        item.book_id,
+        item.book_file_id,
+        item.item_type,
+        item.dedupe_key,
+        payload_json,
+        ts,
+        ts
+    )
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:getPendingMetadataItems(limit)
+    local stmt = self.conn and self.conn:prepare(
+        [[
+            SELECT id, file_hash, book_id, book_file_id, item_type, dedupe_key,
+                   payload_json, retry_count, last_retry_at, created_at, updated_at
+            FROM pending_metadata_items
+            ORDER BY created_at ASC
+            LIMIT ?
+        ]]
+    )
+    if not stmt then
+        return {}
+    end
+    stmt:bind(limit or 100)
+    return allRows(stmt, mapPendingMetadataRow)
+end
+
+function Database:deletePendingMetadataItem(id)
+    local stmt = self.conn and self.conn:prepare("DELETE FROM pending_metadata_items WHERE id = ?")
+    if not stmt then
+        return false
+    end
+    stmt:bind(id)
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:incrementPendingMetadataRetry(id)
+    local stmt = self.conn and self.conn:prepare(
+        "UPDATE pending_metadata_items SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE id = ?"
+    )
+    if not stmt then
+        return false
+    end
+    local ts = nowEpoch()
+    stmt:bind(ts, ts, id)
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:markMetadataItemSynced(item)
+    if type(item) ~= "table" or not item.file_hash or not item.item_type or not item.dedupe_key then
+        return false
+    end
+
+    local sql = [[
+        INSERT INTO synced_metadata_items (file_hash, book_id, item_type, dedupe_key, server_id, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(file_hash, item_type, dedupe_key) DO UPDATE SET
+            book_id = excluded.book_id,
+            server_id = excluded.server_id,
+            synced_at = excluded.synced_at
+    ]]
+    local stmt = self.conn and self.conn:prepare(sql)
+    if not stmt then
+        return false
+    end
+    stmt:bind(item.file_hash, item.book_id, item.item_type, item.dedupe_key, item.server_id, nowEpoch())
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:isMetadataItemSynced(file_hash, item_type, dedupe_key)
+    local stmt = self.conn and self.conn:prepare(
+        "SELECT 1 FROM synced_metadata_items WHERE file_hash = ? AND item_type = ? AND dedupe_key = ?"
+    )
+    if not stmt then
+        return false
+    end
+    stmt:bind(file_hash, item_type, dedupe_key)
+    local row = firstRow(stmt, rowOrNil)
+    return row ~= nil
+end
+
+function Database:getPendingMetadataCount()
+    local stmt = self.conn and self.conn:prepare("SELECT COUNT(*) FROM pending_metadata_items")
+    if not stmt then
+        return 0
+    end
+    local value = firstRow(stmt, function(row)
+        return tonumber(row[1]) or 0
+    end)
+    return value or 0
+end
+
+function Database:getSyncedMetadataCount()
+    local stmt = self.conn and self.conn:prepare("SELECT COUNT(*) FROM synced_metadata_items")
+    if not stmt then
+        return 0
+    end
+    local value = firstRow(stmt, function(row)
+        return tonumber(row[1]) or 0
+    end)
+    return value or 0
+end
+
+function Database:deleteAllPendingMetadata()
+    return self:_exec("DELETE FROM pending_metadata_items")
+end
+
+function Database:deletePendingMetadataByFileHash(file_hash)
+    if not file_hash or file_hash == "" then
+        return false
+    end
+    local stmt = self.conn and self.conn:prepare("DELETE FROM pending_metadata_items WHERE file_hash = ?")
+    if not stmt then
+        return false
+    end
+    stmt:bind(file_hash)
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:clearSyncedMetadataHistory()
+    return self:_exec("DELETE FROM synced_metadata_items")
+end
+
+function Database:clearSyncedMetadataHistoryForFileHash(file_hash)
+    if not file_hash or file_hash == "" then
+        return false
+    end
+    local stmt = self.conn and self.conn:prepare("DELETE FROM synced_metadata_items WHERE file_hash = ?")
+    if not stmt then
+        return false
+    end
+    stmt:bind(file_hash)
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+local function normalizeTrackingKey(value)
+    if value == nil then
+        return ""
+    end
+    return tostring(value)
+end
+
+local function mapTrackingRow(row)
+    return {
+        id = tonumber(row[1]) or row[1],
+        file_hash = row[2],
+        file_path = row[3],
+        tracking_enabled = tonumber(row[4]) == 1,
+        created_at = tonumber(row[5]) or row[5],
+        updated_at = tonumber(row[6]) or row[6],
+    }
+end
+
+function Database:getBookTrackingState(file_hash, file_path)
+    local hash_key = normalizeTrackingKey(file_hash)
+    local path_key = normalizeTrackingKey(file_path)
+    local row = nil
+
+    if hash_key ~= "" then
+        local stmt_hash = self.conn and self.conn:prepare(
+            [[
+                SELECT id, file_hash, file_path, tracking_enabled, created_at, updated_at
+                FROM book_tracking_state
+                WHERE file_hash = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+            ]]
+        )
+        if stmt_hash then
+            stmt_hash:bind(hash_key)
+            row = firstRow(stmt_hash, mapTrackingRow)
+        end
+    end
+
+    if not row and path_key ~= "" then
+        local stmt_path = self.conn and self.conn:prepare(
+            [[
+                SELECT id, file_hash, file_path, tracking_enabled, created_at, updated_at
+                FROM book_tracking_state
+                WHERE file_path = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+            ]]
+        )
+        if stmt_path then
+            stmt_path:bind(path_key)
+            row = firstRow(stmt_path, mapTrackingRow)
+        end
+    end
+
+    return row
+end
+
+function Database:isTrackingEnabled(file_hash, file_path)
+    local row = self:getBookTrackingState(file_hash, file_path)
+    if not row then
+        return true
+    end
+    return row.tracking_enabled == true
+end
+
+function Database:setTrackingEnabled(file_hash, file_path, enabled)
+    local hash_key = normalizeTrackingKey(file_hash)
+    local path_key = normalizeTrackingKey(file_path)
+    if hash_key == "" and path_key == "" then
+        return false
+    end
+
+    local normalized = enabled == nil and true or (enabled == true)
+    local sql = [[
+        INSERT INTO book_tracking_state (file_hash, file_path, tracking_enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(file_hash, file_path) DO UPDATE SET
+            tracking_enabled = excluded.tracking_enabled,
+            updated_at = excluded.updated_at
+    ]]
+    local stmt = self.conn and self.conn:prepare(sql)
+    if not stmt then
+        return false
+    end
+    local now = nowEpoch()
+    stmt:bind(hash_key, path_key, normalized and 1 or 0, now, now)
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:toggleTracking(file_hash, file_path)
+    local currently_enabled = self:isTrackingEnabled(file_hash, file_path)
+    local next_enabled = not currently_enabled
+    if not self:setTrackingEnabled(file_hash, file_path, next_enabled) then
+        return nil
+    end
+    return next_enabled
+end
+
+function Database:getPendingCountsForFileHash(file_hash)
+    local key = normalizeTrackingKey(file_hash)
+    if key == "" then
+        return {
+            progress = 0,
+            sessions = 0,
+            metadata = 0,
+        }
+    end
+
+    local function count(sql)
+        local stmt = self.conn and self.conn:prepare(sql)
+        if not stmt then
+            return 0
+        end
+        stmt:bind(key)
+        local value = firstRow(stmt, function(row)
+            return tonumber(row[1]) or 0
+        end)
+        return value or 0
+    end
+
+    return {
+        progress = count("SELECT COUNT(*) FROM pending_progress WHERE file_hash = ?"),
+        sessions = count("SELECT COUNT(*) FROM pending_sessions WHERE book_hash = ?"),
+        metadata = count("SELECT COUNT(*) FROM pending_metadata_items WHERE file_hash = ?"),
+    }
+end
+
 local function mapProgressStateRow(row)
     return {
         file_hash = row[1],
@@ -762,33 +1503,50 @@ local function mapShelfEntry(row)
         id = tonumber(row[1]) or row[1],
         book_id = tonumber(row[2]) or row[2],
         shelf_id = tonumber(row[3]) or row[3],
-        remote_filename = row[4],
-        remote_title = row[5],
-        remote_author = row[6],
-        remote_format = row[7],
-        remote_file_size_kb = tonumber(row[8]) or row[8],
-        remote_series_name = row[9],
-        remote_series_number = tonumber(row[10]),
-        local_path = row[11],
-        downloaded_at = tonumber(row[12]) or row[12],
-        last_seen_in_shelf_at = tonumber(row[13]) or row[13],
-        downloaded_by_grimmlink = (tonumber(row[14]) or 0) == 1 and 1 or 0,
-        created_at = tonumber(row[15]) or row[15],
-        updated_at = tonumber(row[16]) or row[16],
+        shelf_type = normalizeShelfType(row[4]),
+        remote_filename = row[5],
+        remote_title = row[6],
+        remote_author = row[7],
+        remote_format = row[8],
+        remote_file_size_kb = tonumber(row[9]) or row[9],
+        remote_series_name = row[10],
+        remote_series_number = tonumber(row[11]),
+        local_path = row[12],
+        downloaded_at = tonumber(row[13]) or row[13],
+        last_seen_in_shelf_at = tonumber(row[14]) or row[14],
+        downloaded_by_grimmlink = (tonumber(row[15]) or 0) == 1 and 1 or 0,
+        created_at = tonumber(row[16]) or row[16],
+        updated_at = tonumber(row[17]) or row[17],
     }
 end
 
-function Database:getShelfSyncEntry(book_id)
-    local stmt = self.conn and self.conn:prepare(
-        [[
-            SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
-                   remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
-                   local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
-                   created_at, updated_at
-            FROM shelf_sync_map
-            WHERE book_id = ?
-        ]]
-    )
+local SHELF_SYNC_SELECT = [[
+    SELECT id, book_id, shelf_id, shelf_type, remote_filename, remote_title, remote_author,
+           remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
+           local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
+           created_at, updated_at
+    FROM shelf_sync_map
+]]
+
+function Database:getShelfMapping(book_id, shelf_id, shelf_type)
+    if not book_id then
+        return nil
+    end
+    local normalized_type = normalizeShelfType(shelf_type)
+    local stmt = self.conn and self.conn:prepare(SHELF_SYNC_SELECT .. " WHERE book_id = ? AND shelf_id = ? AND shelf_type = ? LIMIT 1")
+    if not stmt then
+        return nil
+    end
+    stmt:bind(book_id, shelf_id, normalized_type)
+    return firstRow(stmt, mapShelfEntry)
+end
+
+function Database:getShelfSyncEntry(book_id, shelf_id, shelf_type)
+    if shelf_id ~= nil then
+        return self:getShelfMapping(book_id, shelf_id, shelf_type)
+    end
+
+    local stmt = self.conn and self.conn:prepare(SHELF_SYNC_SELECT .. " WHERE book_id = ? ORDER BY updated_at DESC LIMIT 1")
     if not stmt then
         return nil
     end
@@ -797,16 +1555,7 @@ function Database:getShelfSyncEntry(book_id)
 end
 
 function Database:getShelfSyncEntryByLocalPath(local_path)
-    local stmt = self.conn and self.conn:prepare(
-        [[
-            SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
-                   remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
-                   local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
-                   created_at, updated_at
-            FROM shelf_sync_map
-            WHERE local_path = ?
-        ]]
-    )
+    local stmt = self.conn and self.conn:prepare(SHELF_SYNC_SELECT .. " WHERE local_path = ? ORDER BY updated_at DESC LIMIT 1")
     if not stmt then
         return nil
     end
@@ -814,15 +1563,41 @@ function Database:getShelfSyncEntryByLocalPath(local_path)
     return firstRow(stmt, mapShelfEntry)
 end
 
+function Database:getShelfMappingsForBook(book_id)
+    local stmt = self.conn and self.conn:prepare(SHELF_SYNC_SELECT .. " WHERE book_id = ? ORDER BY updated_at DESC")
+    if not stmt then
+        return {}
+    end
+    stmt:bind(book_id)
+    return allRows(stmt, mapShelfEntry)
+end
+
+function Database:isBookTrackedInOtherShelf(book_id, current_shelf_id, current_shelf_type)
+    local normalized_type = normalizeShelfType(current_shelf_type)
+    local stmt = self.conn and self.conn:prepare(
+        [[
+            SELECT COUNT(*)
+            FROM shelf_sync_map
+            WHERE book_id = ?
+              AND NOT (shelf_id = ? AND shelf_type = ?)
+        ]]
+    )
+    if not stmt then
+        return false
+    end
+    stmt:bind(book_id, current_shelf_id, normalized_type)
+    local count = firstRow(stmt, function(row) return tonumber(row[1]) or 0 end) or 0
+    return count > 0
+end
+
 function Database:upsertShelfSyncEntry(entry)
     local sql = [[
         INSERT INTO shelf_sync_map (
-            book_id, shelf_id, remote_filename, remote_title, remote_author,
+            book_id, shelf_id, shelf_type, remote_filename, remote_title, remote_author,
             remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
             local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(book_id) DO UPDATE SET
-            shelf_id = excluded.shelf_id,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(book_id, shelf_id, shelf_type) DO UPDATE SET
             remote_filename = excluded.remote_filename,
             remote_title = excluded.remote_title,
             remote_author = excluded.remote_author,
@@ -840,9 +1615,11 @@ function Database:upsertShelfSyncEntry(entry)
     if not stmt then
         return false
     end
+    local normalized_type = normalizeShelfType(entry.shelf_type)
     stmt:bind(
         entry.book_id,
         entry.shelf_id,
+        normalized_type,
         entry.remote_filename,
         entry.remote_title,
         entry.remote_author,
@@ -861,26 +1638,69 @@ function Database:upsertShelfSyncEntry(entry)
     return ok
 end
 
-function Database:getAllShelfSyncEntries(shelf_id)
-    local stmt = self.conn and self.conn:prepare(
-        [[
-            SELECT id, book_id, shelf_id, remote_filename, remote_title, remote_author,
-                   remote_format, remote_file_size_kb, remote_series_name, remote_series_number,
-                   local_path, downloaded_at, last_seen_in_shelf_at, downloaded_by_grimmlink,
-                   created_at, updated_at
-            FROM shelf_sync_map
-            WHERE shelf_id = ?
-            ORDER BY updated_at DESC
-        ]]
-    )
+function Database:upsertShelfSyncMap(book, shelf_id, shelf_type, local_path)
+    if type(book) ~= "table" then
+        return false
+    end
+    return self:upsertShelfSyncEntry({
+        book_id = tonumber(book.bookId or book.book_id),
+        shelf_id = shelf_id,
+        shelf_type = shelf_type,
+        remote_filename = book.fileName or book.remote_filename,
+        remote_title = book.title or book.remote_title,
+        remote_author = book.author or book.remote_author,
+        remote_format = book.fileFormat or book.remote_format,
+        remote_file_size_kb = book.fileSizeKb or book.remote_file_size_kb,
+        remote_series_name = book.seriesName or book.remote_series_name,
+        remote_series_number = book.seriesNumber or book.remote_series_number,
+        local_path = local_path,
+        downloaded_at = book.downloaded_at,
+        last_seen_in_shelf_at = book.last_seen_in_shelf_at,
+        downloaded_by_grimmlink = book.downloaded_by_grimmlink,
+    })
+end
+
+function Database:getShelfMappingsByShelf(shelf_id, shelf_type)
+    local normalized_type = normalizeShelfType(shelf_type)
+    local stmt = self.conn and self.conn:prepare(SHELF_SYNC_SELECT .. " WHERE shelf_id = ? AND shelf_type = ? ORDER BY updated_at DESC")
     if not stmt then
         return {}
     end
-    stmt:bind(shelf_id)
+    stmt:bind(shelf_id, normalized_type)
     return allRows(stmt, mapShelfEntry)
 end
 
-function Database:deleteShelfSyncEntry(book_id)
+function Database:getAllShelfSyncEntries(shelf_id, shelf_type)
+    if shelf_id == nil then
+        local stmt = self.conn and self.conn:prepare(SHELF_SYNC_SELECT .. " ORDER BY updated_at DESC")
+        if not stmt then
+            return {}
+        end
+        return allRows(stmt, mapShelfEntry)
+    end
+    return self:getShelfMappingsByShelf(shelf_id, shelf_type)
+end
+
+function Database:removeShelfMappingOnly(book_id, shelf_id, shelf_type)
+    if shelf_id == nil then
+        return self:deleteShelfSyncEntry(book_id)
+    end
+    local normalized_type = normalizeShelfType(shelf_type)
+    local stmt = self.conn and self.conn:prepare("DELETE FROM shelf_sync_map WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?")
+    if not stmt then
+        return false
+    end
+    stmt:bind(book_id, shelf_id, normalized_type)
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:deleteShelfSyncEntry(book_id, shelf_id, shelf_type)
+    if shelf_id ~= nil then
+        return self:removeShelfMappingOnly(book_id, shelf_id, shelf_type)
+    end
+
     local stmt = self.conn and self.conn:prepare("DELETE FROM shelf_sync_map WHERE book_id = ?")
     if not stmt then
         return false
@@ -896,32 +1716,48 @@ local function mapPendingShelfRemoval(row)
         id = tonumber(row[1]) or row[1],
         book_id = tonumber(row[2]) or row[2],
         shelf_id = tonumber(row[3]) or row[3],
-        local_path = row[4],
-        delete_sdr = (tonumber(row[5]) or 0) == 1,
-        retry_count = tonumber(row[6]) or row[6],
-        last_retry_at = tonumber(row[7]) or row[7],
-        created_at = tonumber(row[8]) or row[8],
-        updated_at = tonumber(row[9]) or row[9],
+        shelf_type = normalizeShelfType(row[4]),
+        local_path = row[5],
+        delete_sdr = (tonumber(row[6]) or 0) == 1,
+        retry_count = tonumber(row[7]) or row[7],
+        last_retry_at = tonumber(row[8]) or row[8],
+        created_at = tonumber(row[9]) or row[9],
+        updated_at = tonumber(row[10]) or row[10],
     }
 end
 
-function Database:getPendingShelfRemovals(shelf_id)
+function Database:getPendingShelfRemovals(shelf_id, shelf_type)
+    local normalized_type = normalizeShelfType(shelf_type)
     local stmt = self.conn and self.conn:prepare(
-        "SELECT id, book_id, shelf_id, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at FROM pending_shelf_removals WHERE shelf_id = ? ORDER BY created_at ASC"
+        "SELECT id, book_id, shelf_id, shelf_type, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at FROM pending_shelf_removals WHERE shelf_id = ? AND shelf_type = ? ORDER BY created_at ASC"
     )
     if not stmt then
         return {}
     end
-    stmt:bind(shelf_id)
+    stmt:bind(shelf_id, normalized_type)
     return allRows(stmt, mapPendingShelfRemoval)
+end
+
+function Database:getPendingShelfRemovalCount()
+    local stmt = self.conn and self.conn:prepare("SELECT COUNT(*) FROM pending_shelf_removals")
+    if not stmt then
+        return 0
+    end
+    local value = firstRow(stmt, function(row)
+        return tonumber(row[1]) or 0
+    end)
+    return value or 0
+end
+
+function Database:clearPendingShelfRemovals()
+    return self:_exec("DELETE FROM pending_shelf_removals")
 end
 
 function Database:upsertPendingShelfRemoval(entry)
     local sql = [[
-        INSERT INTO pending_shelf_removals (book_id, shelf_id, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
-        ON CONFLICT(book_id) DO UPDATE SET
-            shelf_id = excluded.shelf_id,
+        INSERT INTO pending_shelf_removals (book_id, shelf_id, shelf_type, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)
+        ON CONFLICT(book_id, shelf_id, shelf_type) DO UPDATE SET
             local_path = excluded.local_path,
             delete_sdr = excluded.delete_sdr,
             retry_count = 0,
@@ -933,32 +1769,72 @@ function Database:upsertPendingShelfRemoval(entry)
         return false
     end
     local ts = nowEpoch()
-    stmt:bind(entry.book_id, entry.shelf_id, entry.local_path, entry.delete_sdr == true and 1 or 0, ts, ts)
+    stmt:bind(
+        entry.book_id,
+        entry.shelf_id,
+        normalizeShelfType(entry.shelf_type),
+        entry.local_path,
+        entry.delete_sdr == true and 1 or 0,
+        ts,
+        ts
+    )
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
 end
 
-function Database:deletePendingShelfRemoval(book_id)
-    local stmt = self.conn and self.conn:prepare("DELETE FROM pending_shelf_removals WHERE book_id = ?")
+function Database:queueShelfRemoval(book_id, shelf_id, shelf_type, local_path, delete_sdr)
+    return self:upsertPendingShelfRemoval({
+        book_id = book_id,
+        shelf_id = shelf_id,
+        shelf_type = shelf_type,
+        local_path = local_path,
+        delete_sdr = delete_sdr,
+    })
+end
+
+function Database:deletePendingShelfRemoval(book_id, shelf_id, shelf_type)
+    local stmt
+    if shelf_id ~= nil then
+        stmt = self.conn and self.conn:prepare(
+            "DELETE FROM pending_shelf_removals WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?"
+        )
+    else
+        stmt = self.conn and self.conn:prepare("DELETE FROM pending_shelf_removals WHERE book_id = ?")
+    end
     if not stmt then
         return false
     end
-    stmt:bind(book_id)
+    if shelf_id ~= nil then
+        stmt:bind(book_id, shelf_id, normalizeShelfType(shelf_type))
+    else
+        stmt:bind(book_id)
+    end
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
 end
 
-function Database:incrementPendingShelfRemovalRetryCount(book_id)
-    local stmt = self.conn and self.conn:prepare(
-        "UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ?"
-    )
+function Database:incrementPendingShelfRemovalRetryCount(book_id, shelf_id, shelf_type)
+    local stmt
+    if shelf_id ~= nil then
+        stmt = self.conn and self.conn:prepare(
+            "UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?"
+        )
+    else
+        stmt = self.conn and self.conn:prepare(
+            "UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ?"
+        )
+    end
     if not stmt then
         return false
     end
     local ts = nowEpoch()
-    stmt:bind(ts, ts, book_id)
+    if shelf_id ~= nil then
+        stmt:bind(ts, ts, book_id, shelf_id, normalizeShelfType(shelf_type))
+    else
+        stmt:bind(ts, ts, book_id)
+    end
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
@@ -966,9 +1842,9 @@ end
 
 function Database:addShelfSyncTombstone(entry)
     local sql = [[
-        INSERT INTO shelf_sync_tombstones (book_id, shelf_id, local_path, remote_title, remote_series_name, removed_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(book_id, shelf_id) DO UPDATE SET
+        INSERT INTO shelf_sync_tombstones (book_id, shelf_id, shelf_type, local_path, remote_title, remote_series_name, removed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(book_id, shelf_id, shelf_type) DO UPDATE SET
             local_path = excluded.local_path,
             remote_title = excluded.remote_title,
             remote_series_name = excluded.remote_series_name,
@@ -976,20 +1852,54 @@ function Database:addShelfSyncTombstone(entry)
     ]]
     local stmt = self.conn and self.conn:prepare(sql)
     if not stmt then return false end
-    stmt:bind(entry.book_id, entry.shelf_id, entry.local_path, entry.remote_title, entry.remote_series_name, nowEpoch())
+    stmt:bind(
+        entry.book_id,
+        entry.shelf_id,
+        normalizeShelfType(entry.shelf_type),
+        entry.local_path,
+        entry.remote_title,
+        entry.remote_series_name,
+        nowEpoch()
+    )
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
 end
 
-function Database:isTombstoned(book_id, shelf_id)
+function Database:recordShelfTombstone(book_id, shelf_id, shelf_type, local_path, remote_title, remote_series_name)
+    return self:addShelfSyncTombstone({
+        book_id = book_id,
+        shelf_id = shelf_id,
+        shelf_type = shelf_type,
+        local_path = local_path,
+        remote_title = remote_title,
+        remote_series_name = remote_series_name,
+    })
+end
+
+function Database:isTombstoned(book_id, shelf_id, shelf_type)
     local stmt = self.conn and self.conn:prepare(
-        "SELECT 1 FROM shelf_sync_tombstones WHERE book_id = ? AND shelf_id = ?"
+        "SELECT 1 FROM shelf_sync_tombstones WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?"
     )
     if not stmt then return false end
-    stmt:bind(book_id, shelf_id)
+    stmt:bind(book_id, shelf_id, normalizeShelfType(shelf_type))
     local row = firstRow(stmt, rowOrNil)
     return row ~= nil
+end
+
+function Database:getShelfTombstoneCount()
+    local stmt = self.conn and self.conn:prepare("SELECT COUNT(*) FROM shelf_sync_tombstones")
+    if not stmt then
+        return 0
+    end
+    local value = firstRow(stmt, function(row)
+        return tonumber(row[1]) or 0
+    end)
+    return value or 0
+end
+
+function Database:clearShelfTombstones()
+    return self:_exec("DELETE FROM shelf_sync_tombstones")
 end
 
 function Database:getShelfSyncStats()
@@ -1121,6 +2031,10 @@ function Database:deletePendingSession(id)
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
+end
+
+function Database:deleteAllPendingSessions()
+    return self:_exec("DELETE FROM pending_sessions")
 end
 
 function Database:incrementSessionRetryCount(id)

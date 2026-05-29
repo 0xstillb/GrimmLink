@@ -16,6 +16,8 @@ local _ok_dispatcher, Dispatcher = pcall(require, "dispatcher")
 if not _ok_dispatcher then Dispatcher = nil end
 local _ok_fm, FileManager = pcall(require, "apps/filemanager/filemanager")
 if not _ok_fm then FileManager = nil end
+local _ok_lfs, lfs = pcall(require, "lfs")
+if not _ok_lfs then lfs = nil end
 
 local _gl_load_errors = {}
 local function _glRequire(name)
@@ -32,6 +34,7 @@ local APIClient  = _glRequire("grimmlink_api_client")
 local FileLogger = _glRequire("grimmlink_file_logger")
 local ShelfSync  = _glRequire("grimmlink_shelf_sync")
 local Updater    = _glRequire("grimmlink_updater")
+local MetadataExtractor = _glRequire("grimmlink_metadata_extractor")
 
 local _ = require("gettext")
 local T = ffiutil.template
@@ -55,6 +58,10 @@ local DEFAULTS = {
     auto_pull_on_open = true,
     auto_push_on_close = true,
     offline_queue_enabled = true,
+    auto_sync_cooldown_seconds = 300,
+    ask_wifi_before_sync = true,
+    sync_on_network_connected = false,
+    network_sync_cooldown_seconds = 300,
     debug_logging = false,
     log_to_file = false,
     threshold_percent = 1.0,
@@ -64,7 +71,16 @@ local DEFAULTS = {
     shelf_sync_enabled = false,
     shelf_id = nil,
     shelf_name = "",
+    shelf_type = "regular",
     download_dir = "",
+    sync_regular_shelf_enabled = false,
+    selected_regular_shelf_id = nil,
+    selected_regular_shelf_name = "",
+    sync_magic_shelf_enabled = false,
+    selected_magic_shelf_id = nil,
+    selected_magic_shelf_name = "",
+    use_separate_magic_download_dir = false,
+    magic_download_dir = "",
     shelf_fast_sync_enabled = true,
     shelf_fast_sync_cache_seconds = 15,
     auto_sync_shelf_on_resume = false,
@@ -77,7 +93,17 @@ local DEFAULTS = {
     update_repo = "0xstillb/grimmlink",
     allow_prerelease_updates = false,
     pdf_web_reader_bridge_enabled = false,
+    metadata_sync_enabled = false,
+    rating_sync_enabled = true,
+    annotations_sync_enabled = true,
+    bookmarks_sync_enabled = true,
+    metadata_retry_max = 5,
 }
+
+local DISK_SPACE_SAFETY_MARGIN_BYTES = 20 * 1024 * 1024
+local READ_STATUS_CAPABILITY_CACHE_SECONDS = 300
+local DIR_PICKER_MAX_SCAN_ENTRIES = 500
+local DIR_PICKER_MAX_SHOW_DIRS = 60
 
 local function safeToString(value)
     if value == nil then
@@ -161,6 +187,138 @@ end
 
 local function normalizeUpdateChannel(value)
     return value == "prerelease" and "prerelease" or "stable"
+end
+
+local function normalizeShelfType(value)
+    local shelf_type = tostring(value or "regular"):lower()
+    if shelf_type ~= "magic" then
+        return "regular"
+    end
+    return shelf_type
+end
+
+local function shellQuote(value)
+    local raw = safeToString(value)
+    return "'" .. raw:gsub("'", [["'"']]) .. "'"
+end
+
+local function parseDfAvailableBytes(output)
+    local text = safeToString(output)
+    local available_kb = nil
+    for line in text:gmatch("[^\r\n]+") do
+        local candidate = line:match("^%S+%s+%d+%s+%d+%s+(%d+)%s+%S+%s+.+$")
+        if candidate then
+            available_kb = tonumber(candidate)
+        end
+    end
+    if not available_kb then
+        return nil
+    end
+    return math.max(0, available_kb) * 1024
+end
+
+local function normalizeManualReadStatus(value)
+    local normalized = safeToString(value):upper()
+    if normalized == "" then
+        return nil
+    end
+    if normalized == "ON_HOLD" then
+        return "PAUSED"
+    end
+    return normalized
+end
+
+local function stableTextHash(value)
+    local text = safeToString(value)
+    if text == "" then
+        return ""
+    end
+    local ok_sha2, sha2 = pcall(require, "ffi/sha2")
+    if ok_sha2 and sha2 and type(sha2.md5) == "function" then
+        return sha2.md5(text)
+    end
+    local fallback = text:gsub("%s+", " "):sub(1, 32)
+    return fallback:gsub("[^%w%-_]", "_")
+end
+
+local function shortPrefix(value, max_len)
+    local text = safeToString(value)
+    local length = tonumber(max_len) or 8
+    if text == "" then
+        return "-"
+    end
+    if #text <= length then
+        return text
+    end
+    return text:sub(1, length)
+end
+
+local function redactSimple(value, keep_prefix)
+    local text = safeToString(value)
+    if text == "" then
+        return ""
+    end
+    local keep = tonumber(keep_prefix) or 0
+    if keep <= 0 then
+        return "[REDACTED]"
+    end
+    if #text <= keep then
+        return text
+    end
+    return text:sub(1, keep) .. "..."
+end
+
+local function redactUrl(url)
+    local text = safeToString(url)
+    if text == "" then
+        return ""
+    end
+    local protocol, host = text:match("^(https?://)([^/%?]+)")
+    if protocol and host then
+        local host_prefix = host:sub(1, math.min(#host, 4))
+        return protocol .. host_prefix .. "..."
+    end
+    return redactSimple(text, 8)
+end
+
+local function basenameOf(path)
+    local value = safeToString(path)
+    if value == "" then
+        return ""
+    end
+    return value:match("([^/\\]+)$") or value
+end
+
+local function normalizeDirectoryPath(path)
+    local value = safeToString(path):gsub("\\", "/")
+    if value == "" then
+        return ""
+    end
+    value = value:gsub("/+$", "")
+    if value == "" then
+        return "/"
+    end
+    return value
+end
+
+local function joinDirectoryPath(base, child)
+    local normalized_base = normalizeDirectoryPath(base)
+    if normalized_base == "/" then
+        return "/" .. safeToString(child)
+    end
+    return normalized_base .. "/" .. safeToString(child)
+end
+
+local function parentDirectoryPath(path)
+    local normalized = normalizeDirectoryPath(path)
+    if normalized == "" or normalized == "/" then
+        return "/"
+    end
+    local parent = normalized:match("^(.*)/[^/]+$")
+    if not parent or parent == "" then
+        return "/"
+    end
+    return parent
 end
 
 local function detectPluginDir()
@@ -251,8 +409,20 @@ function Grimmlink:isReady(require_api)
     if not self.db then
         return false
     end
-    if require_api and not self.api then
+    if require_api and not self:isApiReady() then
         return false
+    end
+    return true
+end
+
+function Grimmlink:isApiReady(required_methods)
+    if not self.api or type(self.api.init) ~= "function" then
+        return false
+    end
+    for _, method in ipairs(required_methods or {}) do
+        if type(self.api[method]) ~= "function" then
+            return false
+        end
     end
     return true
 end
@@ -287,11 +457,11 @@ function Grimmlink:resolveServerUrl()
 end
 
 function Grimmlink:refreshApiClient()
-    if self.api and type(self.api.init) == "function" then
+    if self:isApiReady() then
         local primary = self:resolveServerUrl()
         self.api:init(primary, self.username, self.password, self.debug_logging)
         -- Set fallback: if primary is local, fallback is remote; and vice versa
-        if self.remote_url ~= "" and self.server_url ~= "" then
+        if self.remote_url ~= "" and self.server_url ~= "" and type(self.api.setFallbackUrl) == "function" then
             local fallback = (primary == self.server_url) and self.remote_url or self.server_url
             self.api:setFallbackUrl(fallback)
         end
@@ -498,6 +668,177 @@ function Grimmlink:showTextInput(title, current_value, hint, secret, on_save)
     end
 end
 
+function Grimmlink:isDirectory(path)
+    if not lfs or type(lfs.attributes) ~= "function" then
+        return false
+    end
+    local normalized = normalizeDirectoryPath(path)
+    if normalized == "" then
+        return false
+    end
+    local ok, attr = pcall(lfs.attributes, normalized)
+    return ok and attr and attr.mode == "directory"
+end
+
+function Grimmlink:listChildDirectories(path)
+    local normalized = normalizeDirectoryPath(path)
+    local children = {}
+    local scan_count = 0
+    local truncated = false
+    if not normalized or normalized == "" or not lfs or type(lfs.dir) ~= "function" then
+        return children, truncated
+    end
+
+    local ok_iter, iter_fn, iter_state = pcall(lfs.dir, normalized)
+    if not ok_iter or type(iter_fn) ~= "function" then
+        return children, truncated
+    end
+
+    local ok_scan = pcall(function()
+        for entry in iter_fn, iter_state do
+            scan_count = scan_count + 1
+            if scan_count > DIR_PICKER_MAX_SCAN_ENTRIES then
+                truncated = true
+                break
+            end
+            if entry ~= "." and entry ~= ".." then
+                local child_path = joinDirectoryPath(normalized, entry)
+                if self:isDirectory(child_path) then
+                    children[#children + 1] = {
+                        name = entry,
+                        path = child_path,
+                    }
+                    if #children >= DIR_PICKER_MAX_SHOW_DIRS then
+                        truncated = true
+                        break
+                    end
+                end
+            end
+        end
+    end)
+    if not ok_scan then
+        return {}, false
+    end
+
+    table.sort(children, function(a, b)
+        return safeToString(a.name):lower() < safeToString(b.name):lower()
+    end)
+    return children, truncated
+end
+
+function Grimmlink:getDirectoryPickerStart(start_dir)
+    local candidates = {
+        normalizeDirectoryPath(start_dir),
+        normalizeDirectoryPath(self.download_dir),
+        normalizeDirectoryPath(self.magic_download_dir),
+        normalizeDirectoryPath(DataStorage and DataStorage:getDataDir() or nil),
+        normalizeDirectoryPath(DataStorage and DataStorage:getSettingsDir() or nil),
+        "/storage/emulated/0",
+        "/mnt/onboard",
+        "/",
+    }
+
+    for _, candidate in ipairs(candidates) do
+        if candidate and candidate ~= "" and self:isDirectory(candidate) then
+            return candidate
+        end
+    end
+    return nil
+end
+
+function Grimmlink:showDirectoryPicker(options)
+    local opts = options or {}
+    if not lfs then
+        self:showMessage(_("Directory picker unavailable on this device"), 3)
+        return
+    end
+
+    local current_dir = self:getDirectoryPickerStart(opts.current_dir or opts.start_dir)
+    if not current_dir then
+        self:showMessage(_("No accessible directories found"), 3)
+        return
+    end
+
+    local dialog
+    local function closePicker()
+        if dialog then
+            pcall(UIManager.close, UIManager, dialog)
+            dialog = nil
+        end
+    end
+
+    local function reopen(next_dir)
+        closePicker()
+        opts.current_dir = next_dir
+        if UIManager and type(UIManager.scheduleIn) == "function" then
+            UIManager:scheduleIn(0.01, function()
+                self:showDirectoryPicker(opts)
+            end)
+        else
+            self:showDirectoryPicker(opts)
+        end
+    end
+
+    local buttons = {}
+    local function addRow(text, callback)
+        buttons[#buttons + 1] = {
+            {
+                text = text,
+                callback = function()
+                    self:invokeSafely("directory picker action", callback)
+                end,
+            },
+        }
+    end
+
+    local title_text = opts.title or _("Select directory")
+    if opts.allow_clear then
+        addRow(opts.clear_label or _("Use default"), function()
+            closePicker()
+            if type(opts.on_select) == "function" then
+                opts.on_select("")
+            end
+        end)
+    end
+
+    addRow(_("Select this folder") .. ": " .. current_dir, function()
+        closePicker()
+        if type(opts.on_select) == "function" then
+            opts.on_select(current_dir)
+        end
+    end)
+
+    if current_dir ~= "/" then
+        addRow(_(".. (Parent folder)"), function()
+            reopen(parentDirectoryPath(current_dir))
+        end)
+    end
+
+    local child_dirs, was_truncated = self:listChildDirectories(current_dir)
+    if #child_dirs == 0 then
+        addRow(_("No subfolders"), function() end)
+    else
+        for _, child in ipairs(child_dirs) do
+            addRow(_("Open folder") .. ": " .. safeToString(child.name), function()
+                reopen(child.path)
+            end)
+        end
+        if was_truncated then
+            addRow(_("More folders exist (showing first results)"), function() end)
+        end
+    end
+
+    addRow(_("Cancel"), function()
+        closePicker()
+    end)
+
+    dialog = ButtonDialog:new{
+        title = title_text,
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
 function Grimmlink:showNumberInput(title, current_value, hint, on_save)
     self:showTextInput(title, tostring(current_value or ""), hint, false, function(value)
         local parsed = tonumber(value)
@@ -636,6 +977,150 @@ function Grimmlink:isOnline()
         end
     end
     return false
+end
+
+function Grimmlink:isTrackingEnabled(file_hash, file_path)
+    if not self.db or type(self.db.isTrackingEnabled) ~= "function" then
+        return true
+    end
+    local ok, enabled = pcall(self.db.isTrackingEnabled, self.db, file_hash, file_path)
+    if not ok then
+        return true
+    end
+    return enabled ~= false
+end
+
+function Grimmlink:setTrackingEnabled(file_hash, file_path, enabled)
+    if not self.db or type(self.db.setTrackingEnabled) ~= "function" then
+        return false
+    end
+    local ok, result = pcall(self.db.setTrackingEnabled, self.db, file_hash, file_path, enabled)
+    return ok and result == true or false
+end
+
+function Grimmlink:toggleTracking(file_hash, file_path)
+    if not self.db or type(self.db.toggleTracking) ~= "function" then
+        return nil
+    end
+    local ok, toggled = pcall(self.db.toggleTracking, self.db, file_hash, file_path)
+    if not ok then
+        return nil
+    end
+    return toggled
+end
+
+function Grimmlink:isTrackingEnabledForContext(context)
+    if type(context) ~= "table" then
+        return true
+    end
+    if not self.db then
+        return true
+    end
+    local ok, enabled = pcall(self.db.isTrackingEnabled, self.db, context.file_hash, context.file_path)
+    if not ok then
+        return true
+    end
+    return enabled ~= false
+end
+
+function Grimmlink:getCurrentDocumentContext()
+    local file_path = nil
+    local file_hash = nil
+    local book_id = nil
+    local book_file_id = nil
+
+    if self.current_session then
+        file_path = self.current_session.file_path
+        file_hash = self.current_session.file_hash
+        book_id = self.current_session.book_id
+        book_file_id = self.current_session.book_file_id
+    elseif self.ui and self.ui.document and self.ui.document.file then
+        file_path = tostring(self.ui.document.file)
+    end
+
+    if not file_path or file_path == "" then
+        return nil
+    end
+    if (not file_hash or file_hash == "") and type(self.calculateBookHash) == "function" then
+        local ok_hash, value = pcall(self.calculateBookHash, self, file_path)
+        if ok_hash then
+            file_hash = value
+        end
+    end
+    if (not book_id or not book_file_id) and type(self.resolveBookByFilePath) == "function" then
+        local ok_cached, cached = pcall(self.resolveBookByFilePath, self, file_path)
+        if ok_cached and type(cached) == "table" then
+            file_hash = file_hash or cached.file_hash
+            book_id = book_id or cached.book_id
+            book_file_id = book_file_id or cached.book_file_id
+        end
+    end
+
+    return {
+        file_path = file_path,
+        file_hash = file_hash,
+        book_id = book_id,
+        book_file_id = book_file_id,
+    }
+end
+
+function Grimmlink:showTrackingDisabledMessage()
+    self:showMessage(_("Tracking disabled for this book"), 3)
+end
+
+function Grimmlink:tryEnableNetworkConnection()
+    if not NetworkMgr then
+        return false
+    end
+
+    local methods = {
+        "turnOnWifi",
+        "enableWifi",
+        "enableNetwork",
+        "connect",
+        "reconnect",
+    }
+    for _, name in ipairs(methods) do
+        if type(NetworkMgr[name]) == "function" then
+            local ok, result = pcall(NetworkMgr[name], NetworkMgr)
+            if ok and result ~= false then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function Grimmlink:maybePromptEnableWifiForManualSync()
+    if self:isOnline() then
+        return true
+    end
+
+    if self.ask_wifi_before_sync ~= true then
+        self:showMessage(_("No network connection"), 3)
+        return false
+    end
+
+    local asked = false
+    self:showConfirmAction(
+        _("No network connection.\nEnable Wi-Fi and try sync again?"),
+        _("Enable Wi-Fi"),
+        function()
+            local enabled = self:tryEnableNetworkConnection()
+            if enabled then
+                self:showMessage(_("Trying to enable network..."), 2)
+                self:schedulePendingSync("manual sync after network", 2.0, {
+                    progress_limit = 20,
+                    session_limit = 50,
+                    respect_cooldown = false,
+                })
+            else
+                self:showMessage(_("No network connection"), 3)
+            end
+        end
+    )
+    asked = true
+    return not asked
 end
 
 function Grimmlink:formatDuration(duration_seconds)
@@ -1296,6 +1781,381 @@ function Grimmlink:preparePdfBridgePayload(snapshot, opts)
     return payload
 end
 
+function Grimmlink:getMetadataExtractionContext()
+    local file_path = nil
+    local file_hash = nil
+    local book_id = nil
+    local book_file_id = nil
+
+    if self.current_session then
+        file_path = self.current_session.file_path
+        file_hash = self.current_session.file_hash
+        book_id = self.current_session.book_id
+        book_file_id = self.current_session.book_file_id
+    elseif self.ui and self.ui.document and self.ui.document.file then
+        file_path = tostring(self.ui.document.file)
+    end
+
+    if not file_path or file_path == "" then
+        return nil
+    end
+
+    if (not file_hash or file_hash == "") and type(self.resolveBookByFilePath) == "function" then
+        local ok_cached, cached = pcall(self.resolveBookByFilePath, self, file_path)
+        if ok_cached and type(cached) == "table" then
+            file_hash = cached.file_hash or file_hash
+            book_id = book_id or cached.book_id
+        end
+    end
+
+    if (not file_hash or file_hash == "") and type(self.calculateBookHash) == "function" then
+        local ok_hash, computed_hash = pcall(self.calculateBookHash, self, file_path)
+        if ok_hash then
+            file_hash = computed_hash
+        end
+    end
+
+    return {
+        file_path = file_path,
+        file_hash = file_hash,
+        book_id = book_id,
+        book_file_id = book_file_id,
+    }
+end
+
+local function safeDbBoolCall(db, method_name, ...)
+    if not db or type(db[method_name]) ~= "function" then
+        return false
+    end
+    local ok, result = pcall(db[method_name], db, ...)
+    return ok and result == true or false
+end
+
+local function safeDbValueCall(db, method_name, default_value, ...)
+    if not db or type(db[method_name]) ~= "function" then
+        return default_value
+    end
+    local ok, result = pcall(db[method_name], db, ...)
+    if not ok or result == nil then
+        return default_value
+    end
+    return result
+end
+
+function Grimmlink:extractMetadataForContext(context)
+    local empty = {
+        rating = nil,
+        highlights = {},
+        bookmarks = {},
+        counts = {
+            rating_present = false,
+            highlights_count = 0,
+            notes_count = 0,
+            bookmarks_count = 0,
+        },
+    }
+    if not context or type(context) ~= "table" then
+        return empty
+    end
+    if not MetadataExtractor or type(MetadataExtractor.extract) ~= "function" then
+        return empty
+    end
+
+    local ok, extracted = pcall(MetadataExtractor.extract, {
+        file_path = context.file_path,
+        doc_settings = self.ui and self.ui.doc_settings or nil,
+    })
+    if not ok or type(extracted) ~= "table" then
+        return empty
+    end
+
+    extracted.highlights = type(extracted.highlights) == "table" and extracted.highlights or {}
+    extracted.bookmarks = type(extracted.bookmarks) == "table" and extracted.bookmarks or {}
+    extracted.counts = type(extracted.counts) == "table" and extracted.counts or {}
+    extracted.counts.rating_present = extracted.rating ~= nil
+    extracted.counts.highlights_count = tonumber(extracted.counts.highlights_count) or #extracted.highlights
+    extracted.counts.notes_count = tonumber(extracted.counts.notes_count) or 0
+    extracted.counts.bookmarks_count = tonumber(extracted.counts.bookmarks_count) or #extracted.bookmarks
+    return extracted
+end
+
+function Grimmlink:buildMetadataDedupeKey(file_hash, item_type, payload)
+    if not file_hash or file_hash == "" then
+        return nil
+    end
+
+    if item_type == "rating" then
+        return file_hash .. ":rating"
+    end
+
+    if item_type == "annotation" then
+        local datetime = safeToString(payload and payload.datetime) or ""
+        local pos0 = safeToString(payload and payload.pos0) or ""
+        local text_hash = stableTextHash((payload and payload.text) or (payload and payload.note) or "")
+        return table.concat({ file_hash, "annotation", datetime, pos0, text_hash }, ":")
+    end
+
+    if item_type == "bookmark" then
+        local datetime = safeToString(payload and payload.datetime) or ""
+        local anchor = safeToString(payload and (payload.pos0 or payload.page or payload.pageno or payload.location)) or ""
+        return table.concat({ file_hash, "bookmark", datetime, anchor }, ":")
+    end
+
+    return nil
+end
+
+function Grimmlink:queueMetadataFromContext(context, extracted, reason)
+    local result = {
+        queued = 0,
+        skipped_synced = 0,
+        failed = 0,
+        total = 0,
+    }
+
+    if not self.enabled or not self.db or type(context) ~= "table" then
+        return result
+    end
+    if not context.file_hash or context.file_hash == "" then
+        return result
+    end
+
+    local items = {}
+    if extracted and type(extracted.rating) == "table" and extracted.rating.raw then
+        items[#items + 1] = {
+            item_type = "rating",
+            payload = {
+                rating = extracted.rating.raw,
+                ratingNormalized = extracted.rating.normalized,
+                datetime = nowUtc(),
+                source = reason,
+            },
+        }
+    end
+
+    for _, annotation in ipairs((extracted and extracted.highlights) or {}) do
+        if type(annotation) == "table" then
+            items[#items + 1] = {
+                item_type = "annotation",
+                payload = annotation,
+            }
+        end
+    end
+
+    for _, bookmark in ipairs((extracted and extracted.bookmarks) or {}) do
+        if type(bookmark) == "table" then
+            items[#items + 1] = {
+                item_type = "bookmark",
+                payload = bookmark,
+            }
+        end
+    end
+
+    result.total = #items
+    for _, item in ipairs(items) do
+        local dedupe_key = self:buildMetadataDedupeKey(context.file_hash, item.item_type, item.payload)
+        if dedupe_key then
+            local is_synced = safeDbBoolCall(self.db, "isMetadataItemSynced", context.file_hash, item.item_type, dedupe_key)
+            if is_synced then
+                result.skipped_synced = result.skipped_synced + 1
+            else
+                local payload_json = nil
+                local ok_payload, encoded = pcall(json.encode, item.payload)
+                if ok_payload and encoded ~= nil then
+                    payload_json = encoded
+                end
+                if payload_json and safeDbBoolCall(self.db, "upsertPendingMetadataItem", {
+                    file_hash = context.file_hash,
+                    book_id = context.book_id,
+                    book_file_id = context.book_file_id,
+                    item_type = item.item_type,
+                    dedupe_key = dedupe_key,
+                    payload_json = payload_json,
+                }) then
+                    result.queued = result.queued + 1
+                else
+                    result.failed = result.failed + 1
+                end
+            end
+        else
+            result.failed = result.failed + 1
+        end
+    end
+
+    return result
+end
+
+function Grimmlink:extractAndQueueCurrentMetadata(reason, context_override)
+    if not self.enabled or not self.db then
+        return nil
+    end
+    local context = context_override or self:getMetadataExtractionContext()
+    if not context then
+        return nil
+    end
+    if not self:isTrackingEnabledForContext(context) then
+        return nil
+    end
+    local ok_extract, extracted = pcall(self.extractMetadataForContext, self, context)
+    if not ok_extract then
+        self:logWarn("GrimmLink metadata extract failed:", extracted)
+        return nil
+    end
+    local ok_queue, queued = pcall(self.queueMetadataFromContext, self, context, extracted, reason or "metadata")
+    if not ok_queue then
+        self:logWarn("GrimmLink metadata queue failed:", queued)
+        return nil
+    end
+    return {
+        context = context,
+        extracted = extracted,
+        queued = queued,
+    }
+end
+
+function Grimmlink:showMetadataPreview()
+    if not self.db then
+        self:showMessage(_("Database not available"), 3)
+        return
+    end
+
+    local context = self:getMetadataExtractionContext()
+    if not context then
+        self:showMessage(_("No active document to preview metadata"), 3)
+        return
+    end
+
+    local ok_extract, extracted = pcall(self.extractMetadataForContext, self, context)
+    if not ok_extract or type(extracted) ~= "table" then
+        self:showMessage(_("Failed to preview metadata"), 3)
+        return
+    end
+    local rating_text = _("none")
+    if extracted.rating and extracted.rating.raw then
+        rating_text = T(_("%1 (normalized %2)"), extracted.rating.raw, extracted.rating.normalized or "-")
+    end
+
+    local pending_count = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
+    self:showMessage(T(
+        _("Metadata Preview\nRating: %1\nHighlights: %2\nNotes: %3\nBookmarks: %4\nPending metadata: %5"),
+        rating_text,
+        extracted.counts and extracted.counts.highlights_count or 0,
+        extracted.counts and extracted.counts.notes_count or 0,
+        extracted.counts and extracted.counts.bookmarks_count or 0,
+        pending_count
+    ), 5)
+end
+
+function Grimmlink:getPluginVersionLabel()
+    if not self.plugin_dir or self.plugin_dir == "" then
+        return _("unknown")
+    end
+    local ok, info = pcall(dofile, self.plugin_dir .. "/plugin_version.lua")
+    if ok and type(info) == "table" and info.version and info.version ~= "" then
+        return tostring(info.version)
+    end
+    return _("unknown")
+end
+
+function Grimmlink:buildDebugInfo(context)
+    context = context or self:getCurrentDocumentContext() or {}
+    local pending_counts = safeDbValueCall(self.db, "getPendingCountsForFileHash", {
+        progress = 0,
+        sessions = 0,
+        metadata = 0,
+    }, context.file_hash)
+    local pending_progress_total = safeDbValueCall(self.db, "getPendingProgressCount", 0)
+    local pending_sessions_total = safeDbValueCall(self.db, "getPendingSessionCount", 0)
+    local pending_metadata_total = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
+    local tracking_enabled = self:isTrackingEnabled(context.file_hash, context.file_path)
+    local matched = (self.db and context.file_hash and context.file_hash ~= "")
+        and safeDbValueCall(self.db, "getBookByHash", nil, context.file_hash) or nil
+    local cached = context.file_path and self:resolveBookByFilePath(context.file_path) or nil
+    local shelf_map = context.book_id and safeDbValueCall(self.db, "getShelfSyncEntry", nil, context.book_id) or nil
+    local async_download = self.api and type(self.api.isAsyncDownloadAvailable) == "function"
+        and self.api:isAsyncDownloadAvailable() or false
+    local device_name = self:defaultDeviceName()
+    local log_path = self.file_logger and type(self.file_logger.getLogPath) == "function"
+        and self.file_logger:getLogPath() or ""
+
+    local lines = {
+        _("GrimmLink Debug Info"),
+        T(_("Plugin version: %1"), self:getPluginVersionLabel()),
+        T(_("Device: %1"), device_name),
+        T(_("Enabled: %1"), self.enabled and _("yes") or _("no")),
+        T(_("Active server mode: %1"), (self:resolveServerUrl() == self.server_url) and _("local") or _("remote")),
+        T(_("server_url: %1"), redactUrl(self.server_url)),
+        T(_("remote_url: %1"), redactUrl(self.remote_url)),
+        T(_("home_ssid: %1"), redactSimple(self.home_ssid, 2)),
+        T(_("username: %1"), redactSimple(self.username, 2)),
+        T(_("device_id: %1"), shortPrefix(self.device_id, 10)),
+        T(_("Pending progress count: %1"), pending_progress_total),
+        T(_("Pending session count: %1"), pending_sessions_total),
+        T(_("Pending metadata count: %1"), pending_metadata_total),
+        T(_("Shelf sync enabled: %1"), self.shelf_sync_enabled and _("yes") or _("no")),
+        T(_("Legacy shelf id/name/type: %1 / %2 / %3"), safeToString(self.shelf_id), safeToString(self.shelf_name), safeToString(self.shelf_type)),
+        T(_("Regular sync enabled id/name: %1 / %2 / %3"), self.sync_regular_shelf_enabled and _("yes") or _("no"), safeToString(self.selected_regular_shelf_id), safeToString(self.selected_regular_shelf_name)),
+        T(_("Magic sync enabled id/name: %1 / %2 / %3"), self.sync_magic_shelf_enabled and _("yes") or _("no"), safeToString(self.selected_magic_shelf_id), safeToString(self.selected_magic_shelf_name)),
+        T(_("Download dir: %1"), safeToString(self.download_dir)),
+        T(_("Magic download dir: %1"), safeToString(self.magic_download_dir)),
+        T(_("DB path: %1"), self.db and safeToString(self.db.db_path) or ""),
+        T(_("Async download available: %1"), async_download and _("yes") or _("no")),
+        T(_("Log file path: %1"), safeToString(log_path)),
+        "",
+        _("Current/Selected Book"),
+        T(_("File: %1"), basenameOf(context.file_path)),
+        T(_("File hash: %1"), shortPrefix(context.file_hash, 10)),
+        T(_("Cached bookId/bookFileId: %1 / %2"),
+            safeToString((matched and matched.book_id) or (cached and cached.book_id) or context.book_id),
+            safeToString((matched and matched.bookFileId) or context.book_file_id)),
+        T(_("Tracking enabled: %1"), tracking_enabled and _("yes") or _("no")),
+        T(_("Pending for file: progress %1, sessions %2, metadata %3"),
+            safeToString(pending_counts.progress or 0),
+            safeToString(pending_counts.sessions or 0),
+            safeToString(pending_counts.metadata or 0)),
+        T(_("Shelf mapping bookId/shelfId: %1 / %2"),
+            safeToString((shelf_map and shelf_map.book_id) or ""),
+            safeToString((shelf_map and shelf_map.shelf_id) or "")),
+    }
+    return table.concat(lines, "\n")
+end
+
+function Grimmlink:exportDebugInfo()
+    local text = self:buildDebugInfo()
+    local exported = false
+    local path = DataStorage:getDataDir() .. "/grimmlink-debug-info.txt"
+    local ok_write = pcall(function()
+        local handle = io.open(path, "w")
+        if handle then
+            handle:write(text)
+            handle:close()
+            exported = true
+        end
+    end)
+    if ok_write and exported then
+        text = text .. "\n\n" .. T(_("Saved to: %1"), path)
+    end
+    self:showMessage(text, 8)
+end
+
+function Grimmlink:clearLogsWithConfirm()
+    if not self.file_logger or type(self.file_logger.clearLogs) ~= "function" then
+        self:showMessage(_("Log file manager unavailable"), 3)
+        return
+    end
+    self:showConfirmAction(
+        _("Clear GrimmLink logs?"),
+        _("Clear Logs"),
+        function()
+            local ok, result = pcall(self.file_logger.clearLogs, self.file_logger)
+            if ok and result then
+                self:showMessage(_("Logs cleared"), 3)
+            else
+                self:showMessage(_("Log cleanup finished with warnings"), 3)
+            end
+        end
+    )
+end
+
 function Grimmlink:queueProgressSnapshot(snapshot, kind, payload)
     if not self.db or not self.offline_queue_enabled or not snapshot or not snapshot.bookHash then
         return false
@@ -1318,7 +2178,17 @@ function Grimmlink:pushProgressSnapshot(snapshot, reason, silent)
     if not snapshot or not snapshot.bookHash then
         return false
     end
+    if not self:isTrackingEnabled(snapshot.bookHash, snapshot.file_path) then
+        if not silent then
+            self:showTrackingDisabledMessage()
+        end
+        return false
+    end
 
+    if not self:isApiReady({ "updateProgress" }) then
+        self:queueProgressSnapshot(snapshot, "native", self:prepareNativeProgressPayload(snapshot))
+        return false
+    end
     if not self:refreshApiClient() then
         return false
     end
@@ -1361,6 +2231,12 @@ function Grimmlink:pushPdfWebProgress(snapshot, reason, silent)
     if not snapshot or not snapshot.bookHash or not snapshot.bookId then
         return false
     end
+    if not self:isTrackingEnabled(snapshot.bookHash, snapshot.file_path) then
+        if not silent then
+            self:showTrackingDisabledMessage()
+        end
+        return false
+    end
     if not self:isPdfWebReaderBridgeEnabled() then
         return false
     end
@@ -1368,6 +2244,16 @@ function Grimmlink:pushPdfWebProgress(snapshot, reason, silent)
         return false
     end
 
+    if not self:isApiReady({ "updatePdfProgress" }) then
+        self:queueProgressSnapshot(snapshot, "pdf_bridge", {
+            bookId = snapshot.bookId,
+            bookHash = snapshot.bookHash,
+            request = self:preparePdfBridgePayload(snapshot, {
+                force = reason == "manual" or reason == "close",
+            }),
+        })
+        return false
+    end
     if not self:refreshApiClient() then
         return false
     end
@@ -1406,7 +2292,7 @@ function Grimmlink:pushPdfWebProgress(snapshot, reason, silent)
     return false
 end
 
-function Grimmlink:syncPendingProgress(silent)
+function Grimmlink:syncPendingProgress(silent, limit)
     local synced = 0
     local failed = 0
     if not self.db then
@@ -1416,10 +2302,13 @@ function Grimmlink:syncPendingProgress(silent)
         return synced, failed
     end
 
+    if not self:isApiReady({ "updateProgress", "updatePdfProgress" }) then
+        return synced, failed
+    end
     if not self:refreshApiClient() then
         return synced, failed
     end
-    local pending = self.db:getPendingProgress(100)
+    local pending = self.db:getPendingProgress(limit or 100)
     local now = nowUtc()
 
     local function retryDelaySeconds(retry_count)
@@ -1432,79 +2321,83 @@ function Grimmlink:syncPendingProgress(silent)
     end
 
     for _, item in ipairs(pending) do
-        local can_try = true
-        if item.last_retry_at and (now - tonumber(item.last_retry_at)) < retryDelaySeconds(item.retry_count) then
-            can_try = false
-        end
+        if not self:isTrackingEnabled(item.file_hash, nil) then
+            -- Keep queued rows for this book untouched while tracking is disabled.
+        else
+            local can_try = true
+            if item.last_retry_at and (now - tonumber(item.last_retry_at)) < retryDelaySeconds(item.retry_count) then
+                can_try = false
+            end
 
-        if can_try then
-            local ok, payload = pcall(json.decode, item.payload_json)
-            if not ok or type(payload) ~= "table" then
-                self.db:deletePendingProgress(item.id)
-                failed = failed + 1
-            else
-                local success, response, code
-                if item.kind == "pdf_bridge" then
-                    local request_payload = payload.request or payload
-                    local book_id = payload.bookId or request_payload.bookId
-                    if not book_id and (payload.bookHash or request_payload.bookHash) then
-                        local matched = self:resolveBookByHash(nil, payload.bookHash or request_payload.bookHash, true)
-                        book_id = matched and matched.book_id or nil
-                    end
-                    if book_id then
-                        success, response, code = self.api:updatePdfProgress(book_id, request_payload)
-                    else
-                        success = false
-                        response = "Book ID not resolved"
-                        code = 400
-                    end
-                else
-                    success, response, code = self.api:updateProgress(payload)
-                end
-
-                if success then
+            if can_try then
+                local ok, payload = pcall(json.decode, item.payload_json)
+                if not ok or type(payload) ~= "table" then
                     self.db:deletePendingProgress(item.id)
-                    synced = synced + 1
+                    failed = failed + 1
+                else
+                    local success, response, code
                     if item.kind == "pdf_bridge" then
                         local request_payload = payload.request or payload
-                        local normalized = self:normalizeRemoteProgress(request_payload)
-                        normalized.source = "WEB_READER"
-                        self:rememberRemoteSnapshot(item.file_hash, normalized, "queued-pdf-bridge-pushed")
+                        local book_id = payload.bookId or request_payload.bookId
+                        if not book_id and (payload.bookHash or request_payload.bookHash) then
+                            local matched = self:resolveBookByHash(nil, payload.bookHash or request_payload.bookHash, true)
+                            book_id = matched and matched.book_id or nil
+                        end
+                        if book_id then
+                            success, response, code = self.api:updatePdfProgress(book_id, request_payload)
+                        else
+                            success = false
+                            response = "Book ID not resolved"
+                            code = 400
+                        end
                     else
-                        self:rememberLocalSnapshot(item.file_hash, {
-                            file_path = payload.file_path,
-                            bookId = payload.bookId,
-                            document = payload.document,
-                            bookType = payload.bookType or payload.fileFormat,
-                            progress = payload.progress,
-                            location = payload.location,
-                            percentage = normalizePercent(payload.percentage),
-                            currentPage = payload.currentPage,
-                            totalPages = payload.totalPages,
-                            timestamp = payload.timestamp or nowUtc(),
-                        }, "queued-progress-pushed")
-                        self:rememberRemoteSnapshot(item.file_hash, {
-                            bookId = payload.bookId,
-                            document = payload.document,
-                            bookType = payload.bookType or payload.fileFormat,
-                            progress = payload.progress,
-                            location = payload.location,
-                            percentage = normalizePercent(payload.percentage),
-                            currentPage = payload.currentPage,
-                            totalPages = payload.totalPages,
-                            device = payload.device,
-                            deviceId = payload.deviceId or payload.device_id,
-                            timestamp = payload.timestamp or nowUtc(),
-                        }, "queued-progress-pushed")
+                        success, response, code = self.api:updateProgress(payload)
                     end
-                else
-                    local _, api_error_class = self:classifyApiOutcome(code, response)
-                    if api_error_class == "permanent_not_found" or api_error_class == "permanent_invalid" then
+
+                    if success then
                         self.db:deletePendingProgress(item.id)
+                        synced = synced + 1
+                        if item.kind == "pdf_bridge" then
+                            local request_payload = payload.request or payload
+                            local normalized = self:normalizeRemoteProgress(request_payload)
+                            normalized.source = "WEB_READER"
+                            self:rememberRemoteSnapshot(item.file_hash, normalized, "queued-pdf-bridge-pushed")
+                        else
+                            self:rememberLocalSnapshot(item.file_hash, {
+                                file_path = payload.file_path,
+                                bookId = payload.bookId,
+                                document = payload.document,
+                                bookType = payload.bookType or payload.fileFormat,
+                                progress = payload.progress,
+                                location = payload.location,
+                                percentage = normalizePercent(payload.percentage),
+                                currentPage = payload.currentPage,
+                                totalPages = payload.totalPages,
+                                timestamp = payload.timestamp or nowUtc(),
+                            }, "queued-progress-pushed")
+                            self:rememberRemoteSnapshot(item.file_hash, {
+                                bookId = payload.bookId,
+                                document = payload.document,
+                                bookType = payload.bookType or payload.fileFormat,
+                                progress = payload.progress,
+                                location = payload.location,
+                                percentage = normalizePercent(payload.percentage),
+                                currentPage = payload.currentPage,
+                                totalPages = payload.totalPages,
+                                device = payload.device,
+                                deviceId = payload.deviceId or payload.device_id,
+                                timestamp = payload.timestamp or nowUtc(),
+                            }, "queued-progress-pushed")
+                        end
                     else
-                        self.db:incrementPendingProgressRetry(item.id)
+                        local _, api_error_class = self:classifyApiOutcome(code, response)
+                        if api_error_class == "permanent_not_found" or api_error_class == "permanent_invalid" then
+                            self.db:deletePendingProgress(item.id)
+                        else
+                            self.db:incrementPendingProgressRetry(item.id)
+                        end
+                        failed = failed + 1
                     end
-                    failed = failed + 1
                 end
             end
         end
@@ -1533,7 +2426,7 @@ function Grimmlink:resolveBookByHash(file_path, file_hash, silent)
         return cached
     end
 
-    if not self:refreshApiClient() then
+    if not self:isApiReady({ "getBookByHash" }) or not self:refreshApiClient() then
         return cached
     end
     local success, book, code = self.api:getBookByHash(file_hash)
@@ -1634,11 +2527,14 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id, book_f
     if not self.db or not self.auto_pull_on_open or not file_hash or file_hash == "" or not book_id then
         return
     end
+    if not self:isTrackingEnabled(file_hash, file_path) then
+        return
+    end
     if not self:isOnline() then
         return
     end
 
-    if not self:refreshApiClient() then
+    if not self:isApiReady({ "getProgress" }) or not self:refreshApiClient() then
         return
     end
     local state = self.db:getProgressState(file_hash)
@@ -1689,7 +2585,7 @@ function Grimmlink:manualPullProgress()
         self:showMessage(_("Not connected to server"), 3)
         return
     end
-    if not self:refreshApiClient() then
+    if not self:isApiReady({ "getProgress" }) or not self:refreshApiClient() then
         return
     end
 
@@ -1697,6 +2593,11 @@ function Grimmlink:manualPullProgress()
     local file_path    = self.current_session.file_path
     local book_id      = self.current_session.book_id
     local book_file_id = self.current_session.book_file_id
+
+    if not self:isTrackingEnabled(file_hash, file_path) then
+        self:showTrackingDisabledMessage()
+        return
+    end
 
     if not file_hash or not book_id then
         self:showMessage(_("Book not registered on server"), 3)
@@ -1739,6 +2640,9 @@ function Grimmlink:maybePullPdfWebProgress(file_hash, file_path, book_id, book_f
     if not self.db or not self:isPdfWebReaderBridgeEnabled() or not file_hash or file_hash == "" or not book_id then
         return
     end
+    if not self:isTrackingEnabled(file_hash, file_path) then
+        return
+    end
     local normalized_book_id = maybeNumber(book_id) or book_id
     if not normalized_book_id then
         return
@@ -1750,7 +2654,7 @@ function Grimmlink:maybePullPdfWebProgress(file_hash, file_path, book_id, book_f
         return
     end
 
-    if not self:refreshApiClient() then
+    if not self:isApiReady({ "getPdfProgress" }) or not self:refreshApiClient() then
         return
     end
     local state = self.db:getProgressState(file_hash)
@@ -1803,7 +2707,7 @@ function Grimmlink:buildSingleSessionPayload(group, item)
 end
 
 function Grimmlink:startSession()
-    if not self.enabled or not self:requireReady({ require_api = true, silent = true }) or not self.ui or not self.ui.document or not self.ui.document.file then
+    if not self.enabled or not self:requireReady({ require_api = false, silent = true }) or not self.ui or not self.ui.document or not self.ui.document.file then
         return
     end
 
@@ -1814,7 +2718,11 @@ function Grimmlink:startSession()
         file_hash = self:calculateBookHash(file_path)
     end
 
-    local matched = self:resolveBookByHash(file_path, file_hash, true)
+    local tracking_enabled = self:isTrackingEnabled(file_hash, file_path)
+    local matched = nil
+    if tracking_enabled then
+        matched = self:resolveBookByHash(file_path, file_hash, true)
+    end
     local book_id = maybeNumber(matched and matched.book_id or (cached and cached.book_id or nil))
     local book_file_id = maybeNumber(matched and matched.bookFileId or (cached and cached.book_file_id or nil))
     local title = matched and matched.title or (cached and cached.title or sanitizeTitle(file_path))
@@ -1829,6 +2737,7 @@ function Grimmlink:startSession()
         start_time = nowUtc(),
         start_snapshot = start_snapshot,
         book_type = self:getBookType(file_path),
+        tracking_enabled = tracking_enabled,
     }
 
     local function doNetworkSync()
@@ -1837,11 +2746,18 @@ function Grimmlink:startSession()
         if not self.current_session or self.current_session.file_hash ~= file_hash then
             return
         end
+        if self.current_session.tracking_enabled == false then
+            return
+        end
         self:invokeSafely("session open sync", function()
             self:maybePullRemoteProgress(file_hash, file_path, book_id, book_file_id, true)
             self:maybePullPdfWebProgress(file_hash, file_path, book_id, book_file_id, true)
             if self:isOnline() then
-                self:syncPendingNow(true)
+                self:schedulePendingSync("session open pending sync", 0.75, {
+                    progress_limit = 10,
+                    session_limit = 25,
+                    respect_cooldown = true,
+                })
             end
         end, {}, { silent = true })
     end
@@ -1870,9 +2786,15 @@ function Grimmlink:endSession(options)
     end
 
     local session = self.current_session
+    local metadata_context = {
+        file_path = session.file_path,
+        file_hash = session.file_hash,
+        book_id = session.book_id,
+        book_file_id = session.book_file_id,
+    }
     self.current_session = nil
 
-    if not self:requireReady({ require_api = true, silent = true }) then
+    if not self:requireReady({ require_api = false, silent = true }) then
         return false
     end
 
@@ -1893,8 +2815,11 @@ function Grimmlink:endSession(options)
     )
 
     self:rememberLocalSnapshot(file_hash, end_snapshot, "local-" .. (options.reason or "close"))
+    if session.tracking_enabled ~= false then
+        self:extractAndQueueCurrentMetadata("document-" .. (options.reason or "close"), metadata_context)
+    end
 
-    if session_valid then
+    if session_valid and session.tracking_enabled ~= false then
         self.db:addPendingSession({
             bookId = book_id,
             bookHash = file_hash,
@@ -1915,23 +2840,45 @@ function Grimmlink:endSession(options)
         })
     end
 
-    local should_push = self:shouldPushProgress(end_snapshot, state, options.reason or "close")
+    local should_push = session.tracking_enabled ~= false and self:shouldPushProgress(end_snapshot, state, options.reason or "close")
     if should_push and self.auto_push_on_close then
-        self:pushProgressSnapshot(end_snapshot, options.reason or "close", true)
-        self:pushPdfWebProgress(end_snapshot, options.reason or "close", true)
+        local reason = options.reason or "close"
+        if reason == "close" or reason == "suspend" or reason == "exit" then
+            local native_payload = self:prepareNativeProgressPayload(end_snapshot)
+            local queued = self:queueProgressSnapshot(end_snapshot, "native", native_payload)
+            if not queued then
+                self:pushProgressSnapshot(end_snapshot, reason, true)
+            end
+
+            if self:isPdfWebReaderBridgeEnabled() and end_snapshot.fileFormat == "PDF" and end_snapshot.bookId then
+                local bridge_payload = self:preparePdfBridgePayload(end_snapshot, {
+                    force = reason == "close" or reason == "exit",
+                })
+                local bridge_queued = self:queueProgressSnapshot(end_snapshot, "pdf_bridge", {
+                    bookId = end_snapshot.bookId,
+                    bookHash = end_snapshot.bookHash,
+                    request = bridge_payload,
+                })
+                if not bridge_queued then
+                    self:pushPdfWebProgress(end_snapshot, reason, true)
+                end
+            end
+        else
+            self:pushProgressSnapshot(end_snapshot, reason, true)
+            self:pushPdfWebProgress(end_snapshot, reason, true)
+        end
     end
 
     if self:isOnline() then
-        self:runAfterUiSettles(function()
-            self:invokeSafely("session close sync", function()
-                self:syncPendingNow(true)
-            end, {}, { silent = true })
-        end)
+        self:schedulePendingSync("session close sync", 0.75, {
+            progress_limit = 10,
+            session_limit = 25,
+        })
     end
     return true
 end
 
-function Grimmlink:syncPendingSessions(silent)
+function Grimmlink:syncPendingSessions(silent, limit)
     local synced = 0
     local failed = 0
 
@@ -1945,10 +2892,13 @@ function Grimmlink:syncPendingSessions(silent)
         return synced, failed
     end
 
+    if not self:isApiReady({ "getBookByHash", "submitSession", "submitSessionBatch" }) then
+        return synced, failed
+    end
     if not self:refreshApiClient() then
         return synced, failed
     end
-    local pending = self.db:getPendingSessions(500)
+    local pending = self.db:getPendingSessions(limit or 500)
     if #pending == 0 then
         return synced, failed
     end
@@ -1956,29 +2906,31 @@ function Grimmlink:syncPendingSessions(silent)
     local hash_resolved = {}
     local hash_not_found = {}
     for _, session in ipairs(pending) do
-        if not session.bookId and session.bookHash and session.bookHash ~= "" then
-            local h = session.bookHash
-            if hash_resolved[h] then
-                session.bookId = hash_resolved[h]
-                self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
-            elseif hash_resolved[h] == nil and not hash_not_found[h] then
-                local cached = self.db:getBookByHash(h)
-                if cached and cached.book_id then
-                    hash_resolved[h] = cached.book_id
-                    session.bookId = cached.book_id
-                    self.db:updatePendingSessionBookId(session.id, cached.book_id)
-                else
-                    local ok_lookup, book, lookup_code = self.api:getBookByHash(h)
-                    if ok_lookup and book and book.id then
-                        hash_resolved[h] = tonumber(book.id)
-                        session.bookId = hash_resolved[h]
-                        self.db:updateBookId(h, hash_resolved[h])
-                        self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
-                    elseif lookup_code == 404 then
-                        hash_not_found[h] = true
-                        hash_resolved[h] = false
+        if self:isTrackingEnabled(session.bookHash, nil) then
+            if not session.bookId and session.bookHash and session.bookHash ~= "" then
+                local h = session.bookHash
+                if hash_resolved[h] then
+                    session.bookId = hash_resolved[h]
+                    self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
+                elseif hash_resolved[h] == nil and not hash_not_found[h] then
+                    local cached = self.db:getBookByHash(h)
+                    if cached and cached.book_id then
+                        hash_resolved[h] = cached.book_id
+                        session.bookId = cached.book_id
+                        self.db:updatePendingSessionBookId(session.id, cached.book_id)
                     else
-                        hash_resolved[h] = false
+                        local ok_lookup, book, lookup_code = self.api:getBookByHash(h)
+                        if ok_lookup and book and book.id then
+                            hash_resolved[h] = tonumber(book.id)
+                            session.bookId = hash_resolved[h]
+                            self.db:updateBookId(h, hash_resolved[h])
+                            self.db:updatePendingSessionBookId(session.id, hash_resolved[h])
+                        elseif lookup_code == 404 then
+                            hash_not_found[h] = true
+                            hash_resolved[h] = false
+                        else
+                            hash_resolved[h] = false
+                        end
                     end
                 end
             end
@@ -1987,7 +2939,9 @@ function Grimmlink:syncPendingSessions(silent)
 
     local groups = {}
     for _, session in ipairs(pending) do
-        if not session.bookId then
+        if not self:isTrackingEnabled(session.bookHash, nil) then
+            -- Keep queued rows untouched while tracking is disabled for this book.
+        elseif not session.bookId then
             if hash_not_found[session.bookHash] then
                 self.db:deletePendingSession(session.id)
                 failed = failed + 1
@@ -2092,22 +3046,368 @@ function Grimmlink:syncPendingSessions(silent)
     return synced, failed
 end
 
-function Grimmlink:syncPendingNow(silent)
+local function parseIsoOrNil(value)
+    if value == nil then
+        return nil
+    end
+
+    if type(value) == "number" then
+        return toIso8601(value)
+    end
+
+    if type(value) ~= "string" then
+        return nil
+    end
+
+    local trimmed = value:match("^%s*(.-)%s*$")
+    if trimmed == "" then
+        return nil
+    end
+
+    -- Common KOReader timestamp format: "YYYY-MM-DD HH:MM:SS"
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$") then
+        return (trimmed:gsub(" ", "T")) .. "Z"
+    end
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d%.%d+$") then
+        return (trimmed:gsub(" ", "T")) .. "Z"
+    end
+
+    -- Already ISO-local without timezone: append Z for Instant parsing.
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d$") then
+        return trimmed .. "Z"
+    end
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+$") then
+        return trimmed .. "Z"
+    end
+
+    -- Keep explicit timezone ISO strings as-is.
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.?%d*[Zz]$") then
+        return trimmed
+    end
+    if trimmed:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.?%d*[%+%-]%d%d:%d%d$") then
+        return trimmed
+    end
+
+    -- Unknown format: omit timestamp to avoid backend JSON parse failures.
+    return nil
+end
+
+function Grimmlink:buildMetadataRatingPayload(row, payload)
+    local value = tonumber(payload and payload.rating)
+    if not value then
+        return nil
+    end
+    value = math.floor(value + 0.5)
+    if value < 1 or value > 5 then
+        return nil
+    end
+    return {
+        dedupeKey = row.dedupe_key,
+        value = value,
+        scale = 5,
+        source = "koreader",
+        updatedAt = parseIsoOrNil(payload and payload.datetime),
+    }
+end
+
+function Grimmlink:buildMetadataAnnotationPayload(row, payload)
+    payload = payload or {}
+    return {
+        dedupeKey = row.dedupe_key,
+        type = "highlight",
+        text = payload.text,
+        note = payload.note,
+        color = payload.color,
+        drawer = payload.drawer,
+        style = payload.style,
+        chapter = payload.chapter,
+        page = tonumber(payload.page) or tonumber(payload.pageno),
+        location = {
+            kind = "koreader",
+            pos0 = payload.pos0,
+            pos1 = payload.pos1,
+            pageno = tonumber(payload.pageno),
+            raw = payload.location,
+        },
+        createdAt = parseIsoOrNil(payload.datetime),
+        updatedAt = parseIsoOrNil(payload.datetime),
+    }
+end
+
+function Grimmlink:buildMetadataBookmarkPayload(row, payload)
+    payload = payload or {}
+    local bookmark_title = payload.title or payload.text
+    return {
+        dedupeKey = row.dedupe_key,
+        title = bookmark_title,
+        notes = payload.notes or payload.note,
+        chapter = payload.chapter,
+        page = tonumber(payload.page) or tonumber(payload.pageno),
+        location = {
+            kind = "koreader",
+            pos0 = payload.pos0,
+            pos1 = payload.pos1,
+            pageno = tonumber(payload.pageno),
+            raw = payload.location,
+        },
+        createdAt = parseIsoOrNil(payload.datetime),
+        updatedAt = parseIsoOrNil(payload.datetime),
+    }
+end
+
+function Grimmlink:markMetadataRowSynced(row, server_id)
+    safeDbBoolCall(self.db, "markMetadataItemSynced", {
+        file_hash = row.file_hash,
+        book_id = row.book_id,
+        item_type = row.item_type,
+        dedupe_key = row.dedupe_key,
+        server_id = server_id,
+    })
+    safeDbBoolCall(self.db, "deletePendingMetadataItem", row.id)
+end
+
+function Grimmlink:handleMetadataRowRetry(row, reason)
+    local max_retry = tonumber(self.metadata_retry_max) or DEFAULTS.metadata_retry_max
+    local retry_count = tonumber(row.retry_count) or 0
+    if retry_count >= max_retry then
+        self:logWarn("GrimmLink metadata drop after max retry itemType=", row.item_type,
+            " dedupe=", shortPrefix(row.dedupe_key, 16), " reason=", reason)
+        safeDbBoolCall(self.db, "deletePendingMetadataItem", row.id)
+        return false
+    end
+    safeDbBoolCall(self.db, "incrementPendingMetadataRetry", row.id)
+    return true
+end
+
+function Grimmlink:syncPendingMetadata(silent, limit)
+    local synced = 0
+    local failed = 0
+
+    if not self.db or not self.metadata_sync_enabled then
+        return synced, failed
+    end
+    if not self:requireReady({ require_api = true, silent = silent }) then
+        return synced, failed
+    end
+    if not self:isOnline() then
+        return synced, failed
+    end
+    if not self:isApiReady({ "submitMetadataBatch" }) then
+        return synced, failed
+    end
+    if not self:refreshApiClient() then
+        return synced, failed
+    end
+
+    local pending = safeDbValueCall(self.db, "getPendingMetadataItems", {}, limit or 100)
+    if #pending == 0 then
+        return synced, failed
+    end
+
+    local groups = {}
+    for _, row in ipairs(pending) do
+        if self:isTrackingEnabled(row.file_hash, nil) then
+            local should_consider = (row.item_type ~= "rating" or self.rating_sync_enabled)
+                and (row.item_type ~= "annotation" or self.annotations_sync_enabled)
+                and (row.item_type ~= "bookmark" or self.bookmarks_sync_enabled)
+            if should_consider then
+                local ok_payload, payload = pcall(json.decode, row.payload_json or "")
+                if not ok_payload or type(payload) ~= "table" then
+                    safeDbBoolCall(self.db, "deletePendingMetadataItem", row.id)
+                    failed = failed + 1
+                else
+                    local key = table.concat({
+                        safeToString(row.book_id or ""),
+                        safeToString(row.file_hash or ""),
+                        safeToString(row.book_file_id or ""),
+                    }, "|")
+                    if not groups[key] then
+                        groups[key] = {
+                            book_id = row.book_id,
+                            book_hash = row.file_hash,
+                            book_file_id = row.book_file_id,
+                            file_format = payload.fileFormat or payload.bookType or "EPUB",
+                            rows = {},
+                            item_by_dedupe = {},
+                            rating = nil,
+                            annotations = {},
+                            bookmarks = {},
+                        }
+                    end
+                    local group = groups[key]
+                    group.rows[#group.rows + 1] = row
+                    group.item_by_dedupe[row.dedupe_key] = row
+
+                    if row.item_type == "rating" then
+                        group.rating = self:buildMetadataRatingPayload(row, payload)
+                    elseif row.item_type == "annotation" then
+                        group.annotations[#group.annotations + 1] = self:buildMetadataAnnotationPayload(row, payload)
+                    elseif row.item_type == "bookmark" then
+                        group.bookmarks[#group.bookmarks + 1] = self:buildMetadataBookmarkPayload(row, payload)
+                    end
+                end
+            end
+        end
+    end
+
+    local function handleResult(group, item_result, fallback_item_type, processed_ids)
+        if type(item_result) ~= "table" then
+            return
+        end
+        local dedupe_key = item_result.dedupeKey
+        local row = dedupe_key and group.item_by_dedupe[dedupe_key] or nil
+        if not row then
+            return
+        end
+        processed_ids[row.id] = true
+        local status = tostring(item_result.status or "")
+        if status == "synced" or status == "duplicate" or status == "updated" then
+            self:markMetadataRowSynced(row, item_result.serverId)
+            synced = synced + 1
+            return
+        end
+        if status == "invalid" then
+            self:logWarn("GrimmLink metadata invalid dropped itemType=", fallback_item_type,
+                " dedupe=", shortPrefix(dedupe_key, 16), " error=", safeToString(item_result.error))
+            safeDbBoolCall(self.db, "deletePendingMetadataItem", row.id)
+            failed = failed + 1
+            return
+        end
+        self:handleMetadataRowRetry(row, status ~= "" and status or "failed")
+        failed = failed + 1
+    end
+
+    for _, group in pairs(groups) do
+        if group.rating == nil and #group.annotations == 0 and #group.bookmarks == 0 then
+            goto continue_group
+        end
+
+        local payload = self.api:buildMetadataBatchPayload(
+            group.book_id,
+            group.book_hash,
+            group.book_file_id,
+            group.file_format,
+            self.device_name,
+            self.device_id,
+            group.rating,
+            group.annotations,
+            group.bookmarks
+        )
+
+        local ok_submit, response, code = self.api:submitMetadataBatch(payload)
+        if not ok_submit or type(response) ~= "table" then
+            for _, row in ipairs(group.rows) do
+                self:handleMetadataRowRetry(row, safeToString(response or code or "network_error"))
+                failed = failed + 1
+            end
+            goto continue_group
+        end
+
+        local processed_ids = {}
+        local results = response.results or {}
+        if type(results.rating) == "table" then
+            handleResult(group, results.rating, "rating", processed_ids)
+        end
+        for _, item in ipairs(results.annotations or {}) do
+            handleResult(group, item, "annotation", processed_ids)
+        end
+        for _, item in ipairs(results.bookmarks or {}) do
+            handleResult(group, item, "bookmark", processed_ids)
+        end
+
+        -- Any item with no explicit result is treated as retryable failure.
+        for _, row in ipairs(group.rows) do
+            if not processed_ids[row.id] then
+                self:handleMetadataRowRetry(row, "missing_result")
+                failed = failed + 1
+            end
+        end
+
+        ::continue_group::
+    end
+
+    if not silent and (synced > 0 or failed > 0) then
+        self:showMessage(T(_("Pending metadata sync\nSynced: %1\nFailed: %2"), synced, failed), 3)
+    end
+    return synced, failed
+end
+
+function Grimmlink:syncPendingNow(silent, opts)
+    opts = opts or {}
+
+    if not silent then
+        local context = self:getCurrentDocumentContext()
+        if context and not self:isTrackingEnabledForContext(context) then
+            self:showTrackingDisabledMessage()
+        else
+            self:extractAndQueueCurrentMetadata("manual-sync", context)
+        end
+        if not self:isOnline() then
+            self:maybePromptEnableWifiForManualSync()
+            return
+        end
+    end
+
     if not self:requireReady({ require_api = true, silent = silent }) then
         return
     end
 
-    local progress_synced, progress_failed = self:syncPendingProgress(true)
-    local sessions_synced, sessions_failed = self:syncPendingSessions(true)
+    local progress_synced, progress_failed = self:syncPendingProgress(true, opts.progress_limit)
+    local sessions_synced, sessions_failed = self:syncPendingSessions(true, opts.session_limit)
+    local metadata_synced, metadata_failed = self:syncPendingMetadata(true, opts.metadata_limit)
 
     if not silent then
         self:showMessage(T(
-            _("GrimmLink sync complete\nProgress: %1 synced, %2 failed\nSessions: %3 synced, %4 failed"),
+            _("GrimmLink sync complete\nProgress: %1 synced, %2 failed\nSessions: %3 synced, %4 failed\nMetadata: %5 synced, %6 failed"),
             progress_synced,
             progress_failed,
             sessions_synced,
-            sessions_failed
+            sessions_failed,
+            metadata_synced,
+            metadata_failed
         ), 4)
+    end
+end
+
+function Grimmlink:shouldRunAutoPendingSync(cooldown_seconds)
+    local cooldown = tonumber(cooldown_seconds) or tonumber(self.auto_sync_cooldown_seconds) or DEFAULTS.auto_sync_cooldown_seconds
+    if cooldown <= 0 then
+        return true
+    end
+
+    local now = nowUtc()
+    if self._last_auto_pending_sync_at and (now - self._last_auto_pending_sync_at) < cooldown then
+        self:logDbg("GrimmLink: skipping auto pending sync; cooldown active")
+        return false
+    end
+    self._last_auto_pending_sync_at = now
+    return true
+end
+
+function Grimmlink:schedulePendingSync(label, delay_seconds, opts)
+    if self._scheduled_pending_sync then
+        return
+    end
+    opts = opts or {}
+    if opts.respect_cooldown and not self:shouldRunAutoPendingSync(opts.cooldown_seconds) then
+        return
+    end
+
+    local function runPendingSync()
+        self._scheduled_pending_sync = nil
+        if not self:isOnline() then
+            return
+        end
+        self:invokeSafely(label or "pending sync", function()
+            self:syncPendingNow(true, opts)
+        end, {}, { silent = true })
+    end
+
+    if UIManager and type(UIManager.scheduleIn) == "function" then
+        self._scheduled_pending_sync = runPendingSync
+        UIManager:scheduleIn(delay_seconds or 0.75, runPendingSync)
+    else
+        runPendingSync()
     end
 end
 
@@ -2395,6 +3695,184 @@ function Grimmlink:clearPendingSessionsQueueWithConfirm()
     )
 end
 
+function Grimmlink:clearPendingMetadataQueueWithConfirm()
+    if not self.db then
+        self:showMessage(_("Database not available"), 3)
+        return
+    end
+
+    local count = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
+    if (count or 0) <= 0 then
+        self:showMessage(_("No pending metadata queue items"), 2)
+        return
+    end
+
+    self:showConfirmAction(
+        T(_("Clear pending metadata queue (%1 items)?"), count),
+        _("Clear Queue"),
+        function()
+            local ok = safeDbBoolCall(self.db, "deleteAllPendingMetadata")
+            self:showMessage(ok and _("Pending metadata queue cleared") or _("Failed to clear pending metadata queue"), 3)
+        end
+    )
+end
+
+function Grimmlink:clearSyncedMetadataHistoryWithConfirm()
+    if not self.db then
+        self:showMessage(_("Database not available"), 3)
+        return
+    end
+
+    self:showConfirmAction(
+        _("Clear synced metadata history?\nThis only affects local dedupe history and does not remove server metadata."),
+        _("Clear History"),
+        function()
+            local ok = safeDbBoolCall(self.db, "clearSyncedMetadataHistory")
+            self:showMessage(ok and _("Synced metadata history cleared") or _("Failed to clear synced metadata history"), 3)
+        end
+    )
+end
+
+function Grimmlink:clearShelfTombstonesWithConfirm()
+    if not self.db then
+        self:showMessage(_("Database not available"), 3)
+        return
+    end
+    local count = safeDbValueCall(self.db, "getShelfTombstoneCount", 0)
+    if (count or 0) <= 0 then
+        self:showMessage(_("No shelf tombstones"), 2)
+        return
+    end
+    self:showConfirmAction(
+        T(_("Clear shelf tombstones (%1 items)?"), count),
+        _("Clear Tombstones"),
+        function()
+            local ok = safeDbBoolCall(self.db, "clearShelfTombstones")
+            self:showMessage(ok and _("Shelf tombstones cleared") or _("Failed to clear shelf tombstones"), 3)
+        end
+    )
+end
+
+function Grimmlink:clearPendingShelfRemovalsWithConfirm()
+    if not self.db then
+        self:showMessage(_("Database not available"), 3)
+        return
+    end
+    local count = safeDbValueCall(self.db, "getPendingShelfRemovalCount", 0)
+    if (count or 0) <= 0 then
+        self:showMessage(_("No pending shelf removals"), 2)
+        return
+    end
+    self:showConfirmAction(
+        T(_("Clear pending shelf removals (%1 items)?"), count),
+        _("Clear Queue"),
+        function()
+            local ok = safeDbBoolCall(self.db, "clearPendingShelfRemovals")
+            self:showMessage(ok and _("Pending shelf removals cleared") or _("Failed to clear pending shelf removals"), 3)
+        end
+    )
+end
+
+function Grimmlink:showDatabaseStatus()
+    if not self.db then
+        self:showMessage(_("Database not available"), 3)
+        return
+    end
+    local pending_progress = safeDbValueCall(self.db, "getPendingProgressCount", 0)
+    local pending_sessions = safeDbValueCall(self.db, "getPendingSessionCount", 0)
+    local pending_metadata = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
+    local synced_metadata = safeDbValueCall(self.db, "getSyncedMetadataCount", 0)
+    local pending_shelf_removals = safeDbValueCall(self.db, "getPendingShelfRemovalCount", 0)
+    local shelf_tombstones = safeDbValueCall(self.db, "getShelfTombstoneCount", 0)
+    local shelf_stats = safeDbValueCall(self.db, "getShelfSyncStats", { total = 0, downloaded_by_grimmlink = 0 })
+
+    self:showMessage(T(
+        _("DB Status\nPending progress: %1\nPending sessions: %2\nPending metadata: %3\nSynced metadata history: %4\nPending shelf removals: %5\nShelf tombstones: %6\nShelf map rows: %7"),
+        pending_progress,
+        pending_sessions,
+        pending_metadata,
+        synced_metadata,
+        pending_shelf_removals,
+        shelf_tombstones,
+        shelf_stats and shelf_stats.total or 0
+    ), 6)
+end
+
+function Grimmlink:rebuildMetadataQueueForCurrentBook()
+    if not self.db then
+        self:showMessage(_("Database not available"), 3)
+        return
+    end
+    local context = self:getMetadataExtractionContext()
+    if not context or not context.file_hash then
+        self:showMessage(_("No active document to rebuild metadata queue"), 3)
+        return
+    end
+    if not self:isTrackingEnabledForContext(context) then
+        self:showTrackingDisabledMessage()
+        return
+    end
+
+    self:showConfirmAction(
+        _("Rebuild metadata queue for current book?\nThis replaces local pending metadata rows for this file."),
+        _("Rebuild Queue"),
+        function()
+            safeDbBoolCall(self.db, "deletePendingMetadataByFileHash", context.file_hash)
+            local queued = self:extractAndQueueCurrentMetadata("rebuild-metadata-queue", context)
+            if queued then
+                local pending_count = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
+                self:showMessage(T(_("Metadata queue rebuilt for current book.\nPending metadata: %1"), pending_count), 4)
+            else
+                self:showMessage(_("Failed to rebuild metadata queue for current book"), 4)
+            end
+        end
+    )
+end
+
+function Grimmlink:forceMetadataResyncForCurrentBook()
+    if not self.db then
+        self:showMessage(_("Database not available"), 3)
+        return
+    end
+    local context = self:getMetadataExtractionContext()
+    if not context or not context.file_hash then
+        self:showMessage(_("No active document to force metadata resync"), 3)
+        return
+    end
+    if not self:isTrackingEnabledForContext(context) then
+        self:showTrackingDisabledMessage()
+        return
+    end
+
+    self:showConfirmAction(
+        _("Force metadata re-upload for current book?\nThis clears local synced-history for this file only."),
+        _("Force Resync"),
+        function()
+            local cleared_synced = safeDbBoolCall(self.db, "clearSyncedMetadataHistoryForFileHash", context.file_hash)
+            local cleared_pending = safeDbBoolCall(self.db, "deletePendingMetadataByFileHash", context.file_hash)
+            local queued = self:extractAndQueueCurrentMetadata("force-metadata-resync", context)
+            if queued and (cleared_synced or cleared_pending) then
+                self:syncPendingMetadata(false)
+                self:showMessage(_("Forced metadata resync queued for current book"), 4)
+            elseif queued then
+                self:syncPendingMetadata(false)
+                self:showMessage(_("Metadata resync queued (history clear partially unavailable)"), 4)
+            else
+                self:showMessage(_("Failed to queue forced metadata resync"), 4)
+            end
+        end
+    )
+end
+
+function Grimmlink:rematchCurrentBook()
+    local context = self:getCurrentDocumentContext()
+    if not context or not context.file_path then
+        self:showMessage(_("No file selected"), 3)
+        return
+    end
+    self:matchBookByPath(context.file_path, { force = true })
+end
+
 function Grimmlink:clearSyncQueuesWithConfirm()
     if not self.db then
         self:showMessage(_("Database not available"), 3)
@@ -2403,18 +3881,20 @@ function Grimmlink:clearSyncQueuesWithConfirm()
 
     local progress_count = type(self.db.getPendingProgressCount) == "function" and self.db:getPendingProgressCount() or 0
     local session_count = type(self.db.getPendingSessionCount) == "function" and self.db:getPendingSessionCount() or 0
-    local total = (progress_count or 0) + (session_count or 0)
+    local metadata_count = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
+    local total = (progress_count or 0) + (session_count or 0) + (metadata_count or 0)
     if total <= 0 then
         self:showMessage(_("No pending sync queue items"), 2)
         return
     end
 
     self:showConfirmAction(
-        T(_("Clear sync queues?\nProgress: %1\nSessions: %2"), progress_count, session_count),
+        T(_("Clear sync queues?\nProgress: %1\nSessions: %2\nMetadata: %3"), progress_count, session_count, metadata_count),
         _("Clear Queues"),
         function()
             local progress_ok = true
             local sessions_ok = true
+            local metadata_ok = true
 
             if (progress_count or 0) > 0 and type(self.db.deleteAllPendingProgress) == "function" then
                 progress_ok = self.db:deleteAllPendingProgress()
@@ -2434,7 +3914,11 @@ function Grimmlink:clearSyncQueuesWithConfirm()
                 end
             end
 
-            local ok_all = progress_ok and sessions_ok
+            if (metadata_count or 0) > 0 then
+                metadata_ok = safeDbBoolCall(self.db, "deleteAllPendingMetadata")
+            end
+
+            local ok_all = progress_ok and sessions_ok and metadata_ok
             self:showMessage(ok_all and _("Sync queues cleared") or _("Failed to clear one or more sync queues"), 3)
         end
     )
@@ -2447,17 +3931,19 @@ function Grimmlink:runQuickCleanupWithConfirm()
     end
 
     local unmatched_count = type(self.db.getUnmatchedCacheCount) == "function" and self.db:getUnmatchedCacheCount() or 0
-    local progress_count = type(self.db.getPendingProgressCount) == "function" and self.db:getPendingProgressCount() or 0
-    local session_count = type(self.db.getPendingSessionCount) == "function" and self.db:getPendingSessionCount() or 0
+    local progress_count = safeDbValueCall(self.db, "getPendingProgressCount", 0)
+    local session_count = safeDbValueCall(self.db, "getPendingSessionCount", 0)
+    local metadata_count = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
     local can_clear_update_cache = self.updater and type(self.updater.clearCache) == "function"
 
     self:showConfirmAction(
         T(
-            _("Run quick cleanup?\n- Clear update cache: %1\n- Clear unmatched book cache: %2\n- Clear pending progress queue: %3\n- Clear pending session queue: %4"),
+            _("Run quick cleanup?\n- Clear update cache: %1\n- Clear unmatched book cache: %2\n- Clear pending progress queue: %3\n- Clear pending session queue: %4\n- Clear pending metadata queue: %5"),
             can_clear_update_cache and _("yes") or _("no"),
             unmatched_count,
             progress_count,
-            session_count
+            session_count,
+            metadata_count
         ),
         _("Run Cleanup"),
         function()
@@ -2492,6 +3978,12 @@ function Grimmlink:runQuickCleanupWithConfirm()
                             all_ok = false
                         end
                     end
+                end
+            end
+
+            if (metadata_count or 0) > 0 then
+                if not safeDbBoolCall(self.db, "deleteAllPendingMetadata") then
+                    all_ok = false
                 end
             end
 
@@ -2664,19 +4156,27 @@ function Grimmlink:_showSyncCompletionSummary(result)
     local deleted = result.deleted or 0
     local failed  = result.failed or 0
     local total   = synced + skipped + deleted + failed
+    local errors_count = type(result.errors) == "table" and #result.errors or 0
 
     if result.cancelled then
         lines[#lines + 1] = _("Shelf Sync Cancelled")
+    elseif errors_count > 0 then
+        lines[#lines + 1] = _("Shelf Sync Completed with Errors")
     else
         lines[#lines + 1] = _("Shelf Sync Complete")
     end
     lines[#lines + 1] = "---------------------------"
 
     if total == 0 and not result.cancelled then
-        lines[#lines + 1] = _("Everything is up to date.")
+        if errors_count > 0 then
+            lines[#lines + 1] = _("No changes were applied due to errors.")
+        else
+            lines[#lines + 1] = _("Everything is up to date.")
+        end
     else
         local items = {}
         if synced > 0 then items[#items + 1] = { _("Downloaded"), synced } end
+        if skipped > 0 then items[#items + 1] = { _("Skipped"), skipped } end
         if deleted > 0 then items[#items + 1] = { _("Removed"), deleted } end
         if failed > 0 then  items[#items + 1] = { _("Failed"), failed } end
         local max_len = 0
@@ -2707,11 +4207,21 @@ end
 function Grimmlink:_broadcastSyncResult(result)
     if not Event then return end
     if (result.synced or 0) == 0 and (result.deleted or 0) == 0 then return end
+    local event_shelf_type = normalizeShelfType(
+        (result and result.shelf_type)
+        or self._active_sync_shelf_type
+        or self.shelf_type
+        or "regular"
+    )
+    local event_download_dir = (result and result.download_dir)
+        or self._active_sync_download_dir
+        or self:getShelfSyncTargetDownloadDir(event_shelf_type)
     local ev = Event:new("GrimmLinkShelfSyncComplete", {
         synced              = result.synced or 0,
         deleted             = result.deleted or 0,
         skipped             = result.skipped or 0,
-        download_dir        = self.download_dir,
+        shelf_type          = event_shelf_type,
+        download_dir        = event_download_dir,
         metadata_index_path = result.metadata_index_path,
     })
     local function _emit()
@@ -2731,7 +4241,109 @@ function Grimmlink:_broadcastSyncResult(result)
     end
 end
 
-function Grimmlink:syncShelfNow(silent)
+function Grimmlink:getShelfSyncTargetDownloadDir(shelf_type)
+    local normalized_type = normalizeShelfType(shelf_type)
+    if normalized_type == "magic" and self.use_separate_magic_download_dir then
+        return self.magic_download_dir
+    end
+    return self.download_dir
+end
+
+function Grimmlink:getActiveShelfSelection()
+    local regular_enabled = self.sync_regular_shelf_enabled == true and self.selected_regular_shelf_id ~= nil
+    local magic_enabled = self.sync_magic_shelf_enabled == true and self.selected_magic_shelf_id ~= nil
+
+    if regular_enabled and magic_enabled then
+        return {
+            id = self.selected_regular_shelf_id,
+            name = self.selected_regular_shelf_name or self.shelf_name,
+            type = "regular",
+            note = "both_enabled_partial",
+        }
+    end
+    if regular_enabled then
+        return {
+            id = self.selected_regular_shelf_id,
+            name = self.selected_regular_shelf_name or self.shelf_name,
+            type = "regular",
+        }
+    end
+    if magic_enabled then
+        return {
+            id = self.selected_magic_shelf_id,
+            name = self.selected_magic_shelf_name,
+            type = "magic",
+        }
+    end
+
+    if self.shelf_id ~= nil then
+        return {
+            id = self.shelf_id,
+            name = self.shelf_name,
+            type = normalizeShelfType(self.shelf_type),
+        }
+    end
+
+    return nil
+end
+
+function Grimmlink:getAvailableDiskBytes(path)
+    local target = safeToString(path)
+    if target == "" then
+        return nil
+    end
+
+    local dir_attr = lfs and lfs.attributes and lfs.attributes(target) or nil
+    if not dir_attr then
+        local parent = target:match("^(.*)/[^/]+$")
+        if parent and parent ~= "" then
+            target = parent
+        end
+    elseif dir_attr.mode ~= "directory" then
+        local parent = target:match("^(.*)/[^/]+$")
+        if parent and parent ~= "" then
+            target = parent
+        end
+    end
+
+    local handle = io.popen("df -Pk " .. shellQuote(target) .. " 2>/dev/null")
+    if not handle then
+        return nil
+    end
+    local output = handle:read("*a")
+    handle:close()
+    return parseDfAvailableBytes(output)
+end
+
+function Grimmlink:checkDiskSpaceForShelfItem(item, active_download_dir)
+    local book = item and item.book or nil
+    local size_kb = book and tonumber(book.fileSizeKb) or nil
+    if not size_kb or size_kb <= 0 then
+        return true, nil, nil, "size_unavailable"
+    end
+
+    local resolved_dir = active_download_dir
+    if self.shelf_sync and type(self.shelf_sync.resolveDownloadDir) == "function" then
+        resolved_dir = self.shelf_sync:resolveDownloadDir(active_download_dir)
+    end
+    local available_bytes = self:getAvailableDiskBytes(resolved_dir or active_download_dir or self.download_dir)
+    if not available_bytes then
+        return true, nil, nil, "space_unavailable"
+    end
+
+    local required_bytes = math.floor(size_kb * 1024) + DISK_SPACE_SAFETY_MARGIN_BYTES
+    if available_bytes < required_bytes then
+        return false, available_bytes, required_bytes, "insufficient_space"
+    end
+    return true, available_bytes, required_bytes, nil
+end
+
+function Grimmlink:syncShelfNow(silent, opts)
+    opts = type(opts) == "table" and opts or {}
+    local selection_override = type(opts.selection_override) == "table" and opts.selection_override or nil
+    local suppress_completion_summary = opts.suppress_completion_summary == true
+    local on_complete = type(opts.on_complete) == "function" and opts.on_complete or nil
+
     if not self:requireReady({ require_api = true, silent = silent }) then
         return nil
     end
@@ -2747,11 +4359,58 @@ function Grimmlink:syncShelfNow(silent)
         end
         return nil
     end
-    if not self.shelf_id then
+    local selection = selection_override
+    local followup_selection = nil
+    if not selection then
+        local regular_enabled = self.sync_regular_shelf_enabled == true and self.selected_regular_shelf_id ~= nil
+        local magic_enabled = self.sync_magic_shelf_enabled == true and self.selected_magic_shelf_id ~= nil
+        if regular_enabled and magic_enabled then
+            selection = {
+                id = self.selected_regular_shelf_id,
+                name = self.selected_regular_shelf_name or self.shelf_name,
+                type = "regular",
+            }
+            followup_selection = {
+                id = self.selected_magic_shelf_id,
+                name = self.selected_magic_shelf_name,
+                type = "magic",
+            }
+            suppress_completion_summary = true
+            self:logInfo("GrimmLink: both regular and magic shelf sync are enabled; running regular first then magic")
+        else
+            selection = self:getActiveShelfSelection()
+        end
+    end
+
+    if not selection or not selection.id then
         if not silent then
             self:showMessage(_("No shelf selected. Go to Shelf Sync -> Select Shelf."), 3)
         end
         return nil
+    end
+
+    local active_shelf_id = selection.id
+    local active_shelf_name = selection.name and selection.name ~= "" and selection.name or tostring(selection.id)
+    local active_shelf_type = normalizeShelfType(selection.type)
+    local active_download_dir = self:getShelfSyncTargetDownloadDir(active_shelf_type)
+    self._active_sync_shelf_type = active_shelf_type
+    self._active_sync_download_dir = active_download_dir
+
+    if active_shelf_type == "magic" and self.use_separate_magic_download_dir then
+        if not active_download_dir or active_download_dir == "" then
+            if not silent then
+                self:showMessage(_("Magic Shelf directory cannot be created"), 4)
+            end
+            return nil
+        end
+        local resolved_magic_dir = self.shelf_sync and self.shelf_sync.resolveDownloadDir
+            and self.shelf_sync:resolveDownloadDir(active_download_dir) or active_download_dir
+        if resolved_magic_dir ~= active_download_dir then
+            if not silent then
+                self:showMessage(_("Magic Shelf directory cannot be created"), 4)
+            end
+            return nil
+        end
     end
     if not self:isOnline() then
         if not silent then
@@ -2777,14 +4436,15 @@ function Grimmlink:syncShelfNow(silent)
     self._shelf_sync_cancelled = false
 
     if not silent then
-        self:showShelfSyncMessage(T(_("Syncing shelf: %1..."), self.shelf_name or tostring(self.shelf_id)), 2)
+        local prefix = active_shelf_type == "magic" and _("Syncing Magic Shelf: %1") or _("Syncing Regular Shelf: %1")
+        self:showShelfSyncMessage(T(prefix, active_shelf_name), 2)
     end
 
     local remote_delete_sync = self.two_way_shelf_delete_sync
     local preloaded_remote_books = nil
     local cached_books_age = nil
     if self.shelf_fast_sync_enabled and not remote_delete_sync then
-        preloaded_remote_books, cached_books_age = self:getCachedShelfBooks(self.shelf_id, self.shelf_fast_sync_cache_seconds or 15)
+        preloaded_remote_books, cached_books_age = self:getCachedShelfBooks(active_shelf_id, active_shelf_type, self.shelf_fast_sync_cache_seconds or 15)
         if preloaded_remote_books and not silent then
             self:showShelfSyncMessage(T(_("Fast Sync: using cached shelf data (%1s old)"), math.max(0, math.floor(tonumber(cached_books_age) or 0))), 2)
         end
@@ -2793,8 +4453,9 @@ function Grimmlink:syncShelfNow(silent)
     -- Phase 1: Plan (classify books — fast, no large I/O).
     local ok_plan, plan_or_err = pcall(function()
         return self.shelf_sync:prepareSyncPlan({
-            shelf_id = self.shelf_id,
-            download_dir = self.download_dir,
+            shelf_id = active_shelf_id,
+            shelf_type = active_shelf_type,
+            download_dir = active_download_dir,
             use_original_filename = self.shelf_use_original_filename,
             remote_delete_sync = remote_delete_sync,
             delete_sdr = self.delete_sdr_on_book_delete,
@@ -2804,13 +4465,15 @@ function Grimmlink:syncShelfNow(silent)
             end,
             on_fetched_remote_books = function(remote_books)
                 if self.shelf_fast_sync_enabled and type(remote_books) == "table" then
-                    self:setShelfBooksCache(self.shelf_id, remote_books)
+                    self:setShelfBooksCache(active_shelf_id, active_shelf_type, remote_books)
                 end
             end,
         })
     end)
     if not ok_plan then
         self._shelf_sync_running = false
+        self._active_sync_shelf_type = nil
+        self._active_sync_download_dir = nil
         local err_text = safeToString(plan_or_err)
         self:logErr("GrimmLink shelf sync plan crashed:", err_text)
         if not silent then
@@ -2824,6 +4487,8 @@ function Grimmlink:syncShelfNow(silent)
     local result = plan.result
     local queue  = plan.download_queue or {}
     local total  = #queue
+    result.shelf_type = active_shelf_type
+    result.download_dir = active_download_dir
 
     -- Nothing to download → finish immediately.
     if total == 0 then
@@ -2836,20 +4501,35 @@ function Grimmlink:syncShelfNow(silent)
             end)
         end
         -- Write metadata index + update bookinfo_cache for series browsing
-        local resolved_dir = self.shelf_sync:resolveDownloadDir(self.download_dir)
+        local resolved_dir = self.shelf_sync:resolveDownloadDir(active_download_dir)
         local index_path
         pcall(function()
-            index_path = self.shelf_sync:writeMetadataIndex(self.shelf_id, resolved_dir)
+            index_path = self.shelf_sync:writeMetadataIndex(nil, resolved_dir)
         end)
         pcall(function()
-            self.shelf_sync:upsertBookInfoCache(self.shelf_id)
+            self.shelf_sync:upsertBookInfoCache(nil)
         end)
         result.metadata_index_path = index_path
         self._shelf_sync_running = false
-        if not silent then
+        self._active_sync_shelf_type = nil
+        self._active_sync_download_dir = nil
+        if not silent and not suppress_completion_summary then
             self:_showSyncCompletionSummary(result)
         end
         self:_broadcastSyncResult(result)
+        if followup_selection and followup_selection.id and not self._shelf_sync_cancelled then
+            UIManager:scheduleIn(0.2, function()
+                self:syncShelfNow(silent, {
+                    selection_override = followup_selection,
+                    suppress_completion_summary = false,
+                    on_complete = on_complete,
+                })
+            end)
+            return nil
+        end
+        if on_complete then
+            pcall(on_complete, result)
+        end
         return result
     end
 
@@ -2887,21 +4567,35 @@ function Grimmlink:syncShelfNow(silent)
             end)
         end
         -- Write metadata index + update bookinfo_cache for series browsing
-        local resolved_dir = grimmlink_self.shelf_sync:resolveDownloadDir(grimmlink_self.download_dir)
+        local resolved_dir = grimmlink_self.shelf_sync:resolveDownloadDir(active_download_dir)
         local index_path
         pcall(function()
-            index_path = grimmlink_self.shelf_sync:writeMetadataIndex(
-                grimmlink_self.shelf_id, resolved_dir)
+            index_path = grimmlink_self.shelf_sync:writeMetadataIndex(nil, resolved_dir)
         end)
         pcall(function()
-            grimmlink_self.shelf_sync:upsertBookInfoCache(grimmlink_self.shelf_id)
+            grimmlink_self.shelf_sync:upsertBookInfoCache(nil)
         end)
         result.metadata_index_path = index_path
         grimmlink_self._shelf_sync_running = false
-        if not silent then
+        grimmlink_self._active_sync_shelf_type = nil
+        grimmlink_self._active_sync_download_dir = nil
+        if not silent and not suppress_completion_summary then
             grimmlink_self:_showSyncCompletionSummary(result)
         end
         grimmlink_self:_broadcastSyncResult(result)
+        if followup_selection and followup_selection.id and not grimmlink_self._shelf_sync_cancelled then
+            UIManager:scheduleIn(0.2, function()
+                grimmlink_self:syncShelfNow(silent, {
+                    selection_override = followup_selection,
+                    suppress_completion_summary = false,
+                    on_complete = on_complete,
+                })
+            end)
+            return
+        end
+        if on_complete then
+            pcall(on_complete, result)
+        end
     end
 
     -- Helper: handle cancellation.
@@ -2917,10 +4611,15 @@ function Grimmlink:syncShelfNow(silent)
             end)
         end
         grimmlink_self._shelf_sync_running = false
-        if not silent then
+        grimmlink_self._active_sync_shelf_type = nil
+        grimmlink_self._active_sync_download_dir = nil
+        if not silent and not suppress_completion_summary then
             grimmlink_self:_showSyncCompletionSummary(result)
         end
         grimmlink_self:_broadcastSyncResult(result)
+        if on_complete then
+            pcall(on_complete, result)
+        end
     end
 
     local function startNextDownload()
@@ -2937,6 +4636,26 @@ function Grimmlink:syncShelfNow(silent)
         end
 
         local item = queue[idx]
+        local enough_space, available_bytes, required_bytes, space_reason = grimmlink_self:checkDiskSpaceForShelfItem(item, active_download_dir)
+        if not enough_space then
+            result.skipped = (result.skipped or 0) + 1
+            local msg = T(
+                _("Skipped %1 (bookId=%2): insufficient storage.\nAvailable: %3 MB\nRequired (with margin): %4 MB"),
+                safeToString(item and item.title or _("unknown")),
+                safeToString(item and item.book_id or "?"),
+                math.floor((tonumber(available_bytes) or 0) / (1024 * 1024)),
+                math.floor((tonumber(required_bytes) or 0) / (1024 * 1024))
+            )
+            logger.warn("GrimmLink: " .. msg)
+            result.errors[#result.errors + 1] = msg
+            if not silent then
+                grimmlink_self:showShelfSyncMessage(msg, 5)
+            end
+            UIManager:scheduleIn(0.1, startNextDownload)
+            return
+        elseif space_reason == "space_unavailable" then
+            logger.warn("GrimmLink: storage free-space check unavailable; proceeding with download")
+        end
         if not silent then
             grimmlink_self:_showSyncProgress(idx, total, item.title, nil)
         end
@@ -3081,7 +4800,24 @@ function Grimmlink:normalizeShelfList(shelves)
     if type(shelf_list) ~= "table" then
         return {}
     end
-    return shelf_list
+    local normalized = {}
+    for _, shelf in ipairs(shelf_list) do
+        if type(shelf) == "table" then
+            local shelf_type = normalizeShelfType(shelf.type or shelf.shelfType or shelf.shelf_type)
+            local shelf_id = tonumber(shelf.id or shelf.shelfId or shelf.shelf_id)
+            normalized[#normalized + 1] = {
+                id = shelf_id,
+                shelfId = shelf_id,
+                name = shelf.name or shelf.title,
+                title = shelf.title,
+                type = shelf_type,
+                shelfType = shelf_type,
+                bookCount = shelf.bookCount or shelf.book_count or shelf.totalBooks or shelf.total_books,
+                description = shelf.description,
+            }
+        end
+    end
+    return normalized
 end
 
 function Grimmlink:setShelfListCache(shelf_list)
@@ -3115,18 +4851,19 @@ function Grimmlink:getCachedShelfList(max_age_seconds)
     return self._shelf_list_cache, age
 end
 
-function Grimmlink:setShelfBooksCache(shelf_id, books)
+function Grimmlink:setShelfBooksCache(shelf_id, shelf_type, books)
     if not shelf_id or type(books) ~= "table" then
         return
     end
     self._shelf_books_cache = self._shelf_books_cache or {}
-    self._shelf_books_cache[tostring(shelf_id)] = {
+    local cache_key = normalizeShelfType(shelf_type) .. ":" .. tostring(shelf_id)
+    self._shelf_books_cache[cache_key] = {
         ts = os.time(),
         books = books,
     }
 end
 
-function Grimmlink:getCachedShelfBooks(shelf_id, max_age_seconds)
+function Grimmlink:getCachedShelfBooks(shelf_id, shelf_type, max_age_seconds)
     if not shelf_id then
         return nil, nil
     end
@@ -3138,7 +4875,18 @@ function Grimmlink:getCachedShelfBooks(shelf_id, max_age_seconds)
     if type(cache_map) ~= "table" then
         return nil, nil
     end
-    local entry = cache_map[tostring(shelf_id)]
+    local cache_key = normalizeShelfType(shelf_type) .. ":" .. tostring(shelf_id)
+    local entry = cache_map[cache_key]
+    -- Backward compatibility with very old cache key format (shelf-id only).
+    -- IMPORTANT: only allow this fallback when shelf_type was not explicitly provided,
+    -- otherwise regular/magic caches can bleed into each other for the same shelf id.
+    local shelf_type_raw = shelf_type
+    if type(shelf_type_raw) == "string" then
+        shelf_type_raw = shelf_type_raw:gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    if type(entry) ~= "table" and (shelf_type_raw == nil or shelf_type_raw == "") then
+        entry = cache_map[tostring(shelf_id)]
+    end
     if type(entry) ~= "table" or type(entry.books) ~= "table" or not entry.ts then
         return nil, nil
     end
@@ -3149,7 +4897,31 @@ function Grimmlink:getCachedShelfBooks(shelf_id, max_age_seconds)
     return entry.books, age
 end
 
-function Grimmlink:showShelfPickerDialog(shelf_list, from_cache, cache_age_seconds)
+function Grimmlink:applyShelfSelection(shelf_id, shelf_name, shelf_type)
+    local normalized_id = maybeNumber(shelf_id)
+    local normalized_type = normalizeShelfType(shelf_type)
+    if not normalized_id then
+        return false
+    end
+    local name = safeToString(shelf_name)
+
+    if normalized_type == "magic" then
+        self:saveSetting("selected_magic_shelf_id", normalized_id)
+        self:saveSetting("selected_magic_shelf_name", name)
+        self:saveSetting("sync_magic_shelf_enabled", true)
+    else
+        self:saveSetting("selected_regular_shelf_id", normalized_id)
+        self:saveSetting("selected_regular_shelf_name", name)
+        self:saveSetting("sync_regular_shelf_enabled", true)
+    end
+
+    self:saveSetting("shelf_id", normalized_id)
+    self:saveSetting("shelf_name", name)
+    self:saveSetting("shelf_type", normalized_type)
+    return true
+end
+
+function Grimmlink:showShelfPickerDialog(shelf_list, from_cache, cache_age_seconds, requested_type)
     if type(shelf_list) ~= "table" or #shelf_list == 0 then
         self:showMessage(_("No shelves available"), 3)
         return
@@ -3165,30 +4937,47 @@ function Grimmlink:showShelfPickerDialog(shelf_list, from_cache, cache_age_secon
                         UIManager:close(self._shelf_picker_dialog)
                         self._shelf_picker_dialog = nil
                     end
-                    self:showShelfPicker(true)
+                    self:showShelfPicker(true, requested_type)
                 end)
             end,
         },
     }
+
+    local grouped = { regular = {}, magic = {} }
     for _, shelf in ipairs(shelf_list) do
+        local shelf_type = normalizeShelfType(shelf.type or shelf.shelfType or shelf.shelf_type)
+        grouped[shelf_type][#grouped[shelf_type] + 1] = shelf
+    end
+
+    local function addHeader(text)
+        buttons[#buttons + 1] = {
+            {
+                text = text,
+                callback = function() end,
+            },
+        }
+    end
+
+    local function addShelfButton(shelf)
         local shelf_id = tonumber(shelf.id or shelf.shelfId or shelf.shelf_id)
+        local shelf_type = normalizeShelfType(shelf.type or shelf.shelfType or shelf.shelf_type)
         local shelf_name = safeToString(shelf.name or shelf.title)
         if shelf_name == "" then
             shelf_name = shelf_id and ("Shelf #" .. tostring(shelf_id)) or _("Unnamed shelf")
         end
         local count_value = shelf.bookCount or shelf.book_count or shelf.totalBooks or shelf.total_books
         local count_str = count_value and (" (" .. tostring(count_value) .. ")") or ""
+        local type_label = shelf_type == "magic" and _("[Magic] ") or _("[Regular] ")
         buttons[#buttons + 1] = {
             {
-                text = shelf_name .. count_str,
+                text = type_label .. shelf_name .. count_str,
                 callback = function()
                     self:invokeSafely("select shelf", function()
                         if not shelf_id then
                             self:showMessage(_("Invalid shelf ID from server"), 4)
                             return
                         end
-                        self:saveSetting("shelf_id", shelf_id)
-                        self:saveSetting("shelf_name", shelf_name)
+                        self:applyShelfSelection(shelf_id, shelf_name, shelf_type)
                         if self._shelf_picker_dialog then
                             UIManager:close(self._shelf_picker_dialog)
                             self._shelf_picker_dialog = nil
@@ -3199,6 +4988,20 @@ function Grimmlink:showShelfPickerDialog(shelf_list, from_cache, cache_age_secon
             },
         }
     end
+
+    if #grouped.regular > 0 then
+        addHeader(_("Regular Shelves"))
+        for _, shelf in ipairs(grouped.regular) do
+            addShelfButton(shelf)
+        end
+    end
+    if #grouped.magic > 0 then
+        addHeader(_("Magic Shelves"))
+        for _, shelf in ipairs(grouped.magic) do
+            addShelfButton(shelf)
+        end
+    end
+
     buttons[#buttons + 1] = {
         {
             text = _("Cancel"),
@@ -3214,9 +5017,14 @@ function Grimmlink:showShelfPickerDialog(shelf_list, from_cache, cache_age_secon
     }
 
     local title = _("Select Shelf to Sync")
+    if requested_type == "magic" then
+        title = _("Select Magic Shelf to Sync")
+    elseif requested_type == "regular" then
+        title = _("Select Regular Shelf to Sync")
+    end
     if from_cache then
         local age_value = tostring(math.max(0, math.floor(tonumber(cache_age_seconds) or 0)))
-        title = T(_("Select Shelf to Sync (cached %1s)"), age_value)
+        title = T(_("%1 (cached %2s)"), title, age_value)
     end
 
     self._shelf_picker_dialog = ButtonDialog:new{
@@ -3226,7 +5034,7 @@ function Grimmlink:showShelfPickerDialog(shelf_list, from_cache, cache_age_secon
     UIManager:show(self._shelf_picker_dialog)
 end
 
-function Grimmlink:showShelfPicker(force_refresh)
+function Grimmlink:showShelfPicker(force_refresh, requested_type)
     if not self:requireReady({ require_api = true }) then
         return
     end
@@ -3241,7 +5049,7 @@ function Grimmlink:showShelfPicker(force_refresh)
     if not force_refresh then
         local cached_list, cache_age = self:getCachedShelfList(90)
         if cached_list then
-            self:showShelfPickerDialog(cached_list, true, cache_age)
+            self:showShelfPickerDialog(cached_list, true, cache_age, requested_type)
             return
         end
     end
@@ -3256,12 +5064,12 @@ function Grimmlink:showShelfPicker(force_refresh)
     end
 
     self:showMessage(_("Fetching shelves from server..."), 2)
-    local ok, shelves = self.api:getShelves()
+    local ok, shelves = self.api:getShelves(requested_type)
     if not ok then
         local cached_list, cache_age = self:getCachedShelfList(300)
         if cached_list then
             self:showMessage(_("Using cached shelf list (server not reachable)"), 3)
-            self:showShelfPickerDialog(cached_list, true, cache_age)
+            self:showShelfPickerDialog(cached_list, true, cache_age, requested_type)
             return
         end
         self:showMessage(T(_("Failed to fetch shelves: %1"), safeToString(shelves)), 4)
@@ -3275,7 +5083,241 @@ function Grimmlink:showShelfPicker(force_refresh)
     end
 
     self:setShelfListCache(shelf_list)
-    self:showShelfPickerDialog(shelf_list, false, nil)
+    self:showShelfPickerDialog(shelf_list, false, nil, requested_type)
+end
+
+function Grimmlink:showShelfTypeChooser(title, on_select)
+    local dialog
+    local function choose(type_value)
+        if dialog then
+            UIManager:close(dialog)
+        end
+        if type(on_select) == "function" then
+            on_select(type_value)
+        end
+    end
+    dialog = ButtonDialog:new{
+        title = title or _("Select Shelf Type"),
+        buttons = {
+            {
+                {
+                    text = _("regular"),
+                    callback = function() choose("regular") end,
+                },
+                {
+                    text = _("magic"),
+                    callback = function() choose("magic") end,
+                },
+            },
+            {
+                {
+                    text = _("Cancel"),
+                    callback = function() choose(nil) end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+end
+
+function Grimmlink:validateShelfIdAndMaybeSave(shelf_id, shelf_type, save_on_success)
+    local normalized_id = maybeNumber(shelf_id)
+    local normalized_type = normalizeShelfType(shelf_type)
+    if not normalized_id then
+        self:showMessage(_("Invalid shelf ID"), 3)
+        return
+    end
+    if not self:requireReady({ require_api = true }) then
+        return
+    end
+    if not self:isOnline() then
+        self:showMessage(_("No network connection"), 3)
+        return
+    end
+    if not self:refreshApiClient() then
+        self:showMessage(_("Connection not ready"), 3)
+        return
+    end
+
+    self:showMessage(_("Validating shelf access..."), 2)
+    local ok_books, books_or_err, code = self.api:getShelfBooks(normalized_id, normalized_type)
+    if not ok_books then
+        local numeric_code = tonumber(code)
+        if numeric_code == 403 then
+            self:showMessage(_("Shelf exists but is not accessible to this KOReader user"), 4)
+        elseif numeric_code == 404 then
+            self:showMessage(_("Shelf not found for this type or user"), 4)
+        else
+            self:showMessage(T(_("Shelf validation failed: %1"), safeToString(books_or_err)), 4)
+        end
+        return
+    end
+
+    local shelf_name = nil
+    local ok_shelves, shelves = self.api:getShelves(normalized_type)
+    if ok_shelves and type(shelves) == "table" then
+        for _, shelf in ipairs(shelves) do
+            if maybeNumber(shelf.id or shelf.shelfId or shelf.shelf_id) == normalized_id then
+                shelf_name = safeToString(shelf.name or shelf.title)
+                break
+            end
+        end
+    end
+    if not shelf_name or shelf_name == "" then
+        shelf_name = T(_("Shelf #%1"), normalized_id)
+    end
+
+    if save_on_success then
+        self:applyShelfSelection(normalized_id, shelf_name, normalized_type)
+        self:showMessage(T(_("Shelf saved: %1 (%2)"), shelf_name, normalized_type), 3)
+    else
+        self:showMessage(T(_("Shelf is accessible: %1 (%2)\nBooks visible: %3"), shelf_name, normalized_type, #(books_or_err or {})), 4)
+    end
+end
+
+function Grimmlink:promptAndValidateShelfId(save_on_success)
+    local verb = save_on_success and _("Add Shelf by ID") or _("Validate Shelf ID")
+    self:showShelfTypeChooser(verb, function(chosen_type)
+        if not chosen_type then
+            return
+        end
+        self:showNumberInput(_("Shelf ID"), self.shelf_id or 0, _("Enter shelf id"), function(value)
+            local shelf_id = maybeNumber(value)
+            if not shelf_id then
+                self:showMessage(_("Invalid shelf ID"), 3)
+                return
+            end
+            self:validateShelfIdAndMaybeSave(shelf_id, chosen_type, save_on_success == true)
+        end)
+    end)
+end
+
+function Grimmlink:getCurrentBookIdForManualStatus()
+    local context = self:getCurrentDocumentContext()
+    if context and context.book_id then
+        return context.book_id
+    end
+    if self.current_session and self.current_session.book_id then
+        return self.current_session.book_id
+    end
+    if context and context.file_hash and self.db and type(self.db.getBookByHash) == "function" then
+        local cached = self.db:getBookByHash(context.file_hash)
+        if cached and cached.book_id then
+            return cached.book_id
+        end
+    end
+    return nil
+end
+
+function Grimmlink:getReadStatusCapabilities(force_refresh)
+    if not force_refresh and self._read_status_capabilities and self._read_status_capabilities_ts then
+        local age = os.time() - self._read_status_capabilities_ts
+        if age >= 0 and age <= READ_STATUS_CAPABILITY_CACHE_SECONDS then
+            return self._read_status_capabilities
+        end
+    end
+
+    if not self:isApiReady({ "getSupportedReadStatuses" }) then
+        return nil
+    end
+    if not self:refreshApiClient() then
+        return nil
+    end
+
+    local ok, statuses = self.api:getSupportedReadStatuses()
+    if not ok or type(statuses) ~= "table" then
+        return nil
+    end
+
+    local supported = {}
+    for _, status_value in ipairs(statuses) do
+        local normalized = normalizeManualReadStatus(status_value)
+        if normalized then
+            supported[normalized] = true
+        end
+    end
+
+    self._read_status_capabilities = supported
+    self._read_status_capabilities_ts = os.time()
+    return supported
+end
+
+function Grimmlink:buildManualReadStatusActions()
+    local supported = self:getReadStatusCapabilities(false)
+    if type(supported) ~= "table" then
+        return {}
+    end
+
+    local candidates = {
+        { backend = "READING", label = _("Mark as Reading") },
+        { backend = "READ", label = _("Mark as Read") },
+        { backend = "UNREAD", label = _("Mark as Unread") },
+        { backend = "PAUSED", label = _("Mark as On Hold") },
+        { backend = "ABANDONED", label = _("Mark as Abandoned") },
+        { backend = "RE_READING", label = _("Mark as Re-reading") },
+    }
+
+    local actions = {}
+    for _, candidate in ipairs(candidates) do
+        if supported[candidate.backend] then
+            actions[#actions + 1] = candidate
+        end
+    end
+    return actions
+end
+
+function Grimmlink:setManualReadStatusForCurrentBook(backend_status, label_text)
+    local book_id = self:getCurrentBookIdForManualStatus()
+    if not book_id then
+        self:showMessage(_("No matched book ID for current document"), 4)
+        return
+    end
+    if not self:isOnline() then
+        self:showMessage(_("No network connection"), 3)
+        return
+    end
+    if not self:isApiReady({ "updateBookReadStatus" }) or not self:refreshApiClient() then
+        self:showMessage(_("Connection not ready"), 3)
+        return
+    end
+
+    local ok, response_or_err = self.api:updateBookReadStatus(book_id, backend_status)
+    if ok then
+        self:showMessage(T(_("%1 completed"), label_text), 3)
+    else
+        self:showMessage(T(_("Failed to set read status: %1"), safeToString(response_or_err)), 4)
+    end
+end
+
+function Grimmlink:showManualReadStatusMenu()
+    local actions = self:buildManualReadStatusActions()
+    if #actions == 0 then
+        self:showMessage(_("Manual reading status is not supported by this backend"), 4)
+        return
+    end
+
+    local buttons = {}
+    for _, action in ipairs(actions) do
+        buttons[#buttons + 1] = {
+            {
+                text = action.label,
+                callback = function()
+                    self:setManualReadStatusForCurrentBook(action.backend, action.label)
+                end,
+            },
+        }
+    end
+    buttons[#buttons + 1] = {
+        {
+            text = _("Cancel"),
+            callback = function() end,
+        },
+    }
+
+    UIManager:show(ButtonDialog:new{
+        title = _("Manual Reading Status"),
+        buttons = buttons,
+    })
 end
 
 function Grimmlink:configureDownloadDir()
@@ -3290,8 +5332,377 @@ function Grimmlink:configureDownloadDir()
     )
 end
 
+function Grimmlink:configureMagicDownloadDir()
+    self:showTextInput(
+        _("Magic Download Directory"),
+        self.magic_download_dir or "",
+        _("Used when separate magic directory is enabled"),
+        false,
+        function(value)
+            self:saveSetting("magic_download_dir", safeToString(value))
+        end
+    )
+end
+
 function Grimmlink:showPdfBridgeStatus()
     self:showMessage(self:isPdfWebReaderBridgeEnabled() and _("PDF Web Reader Bridge enabled") or _("PDF Web Reader Bridge disabled"), 2)
+end
+
+function Grimmlink:resolveBookContextByPath(file_path)
+    if not file_path or file_path == "" then
+        return nil
+    end
+    local cached = self:resolveBookByFilePath(file_path)
+    local file_hash = cached and cached.file_hash or nil
+    if (not file_hash or file_hash == "") and type(self.calculateBookHash) == "function" then
+        local ok_hash, hash = pcall(self.calculateBookHash, self, file_path)
+        if ok_hash then
+            file_hash = hash
+        end
+    end
+    local book_id = cached and cached.book_id or nil
+    local book_file_id = cached and cached.book_file_id or nil
+    return {
+        file_path = file_path,
+        file_hash = file_hash,
+        book_id = book_id,
+        book_file_id = book_file_id,
+    }
+end
+
+function Grimmlink:syncThisBookFromPath(file_path)
+    local context = self:resolveBookContextByPath(file_path)
+    if not context then
+        self:showMessage(_("No file selected"), 3)
+        return
+    end
+    if not self:isTrackingEnabled(context.file_hash, context.file_path) then
+        self:showTrackingDisabledMessage()
+        return
+    end
+
+    if self.current_session and self.current_session.file_path == context.file_path then
+        local snapshot = self:getCurrentProgressSnapshot(
+            self.current_session.file_hash,
+            self.current_session.file_path,
+            self.current_session.book_id,
+            self.current_session.book_file_id
+        )
+        self:pushProgressSnapshot(snapshot, "manual", false)
+        if self:isPdfWebReaderBridgeEnabled() then
+            self:pushPdfWebProgress(snapshot, "manual", true)
+        end
+        self:syncPendingNow(false, { progress_limit = 20, session_limit = 50 })
+    else
+        self:showMessage(_("Open the book to sync progress"), 3)
+    end
+end
+
+function Grimmlink:pullRemoteProgressFromPath(file_path)
+    if not self.current_session or self.current_session.file_path ~= file_path then
+        self:showMessage(_("Open the book first to pull progress"), 3)
+        return
+    end
+    if not self:isTrackingEnabled(self.current_session.file_hash, self.current_session.file_path) then
+        self:showTrackingDisabledMessage()
+        return
+    end
+    self:manualPullProgress()
+end
+
+function Grimmlink:toggleTrackingByPath(file_path)
+    local context = self:resolveBookContextByPath(file_path)
+    if not context then
+        self:showMessage(_("No file selected"), 3)
+        return
+    end
+    local toggled = self:toggleTracking(context.file_hash, context.file_path)
+    if toggled == nil then
+        self:showMessage(_("Failed to update tracking state"), 3)
+        return
+    end
+    self:showMessage(toggled and _("Tracking enabled for this book") or _("Tracking disabled for this book"), 3)
+end
+
+function Grimmlink:matchBookByPath(file_path, options)
+    options = options or {}
+    local force_rematch = options.force == true
+    local context = self:resolveBookContextByPath(file_path)
+    if not context or not context.file_hash then
+        self:showMessage(_("Could not calculate book hash"), 3)
+        return
+    end
+
+    local cached = self.db and self.db:getBookByHash(context.file_hash) or nil
+    if cached and cached.book_id and not force_rematch then
+        self:showMessage(T(_("Book already matched: %1"), cached.book_id), 3)
+        return
+    end
+
+    local remote_matched = nil
+    if self:isOnline() and self:isApiReady({ "getBookByHash" }) and self:refreshApiClient() then
+        local ok_lookup, book = self.api:getBookByHash(context.file_hash)
+        if ok_lookup and type(book) == "table" and book.id then
+            remote_matched = tonumber(book.id) or book.id
+        end
+    end
+
+    if remote_matched then
+        self.db:saveBookCache(file_path, context.file_hash, remote_matched, sanitizeTitle(file_path), nil)
+        self:showMessage(force_rematch and T(_("Re-matched by hash: %1"), remote_matched) or T(_("Matched by hash: %1"), remote_matched), 3)
+        return
+    end
+
+    self:showTextInput(_("Manual Book ID"), "", _("Enter Grimmory book id"), false, function(value)
+        local manual_id = tonumber(value)
+        if not manual_id then
+            self:showMessage(_("Invalid book id"), 3)
+            return
+        end
+        self.db:saveBookCache(file_path, context.file_hash, manual_id, sanitizeTitle(file_path), nil)
+        self:showMessage(T(_("Book mapping saved: %1"), manual_id), 3)
+    end)
+end
+
+function Grimmlink:showBookDebugInfoByPath(file_path)
+    local context = self:resolveBookContextByPath(file_path)
+    if not context then
+        self:showMessage(_("No file selected"), 3)
+        return
+    end
+    self:showMessage(self:buildDebugInfo(context), 8)
+end
+
+function Grimmlink:buildFileManagerActionItems(path_resolver)
+    local resolve = path_resolver
+    local function filePath()
+        if type(resolve) == "function" then
+            local ok, value = pcall(resolve)
+            if ok and value and value ~= "" then
+                return tostring(value)
+            end
+        end
+        return nil
+    end
+
+    return {
+        {
+            text = _("GrimmLink: Sync This Book"),
+            callback = function()
+                local file_path = filePath()
+                if not file_path then
+                    self:showMessage(_("No file selected"), 3)
+                    return
+                end
+                self:syncThisBookFromPath(file_path)
+            end,
+        },
+        {
+            text = _("GrimmLink: Pull Remote Progress"),
+            callback = function()
+                local file_path = filePath()
+                if not file_path then
+                    self:showMessage(_("Open the book first to pull progress"), 3)
+                    return
+                end
+                self:pullRemoteProgressFromPath(file_path)
+            end,
+        },
+        {
+            text = _("GrimmLink: Toggle Tracking"),
+            callback = function()
+                local file_path = filePath()
+                if not file_path then
+                    self:showMessage(_("No file selected"), 3)
+                    return
+                end
+                self:toggleTrackingByPath(file_path)
+            end,
+        },
+        {
+            text = _("GrimmLink: Match Book"),
+            callback = function()
+                local file_path = filePath()
+                if not file_path then
+                    self:showMessage(_("No file selected"), 3)
+                    return
+                end
+                self:matchBookByPath(file_path)
+            end,
+        },
+        {
+            text = _("GrimmLink: Show Debug Info"),
+            callback = function()
+                local file_path = filePath()
+                if not file_path then
+                    self:showMessage(_("No file selected"), 3)
+                    return
+                end
+                self:showBookDebugInfoByPath(file_path)
+            end,
+        },
+    }
+end
+
+function Grimmlink:registerFileManagerHoldActions()
+    local function resolvePathFromValue(value)
+        if type(value) == "string" and value ~= "" then
+            return value
+        end
+        if type(value) == "table" then
+            local candidates = {
+                value.path,
+                value.file,
+                value.filepath,
+                value.selected_file,
+                value.selected_path,
+            }
+            for _, candidate in ipairs(candidates) do
+                if candidate and candidate ~= "" then
+                    return tostring(candidate)
+                end
+            end
+        end
+        return nil
+    end
+
+    local function registerViaFileDialogButtons()
+        local fm = nil
+        local fm_candidates = {
+            self and self.ui,
+            FileManager and FileManager.instance,
+        }
+        for _, candidate in ipairs(fm_candidates) do
+            if type(candidate) == "table" and type(candidate.addFileDialogButtons) == "function" then
+                fm = candidate
+                break
+            end
+        end
+        if not fm then
+            return false
+        end
+
+        local function closeFileDialogSafe()
+            local dialog = fm.file_dialog
+            if dialog then
+                pcall(function()
+                    UIManager:close(dialog)
+                end)
+            end
+        end
+
+        local function wrapAction(action_item)
+            if type(action_item) ~= "table" then
+                return nil
+            end
+            return {
+                text = action_item.text,
+                callback = function()
+                    closeFileDialogSafe()
+                    if type(action_item.callback) == "function" then
+                        action_item.callback()
+                    end
+                end,
+            }
+        end
+
+        local function buildRows(file_path)
+            local action_items = self:buildFileManagerActionItems(function()
+                return file_path
+            end)
+            return {
+                {}, -- separator between KOReader default actions and GrimmLink actions
+                {
+                    wrapAction(action_items[1]),
+                    wrapAction(action_items[2]),
+                    wrapAction(action_items[3]),
+                },
+                {
+                    wrapAction(action_items[4]),
+                    wrapAction(action_items[5]),
+                },
+            }
+        end
+
+        local function rowAt(index)
+            return function(file, is_file, _book_props)
+                if not is_file then
+                    return nil
+                end
+                local file_path = resolvePathFromValue(file)
+                if not file_path then
+                    return nil
+                end
+                local rows = buildRows(file_path)
+                return rows[index]
+            end
+        end
+
+        local ok, err = pcall(function()
+            fm:addFileDialogButtons("grimmlink_file_dialog_separator", rowAt(1))
+            fm:addFileDialogButtons("grimmlink_file_dialog_primary", rowAt(2))
+            fm:addFileDialogButtons("grimmlink_file_dialog_secondary", rowAt(3))
+        end)
+        if not ok then
+            self:logWarn("GrimmLink: failed to register FileManager file-dialog actions:", tostring(err))
+            return false
+        end
+
+        return true
+    end
+
+    if registerViaFileDialogButtons() then
+        return true
+    end
+
+    local ok_fm_menu, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
+    if not ok_fm_menu or not FileManagerMenu then
+        self:logDbg("GrimmLink: FileManager hold actions unavailable")
+        return false
+    end
+    if FileManagerMenu.__grimmlink_hold_actions_patched then
+        return true
+    end
+
+    local function resolvePathFromMenu(menu_self)
+        local candidates = {
+            menu_self and menu_self.selected_file,
+            menu_self and menu_self.selected_path,
+            menu_self and menu_self.file,
+            menu_self and menu_self.filepath,
+            menu_self and menu_self.path,
+        }
+        for _, value in ipairs(candidates) do
+            local resolved = resolvePathFromValue(value)
+            if resolved then
+                return resolved
+            end
+        end
+        return nil
+    end
+
+    local orig_set_update_item_table = FileManagerMenu.setUpdateItemTable
+    FileManagerMenu.setUpdateItemTable = function(menu_self)
+        if type(orig_set_update_item_table) == "function" then
+            pcall(orig_set_update_item_table, menu_self)
+        end
+        if type(menu_self) ~= "table" then
+            return
+        end
+        menu_self.pathhold_menu_table = menu_self.pathhold_menu_table or menu_self.hold_menu_table
+        if type(menu_self.pathhold_menu_table) ~= "table" then
+            return
+        end
+        local grimmlink_items = self:buildFileManagerActionItems(function()
+            return resolvePathFromMenu(menu_self)
+        end)
+        for _, item in ipairs(grimmlink_items) do
+            menu_self.pathhold_menu_table[#menu_self.pathhold_menu_table + 1] = item
+        end
+    end
+
+    FileManagerMenu.__grimmlink_hold_actions_patched = true
+    return true
 end
 
 function Grimmlink:registerDispatcherActions()
@@ -3345,19 +5756,6 @@ end
 -- Dedicated menu-bar tab injection
 -- ---------------------------------------------------------------------------
 function Grimmlink:installSettingsTab()
-    local ok_fm_menu, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
-    if not ok_fm_menu or not FileManagerMenu then
-        self:logWarn("GrimmLink: FileManagerMenu unavailable; settings tab not installed")
-        return false
-    end
-
-    FileManagerMenu.__grimmlink_tab_plugin = self
-
-    if FileManagerMenu.__grimmlink_tab_patched then
-        return true
-    end
-    FileManagerMenu.__grimmlink_tab_patched = true
-
     local function normalizeTabField(value)
         if type(value) ~= "string" then return "" end
         return value:lower():gsub("[%s_%-]+", "")
@@ -3379,45 +5777,83 @@ function Grimmlink:installSettingsTab()
         return tools_pos or 1
     end
 
-    local orig_set_update_item_table = FileManagerMenu.setUpdateItemTable
-    FileManagerMenu.setUpdateItemTable = function(menu_self)
-        if type(orig_set_update_item_table) == "function" then
-            orig_set_update_item_table(menu_self)
+    local function installOnMenuClass(MenuClass, class_label)
+        if type(MenuClass) ~= "table" then
+            return false
         end
 
-        local plugin_self = FileManagerMenu.__grimmlink_tab_plugin
-        if not plugin_self or plugin_self.settings_tab_enabled == false then
-            return
+        MenuClass.__grimmlink_tab_plugin = self
+        if MenuClass.__grimmlink_tab_patched then
+            return true
         end
-        if type(menu_self.tab_item_table) ~= "table" then
-            return
-        end
+        MenuClass.__grimmlink_tab_patched = true
 
-        for _, tab in ipairs(menu_self.tab_item_table) do
-            if type(tab) == "table" and tab._grimmlink_settings_tab == true then
+        local orig_set_update_item_table = MenuClass.setUpdateItemTable
+        MenuClass.setUpdateItemTable = function(menu_self)
+            if type(orig_set_update_item_table) == "function" then
+                orig_set_update_item_table(menu_self)
+            end
+
+            local plugin_self = MenuClass.__grimmlink_tab_plugin
+            if not plugin_self or plugin_self.settings_tab_enabled == false then
                 return
             end
-        end
-
-        local build_fn = plugin_self.buildTabItems
-        if type(build_fn) ~= "function" then return end
-
-        local ok_items, tab_items = pcall(build_fn, plugin_self)
-        if not ok_items or type(tab_items) ~= "table" then
-            if plugin_self.logWarn then
-                plugin_self:logWarn("GrimmLink: failed to build settings tab", tostring(tab_items))
+            if type(menu_self.tab_item_table) ~= "table" then
+                return
             end
-            return
+
+            for _, tab in ipairs(menu_self.tab_item_table) do
+                if type(tab) == "table" and tab._grimmlink_settings_tab == true then
+                    return
+                end
+            end
+
+            local build_fn = plugin_self.buildTabItems
+            if type(build_fn) ~= "function" then return end
+
+            local ok_items, tab_items = pcall(build_fn, plugin_self)
+            if not ok_items or type(tab_items) ~= "table" then
+                if plugin_self.logWarn then
+                    plugin_self:logWarn("GrimmLink: failed to build settings tab (" .. safeToString(class_label) .. ")", tostring(tab_items))
+                end
+                return
+            end
+
+            tab_items.icon = tab_items.icon or "appbar.navigation"
+            tab_items.text = tab_items.text or _("GrimmLink")
+            tab_items._grimmlink_settings_tab = true
+
+            table.insert(menu_self.tab_item_table, findInsertPos(menu_self.tab_item_table), tab_items)
         end
-
-        tab_items.icon = tab_items.icon or "appbar.navigation"
-        tab_items.text = tab_items.text or _("GrimmLink")
-        tab_items._grimmlink_settings_tab = true
-
-        table.insert(menu_self.tab_item_table, findInsertPos(menu_self.tab_item_table), tab_items)
+        return true
     end
 
-    return true
+    local targets = {
+        { label = "FileManagerMenu", modules = { "apps/filemanager/filemanagermenu" } },
+        { label = "ReaderMenu", modules = { "apps/reader/modules/readermenu", "readermenu" } },
+    }
+
+    local installed_any = false
+    for _, target in ipairs(targets) do
+        local menu_class = nil
+        for _, module_name in ipairs(target.modules or {}) do
+            local ok_mod, mod = pcall(require, module_name)
+            if ok_mod and type(mod) == "table" then
+                menu_class = mod
+                break
+            end
+        end
+        if menu_class then
+            installed_any = installOnMenuClass(menu_class, target.label) or installed_any
+        else
+            self:logDbg("GrimmLink: " .. safeToString(target.label) .. " unavailable; settings tab not installed for this menu")
+        end
+    end
+
+    if not installed_any then
+        self:logWarn("GrimmLink: no compatible menu class found for settings tab")
+    end
+    return installed_any
 end
 
 function Grimmlink:init()
@@ -3453,6 +5889,7 @@ function Grimmlink:init()
     self.enabled = self:readSetting("enabled", DEFAULTS.enabled)
     self.settings_tab_enabled = self:readSetting("settings_tab_enabled", DEFAULTS.settings_tab_enabled)
     self:installSettingsTab()
+    self:registerFileManagerHoldActions()
     local legacy_auth_key = self.db and self.db:getPluginSetting("auth_key") or nil
     self.server_url = self:readSetting("server_url", DEFAULTS.server_url)
     self.remote_url = self:readSetting("remote_url", DEFAULTS.remote_url)
@@ -3464,6 +5901,10 @@ function Grimmlink:init()
     self.auto_pull_on_open = self:readSetting("auto_pull_on_open", DEFAULTS.auto_pull_on_open)
     self.auto_push_on_close = self:readSetting("auto_push_on_close", DEFAULTS.auto_push_on_close)
     self.offline_queue_enabled = self:readSetting("offline_queue_enabled", DEFAULTS.offline_queue_enabled)
+    self.auto_sync_cooldown_seconds = DEFAULTS.auto_sync_cooldown_seconds
+    self.ask_wifi_before_sync = self:readSetting("ask_wifi_before_sync", DEFAULTS.ask_wifi_before_sync)
+    self.sync_on_network_connected = self:readSetting("sync_on_network_connected", DEFAULTS.sync_on_network_connected)
+    self.network_sync_cooldown_seconds = self:readSetting("network_sync_cooldown_seconds", DEFAULTS.network_sync_cooldown_seconds)
     self.debug_logging = self:readSetting("debug_logging", DEFAULTS.debug_logging)
     self.log_to_file = self:readSetting("log_to_file", DEFAULTS.log_to_file)
     self.threshold_percent = self:readSetting("threshold_percent", DEFAULTS.threshold_percent)
@@ -3473,7 +5914,26 @@ function Grimmlink:init()
     self.shelf_sync_enabled = self:readSetting("shelf_sync_enabled", DEFAULTS.shelf_sync_enabled)
     self.shelf_id = self:readSetting("shelf_id", DEFAULTS.shelf_id)
     self.shelf_name = self:readSetting("shelf_name", DEFAULTS.shelf_name)
+    self.shelf_type = normalizeShelfType(self:readSetting("shelf_type", DEFAULTS.shelf_type))
     self.download_dir = self:readSetting("download_dir", DEFAULTS.download_dir)
+    self.sync_regular_shelf_enabled = self:readSetting("sync_regular_shelf_enabled", DEFAULTS.sync_regular_shelf_enabled)
+    self.selected_regular_shelf_id = self:readSetting("selected_regular_shelf_id", DEFAULTS.selected_regular_shelf_id)
+    self.selected_regular_shelf_name = self:readSetting("selected_regular_shelf_name", DEFAULTS.selected_regular_shelf_name)
+    self.sync_magic_shelf_enabled = self:readSetting("sync_magic_shelf_enabled", DEFAULTS.sync_magic_shelf_enabled)
+    self.selected_magic_shelf_id = self:readSetting("selected_magic_shelf_id", DEFAULTS.selected_magic_shelf_id)
+    self.selected_magic_shelf_name = self:readSetting("selected_magic_shelf_name", DEFAULTS.selected_magic_shelf_name)
+    self.use_separate_magic_download_dir = self:readSetting("use_separate_magic_download_dir", DEFAULTS.use_separate_magic_download_dir)
+    self.magic_download_dir = self:readSetting("magic_download_dir", DEFAULTS.magic_download_dir)
+
+    if self.shelf_id ~= nil and self.selected_regular_shelf_id == nil then
+        self.selected_regular_shelf_id = self.shelf_id
+        self.selected_regular_shelf_name = self.shelf_name
+        self.sync_regular_shelf_enabled = self.shelf_sync_enabled == true
+        self:saveSetting("selected_regular_shelf_id", self.selected_regular_shelf_id)
+        self:saveSetting("selected_regular_shelf_name", self.selected_regular_shelf_name)
+        self:saveSetting("sync_regular_shelf_enabled", self.sync_regular_shelf_enabled)
+    end
+
     self.shelf_fast_sync_enabled = self:readSetting("shelf_fast_sync_enabled", DEFAULTS.shelf_fast_sync_enabled)
     self.shelf_fast_sync_cache_seconds = self:readSetting("shelf_fast_sync_cache_seconds", DEFAULTS.shelf_fast_sync_cache_seconds)
     self.auto_sync_shelf_on_resume = self:readSetting("auto_sync_shelf_on_resume", DEFAULTS.auto_sync_shelf_on_resume)
@@ -3486,6 +5946,11 @@ function Grimmlink:init()
     self.update_repo = self:readSetting("update_repo", DEFAULTS.update_repo)
     self.allow_prerelease_updates = self:readSetting("allow_prerelease_updates", DEFAULTS.allow_prerelease_updates)
     self.pdf_web_reader_bridge_enabled = self:readSetting("pdf_web_reader_bridge_enabled", DEFAULTS.pdf_web_reader_bridge_enabled)
+    self.metadata_sync_enabled = self:readSetting("metadata_sync_enabled", DEFAULTS.metadata_sync_enabled)
+    self.rating_sync_enabled = self:readSetting("rating_sync_enabled", DEFAULTS.rating_sync_enabled)
+    self.annotations_sync_enabled = self:readSetting("annotations_sync_enabled", DEFAULTS.annotations_sync_enabled)
+    self.bookmarks_sync_enabled = self:readSetting("bookmarks_sync_enabled", DEFAULTS.bookmarks_sync_enabled)
+    self.metadata_retry_max = self:readSetting("metadata_retry_max", DEFAULTS.metadata_retry_max)
 
     self:refreshApiClient()
     if self.updater and type(self.updater.init) == "function" then
@@ -3527,8 +5992,13 @@ end
 function Grimmlink:onResume()
     self:ensureMainMenuRegistered()
     self:refreshApiClient()
-    if self:isOnline() then
-        self:syncPendingNow(true)
+    if self:isOnline() and self.sync_on_network_connected == true then
+        self:schedulePendingSync("resume pending sync", 0.75, {
+            progress_limit = 10,
+            session_limit = 25,
+            respect_cooldown = true,
+            cooldown_seconds = tonumber(self.network_sync_cooldown_seconds) or DEFAULTS.network_sync_cooldown_seconds,
+        })
     end
     if self.auto_sync_shelf_on_resume then
         self:syncShelfNow(true)
@@ -3537,7 +6007,6 @@ end
 
 function Grimmlink:onExit()
     self:endSession({ reason = "exit" })
-    self:syncPendingNow(true)
 end
 
 function Grimmlink:showConnectionMenu(touchmenu_instance)
@@ -3600,13 +6069,24 @@ function Grimmlink:addToMainMenu(menu_items)
             end,
         },
         {
+            text = _("Export GrimmLink Debug Info"),
+            callback = function()
+                self:exportDebugInfo()
+            end,
+        },
+        {
             text = _("Sync Summary"),
             callback = function()
                 if not self.db then
                     self:showMessage(_("Database not available"), 3)
                     return
                 end
-                self:showMessage(T(_("Pending progress: %1\nPending sessions: %2"), self.db:getPendingProgressCount(), self.db:getPendingSessionCount()), 3)
+                self:showMessage(T(
+                    _("Pending progress: %1\nPending sessions: %2\nPending metadata: %3"),
+                    self.db:getPendingProgressCount(),
+                    self.db:getPendingSessionCount(),
+                    safeDbValueCall(self.db, "getPendingMetadataCount", 0)
+                ), 3)
             end,
         },
     }
@@ -3633,124 +6113,15 @@ function Grimmlink:addToMainMenu(menu_items)
                 end,
             },
             {
-                separator = true,
-                text = _("Shelf Sync"),
+                text = _("Connection"),
                 sub_item_table = {
-                    {
-                        text = _("Sync Now"),
-                        callback = function() self:syncShelfNow(false) end,
-                    },
-                    {
-                        text = _("Enable Shelf Sync"),
-                        keep_menu_open = true,
-                        checked_func = function() return self.shelf_sync_enabled end,
-                        callback = function()
-                            self.shelf_sync_enabled = not self.shelf_sync_enabled
-                            self:saveSetting("shelf_sync_enabled", self.shelf_sync_enabled)
-                        end,
-                    },
-                    {
-                        text_func = function()
-                            local name = self.shelf_name and self.shelf_name ~= "" and self.shelf_name or _("(none)")
-                            return T(_("Select Shelf: %1"), name)
-                        end,
-                        callback = function() self:showShelfPicker() end,
-                    },
-                    {
-                        separator = true,
-                        text = _("Download Settings"),
-                        sub_item_table = {
-                            {
-                                text_func = function()
-                                    local dir = self.download_dir and self.download_dir ~= "" and self.download_dir or _("(auto)")
-                                    return T(_("Download Directory: %1"), dir)
-                                end,
-                                callback = function() self:configureDownloadDir() end,
-                            },
-                            {
-                                text = _("Original Filenames"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.shelf_use_original_filename end,
-                                callback = function()
-                                    self.shelf_use_original_filename = not self.shelf_use_original_filename
-                                    self:saveSetting("shelf_use_original_filename", self.shelf_use_original_filename)
-                                end,
-                            },
-                        },
-                    },
-                    {
-                        text = _("Sync Behavior"),
-                        sub_item_table = {
-                            {
-                                text = _("Auto-sync on Resume"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.auto_sync_shelf_on_resume end,
-                                callback = function()
-                                    self.auto_sync_shelf_on_resume = not self.auto_sync_shelf_on_resume
-                                    self:saveSetting("auto_sync_shelf_on_resume", self.auto_sync_shelf_on_resume)
-                                end,
-                            },
-                            {
-                                text = _("Fast Sync (Short Cache)"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.shelf_fast_sync_enabled end,
-                                callback = function()
-                                    self.shelf_fast_sync_enabled = not self.shelf_fast_sync_enabled
-                                    self:saveSetting("shelf_fast_sync_enabled", self.shelf_fast_sync_enabled)
-                                end,
-                            },
-                            {
-                                text_func = function()
-                                    return T(_("Cache Duration: %1s"), tonumber(self.shelf_fast_sync_cache_seconds) or 15)
-                                end,
-                                callback = function()
-                                    self:showNumberInput(_("Fast Sync Cache Seconds"), self.shelf_fast_sync_cache_seconds or 15, _("Recommended: 10-30"), function(value)
-                                        local normalized = math.floor(tonumber(value) or 15)
-                                        if normalized < 0 then normalized = 0 end
-                                        if normalized > 120 then normalized = 120 end
-                                        self:saveSetting("shelf_fast_sync_cache_seconds", normalized)
-                                    end)
-                                end,
-                            },
-                            {
-                                text = _("Two-way Delete Sync"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.two_way_shelf_delete_sync end,
-                                callback = function()
-                                    self.two_way_shelf_delete_sync = not self.two_way_shelf_delete_sync
-                                    self:saveSetting("two_way_shelf_delete_sync", self.two_way_shelf_delete_sync)
-                                end,
-                            },
-                            {
-                                text = _("Delete .sdr on Remove"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.delete_sdr_on_book_delete end,
-                                callback = function()
-                                    self.delete_sdr_on_book_delete = not self.delete_sdr_on_book_delete
-                                    self:saveSetting("delete_sdr_on_book_delete", self.delete_sdr_on_book_delete)
-                                end,
-                            },
-                        },
-                    },
-                    {
-                        text = _("Rebuild SimpleUI metadata cache"),
-                        keep_menu_open = true,
-                        callback = function()
-                            if not self.shelf_sync or not self.download_dir then
-                                self:showMessage(_("Shelf sync not configured."), 3)
-                                return
-                            end
-                            local counts = self.shelf_sync:rebuildBookInfoCacheFromIndex(
-                                self.shelf_sync:resolveDownloadDir(self.download_dir))
-                            if counts.error then
-                                self:showMessage(T(_("Rebuild failed: %1"), counts.error), 4)
-                            else
-                                self:showMessage(T(
-                                    _("Rebuild complete\nInserted: %1  Updated: %2  Skipped: %3"),
-                                    counts.inserted, counts.updated, counts.skipped), 5)
-                            end
-                        end,
-                    },
+                    { text = _("Setup Connection"), callback = function() self:configureConnection() end },
+                    { text = _("Local URL"), callback = function() self:configureServerUrl() end },
+                    { text = _("Remote URL"), callback = function() self:configureRemoteUrl() end },
+                    { text = _("Home SSID"), callback = function() self:configureHomeSSID() end },
+                    { text = _("Username"), callback = function() self:configureUsername() end },
+                    { text = _("Password"), callback = function() self:configurePassword() end },
+                    { text = _("Test Connection"), keep_menu_open = true, callback = function() self:testConnection() end },
                 },
             },
             {
@@ -3758,6 +6129,23 @@ function Grimmlink:addToMainMenu(menu_items)
                 callback = function() self:syncPendingNow(false) end,
             },
             {
+                text = _("Sync Shelf Now"),
+                callback = function() self:syncShelfNow(false) end,
+            },
+            {
+                text = _("Sync Metadata Now"),
+                callback = function()
+                    local context = self:getCurrentDocumentContext()
+                    if context and not self:isTrackingEnabledForContext(context) then
+                        self:showTrackingDisabledMessage()
+                        return
+                    end
+                    self:extractAndQueueCurrentMetadata("manual-metadata-sync", context)
+                    self:syncPendingMetadata(false)
+                end,
+            },
+            {
+                separator = true,
                 text = _("Pull Remote Progress"),
                 enabled_func = function()
                     return self.current_session ~= nil
@@ -3766,46 +6154,280 @@ function Grimmlink:addToMainMenu(menu_items)
                 callback = function() self:manualPullProgress() end,
             },
             {
+                text = _("Manual Reading Status"),
+                callback = function()
+                    self:showManualReadStatusMenu()
+                end,
+            },
+            {
+                text = _("Toggle Tracking (Current Book)"),
+                callback = function()
+                    local context = self:getCurrentDocumentContext()
+                    if not context then
+                        self:showMessage(_("No file selected"), 3)
+                        return
+                    end
+                    self:toggleTrackingByPath(context.file_path)
+                end,
+            },
+            {
                 separator = true,
-                text = _("Settings"),
+                text = _("Advanced Setting"),
                 sub_item_table = {
                     {
-                        text = _("Settings Tab"),
-                        help_text = _("Show or hide the dedicated GrimmLink tab in the menu bar.\nWhen hidden, GrimmLink settings remain accessible via Tools > GrimmLink.\nTakes effect after a restart."),
-                        keep_menu_open = true,
-                        checked_func = function()
-                            return self.settings_tab_enabled
-                        end,
-                        callback = function()
-                            local on = self.settings_tab_enabled
-                            self.settings_tab_enabled = not on
-                            self:saveSetting("settings_tab_enabled", self.settings_tab_enabled)
-                            UIManager:show(ConfirmBox:new{
-                                text = T(
-                                    _("The GrimmLink settings tab will be %1 after restart.\n\nRestart now?"),
-                                    on and _("hidden") or _("shown")
-                                ),
-                                ok_text     = _("Restart"),
-                                cancel_text = _("Later"),
-                                ok_callback = function()
-                                    if self.db and type(self.db.flush) == "function" then
-                                        pcall(self.db.flush, self.db)
-                                    end
-                                    UIManager:restartKOReader()
+                        text = _("Shelf Sync Settings"),
+                        sub_item_table = {
+                            {
+                                text = _("Enable Shelf Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.shelf_sync_enabled end,
+                                callback = function()
+                                    self.shelf_sync_enabled = not self.shelf_sync_enabled
+                                    self:saveSetting("shelf_sync_enabled", self.shelf_sync_enabled)
                                 end,
-                            })
-                        end,
+                            },
+                            {
+                                text_func = function()
+                                    local regular_name = self.selected_regular_shelf_name and self.selected_regular_shelf_name ~= "" and self.selected_regular_shelf_name or _("(none)")
+                                    return T(_("Select Regular Shelf: %1"), regular_name)
+                                end,
+                                callback = function() self:showShelfPicker(false, "regular") end,
+                            },
+                            {
+                                text_func = function()
+                                    local magic_name = self.selected_magic_shelf_name and self.selected_magic_shelf_name ~= "" and self.selected_magic_shelf_name or _("(none)")
+                                    return T(_("Select Magic Shelf: %1"), magic_name)
+                                end,
+                                callback = function() self:showShelfPicker(false, "magic") end,
+                            },
+                            {
+                                text = _("Enable Regular Shelf Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.sync_regular_shelf_enabled == true end,
+                                callback = function()
+                                    self.sync_regular_shelf_enabled = not (self.sync_regular_shelf_enabled == true)
+                                    self:saveSetting("sync_regular_shelf_enabled", self.sync_regular_shelf_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Enable Magic Shelf Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.sync_magic_shelf_enabled == true end,
+                                callback = function()
+                                    self.sync_magic_shelf_enabled = not (self.sync_magic_shelf_enabled == true)
+                                    self:saveSetting("sync_magic_shelf_enabled", self.sync_magic_shelf_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Download Settings"),
+                                sub_item_table = {
+                                    {
+                                        text_func = function()
+                                            local dir = self.download_dir and self.download_dir ~= "" and self.download_dir or _("(auto)")
+                                            return T(_("Download Directory: %1"), dir)
+                                        end,
+                                        callback = function() self:configureDownloadDir() end,
+                                    },
+                                    {
+                                        text = _("Original Filenames"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.shelf_use_original_filename end,
+                                        callback = function()
+                                            self.shelf_use_original_filename = not self.shelf_use_original_filename
+                                            self:saveSetting("shelf_use_original_filename", self.shelf_use_original_filename)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Use Separate Magic Directory"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.use_separate_magic_download_dir == true end,
+                                        callback = function()
+                                            self.use_separate_magic_download_dir = not (self.use_separate_magic_download_dir == true)
+                                            self:saveSetting("use_separate_magic_download_dir", self.use_separate_magic_download_dir)
+                                        end,
+                                    },
+                                    {
+                                        text_func = function()
+                                            local dir = self.magic_download_dir and self.magic_download_dir ~= "" and self.magic_download_dir or _("(same as regular)")
+                                            return T(_("Magic Download Directory: %1"), dir)
+                                        end,
+                                        callback = function()
+                                            self:configureMagicDownloadDir()
+                                        end,
+                                    },
+                                },
+                            },
+                            {
+                                text = _("Sync Behavior"),
+                                sub_item_table = {
+                                    {
+                                        text = _("Auto-sync on Resume"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.auto_sync_shelf_on_resume end,
+                                        callback = function()
+                                            self.auto_sync_shelf_on_resume = not self.auto_sync_shelf_on_resume
+                                            self:saveSetting("auto_sync_shelf_on_resume", self.auto_sync_shelf_on_resume)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Fast Sync (Short Cache)"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.shelf_fast_sync_enabled end,
+                                        callback = function()
+                                            self.shelf_fast_sync_enabled = not self.shelf_fast_sync_enabled
+                                            self:saveSetting("shelf_fast_sync_enabled", self.shelf_fast_sync_enabled)
+                                        end,
+                                    },
+                                    {
+                                        text_func = function()
+                                            return T(_("Cache Duration: %1s"), tonumber(self.shelf_fast_sync_cache_seconds) or 15)
+                                        end,
+                                        callback = function()
+                                            self:showNumberInput(_("Fast Sync Cache Seconds"), self.shelf_fast_sync_cache_seconds or 15, _("Recommended: 10-30"), function(value)
+                                                local normalized = math.floor(tonumber(value) or 15)
+                                                if normalized < 0 then normalized = 0 end
+                                                if normalized > 120 then normalized = 120 end
+                                                self:saveSetting("shelf_fast_sync_cache_seconds", normalized)
+                                            end)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Two-way Delete Sync"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.two_way_shelf_delete_sync end,
+                                        callback = function()
+                                            self.two_way_shelf_delete_sync = not self.two_way_shelf_delete_sync
+                                            self:saveSetting("two_way_shelf_delete_sync", self.two_way_shelf_delete_sync)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Delete .sdr on Remove"),
+                                        keep_menu_open = true,
+                                        checked_func = function() return self.delete_sdr_on_book_delete end,
+                                        callback = function()
+                                            self.delete_sdr_on_book_delete = not self.delete_sdr_on_book_delete
+                                            self:saveSetting("delete_sdr_on_book_delete", self.delete_sdr_on_book_delete)
+                                        end,
+                                    },
+                                },
+                            },
+                            {
+                                text = _("Shelf ID Tools"),
+                                sub_item_table = {
+                                    {
+                                        text = _("Add Shelf by ID"),
+                                        callback = function()
+                                            self:promptAndValidateShelfId(true)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Validate Shelf ID"),
+                                        callback = function()
+                                            self:promptAndValidateShelfId(false)
+                                        end,
+                                    },
+                                    {
+                                        text = _("Set Legacy Shelf ID"),
+                                        callback = function()
+                                            self:showNumberInput(_("Shelf ID"), self.shelf_id or 0, _("Enter shelf id"), function(value)
+                                                self:saveSetting("shelf_id", value)
+                                                self:saveSetting("shelf_name", "")
+                                                self:saveSetting("shelf_type", "regular")
+                                                self:saveSetting("selected_regular_shelf_id", value)
+                                                self:saveSetting("selected_regular_shelf_name", "")
+                                            end)
+                                        end,
+                                    },
+                                },
+                            },
+                        },
                     },
                     {
-                        text = _("Connection"),
+                        text = _("Tracking & Network"),
                         sub_item_table = {
-                            { text = _("Setup Connection"), callback = function() self:configureConnection() end },
-                            { text = _("Local URL"), callback = function() self:configureServerUrl() end },
-                            { text = _("Remote URL"), callback = function() self:configureRemoteUrl() end },
-                            { text = _("Home SSID"), callback = function() self:configureHomeSSID() end },
-                            { text = _("Username"), callback = function() self:configureUsername() end },
-                            { text = _("Password"), callback = function() self:configurePassword() end },
-                            { text = _("Test Connection"), keep_menu_open = true, callback = function() self:testConnection() end },
+                            {
+                                text = _("Ask Wi-Fi Before Manual Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.ask_wifi_before_sync == true end,
+                                callback = function()
+                                    self.ask_wifi_before_sync = not (self.ask_wifi_before_sync == true)
+                                    self:saveSetting("ask_wifi_before_sync", self.ask_wifi_before_sync)
+                                end,
+                            },
+                            {
+                                text = _("Sync on Network Resume"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.sync_on_network_connected == true end,
+                                callback = function()
+                                    self.sync_on_network_connected = not (self.sync_on_network_connected == true)
+                                    self:saveSetting("sync_on_network_connected", self.sync_on_network_connected)
+                                end,
+                            },
+                            {
+                                text_func = function()
+                                    return T(_("Network Sync Cooldown: %1s"), tonumber(self.network_sync_cooldown_seconds) or DEFAULTS.network_sync_cooldown_seconds)
+                                end,
+                                callback = function()
+                                    self:showNumberInput(_("Network Sync Cooldown (seconds)"), self.network_sync_cooldown_seconds or DEFAULTS.network_sync_cooldown_seconds, _("Recommended: 300"), function(value)
+                                        local normalized = math.floor(tonumber(value) or DEFAULTS.network_sync_cooldown_seconds)
+                                        if normalized < 0 then normalized = 0 end
+                                        if normalized > 86400 then normalized = 86400 end
+                                        self:saveSetting("network_sync_cooldown_seconds", normalized)
+                                    end)
+                                end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("Metadata Sync"),
+                        sub_item_table = {
+                            {
+                                text = _("Enable Metadata Sync"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.metadata_sync_enabled == true end,
+                                callback = function()
+                                    self.metadata_sync_enabled = not (self.metadata_sync_enabled == true)
+                                    self:saveSetting("metadata_sync_enabled", self.metadata_sync_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Sync Rating"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.rating_sync_enabled == true end,
+                                callback = function()
+                                    self.rating_sync_enabled = not (self.rating_sync_enabled == true)
+                                    self:saveSetting("rating_sync_enabled", self.rating_sync_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Sync Highlights / Notes"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.annotations_sync_enabled == true end,
+                                callback = function()
+                                    self.annotations_sync_enabled = not (self.annotations_sync_enabled == true)
+                                    self:saveSetting("annotations_sync_enabled", self.annotations_sync_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Sync Bookmarks"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.bookmarks_sync_enabled == true end,
+                                callback = function()
+                                    self.bookmarks_sync_enabled = not (self.bookmarks_sync_enabled == true)
+                                    self:saveSetting("bookmarks_sync_enabled", self.bookmarks_sync_enabled)
+                                end,
+                            },
+                            {
+                                text = _("Preview Metadata"),
+                                callback = function() self:showMetadataPreview() end,
+                            },
+                            {
+                                text_func = function()
+                                    return T(_("Pending Metadata Count: %1"), safeDbValueCall(self.db, "getPendingMetadataCount", 0))
+                                end,
+                                keep_menu_open = true,
+                                callback = function() end,
+                            },
                         },
                     },
                     {
@@ -3870,15 +6492,6 @@ function Grimmlink:addToMainMenu(menu_items)
                         },
                     },
                     {
-                        text = _("Shelf ID (Advanced)"),
-                        callback = function()
-                            self:showNumberInput(_("Shelf ID"), self.shelf_id or 0, _("Enter shelf id"), function(value)
-                                self:saveSetting("shelf_id", value)
-                                self:saveSetting("shelf_name", "")
-                            end)
-                        end,
-                    },
-                    {
                         text = _("Maintenance"),
                         sub_item_table = {
                             {
@@ -3890,6 +6503,48 @@ function Grimmlink:addToMainMenu(menu_items)
                                 callback = function() self:clearSyncQueuesWithConfirm() end,
                             },
                             {
+                                text = _("Clear Logs"),
+                                callback = function() self:clearLogsWithConfirm() end,
+                            },
+                            {
+                                text = _("Export GrimmLink Debug Info"),
+                                callback = function() self:exportDebugInfo() end,
+                            },
+                            {
+                                text = _("Show DB Status / Pending Counts"),
+                                callback = function() self:showDatabaseStatus() end,
+                            },
+                            {
+                                text = _("Rebuild metadata queue for current book"),
+                                callback = function() self:rebuildMetadataQueueForCurrentBook() end,
+                            },
+                            {
+                                text = _("Force resync metadata for current book"),
+                                callback = function() self:forceMetadataResyncForCurrentBook() end,
+                            },
+                            {
+                                text = _("Re-match current book"),
+                                callback = function() self:rematchCurrentBook() end,
+                            },
+                            {
+                                text = _("Rebuild SimpleUI metadata cache"),
+                                callback = function()
+                                    if not self.shelf_sync or not self.download_dir then
+                                        self:showMessage(_("Shelf sync not configured."), 3)
+                                        return
+                                    end
+                                    local counts = self.shelf_sync:rebuildBookInfoCacheFromIndex(
+                                        self.shelf_sync:resolveDownloadDir(self.download_dir))
+                                    if counts.error then
+                                        self:showMessage(T(_("Rebuild failed: %1"), counts.error), 4)
+                                    else
+                                        self:showMessage(T(
+                                            _("Rebuild complete\nInserted: %1  Updated: %2  Skipped: %3"),
+                                            counts.inserted, counts.updated, counts.skipped), 5)
+                                    end
+                                end,
+                            },
+                            {
                                 text = _("Advanced Cleanup"),
                                 sub_item_table = {
                                     { text = _("Clear Update Cache"), callback = function() self:clearUpdateCacheWithConfirm() end },
@@ -3898,9 +6553,40 @@ function Grimmlink:addToMainMenu(menu_items)
                                     { text = _("Clear Not Found Hashes"), callback = function() self:clearNotFoundHashesWithConfirm() end },
                                     { text = _("Clear Pending Progress"), callback = function() self:clearPendingProgressQueueWithConfirm() end },
                                     { text = _("Clear Pending Sessions"), callback = function() self:clearPendingSessionsQueueWithConfirm() end },
+                                    { text = _("Clear Pending Metadata"), callback = function() self:clearPendingMetadataQueueWithConfirm() end },
+                                    { text = _("Clear Synced Metadata History"), callback = function() self:clearSyncedMetadataHistoryWithConfirm() end },
+                                    { text = _("Clear Shelf Tombstones"), callback = function() self:clearShelfTombstonesWithConfirm() end },
+                                    { text = _("Clear Pending Shelf Removals"), callback = function() self:clearPendingShelfRemovalsWithConfirm() end },
                                 },
                             },
                         },
+                    },
+                    {
+                        text = _("Settings Tab"),
+                        help_text = _("Show or hide the dedicated GrimmLink tab in the menu bar.\nWhen hidden, GrimmLink settings remain accessible via Tools > GrimmLink.\nTakes effect after a restart."),
+                        keep_menu_open = true,
+                        checked_func = function()
+                            return self.settings_tab_enabled
+                        end,
+                        callback = function()
+                            local on = self.settings_tab_enabled
+                            self.settings_tab_enabled = not on
+                            self:saveSetting("settings_tab_enabled", self.settings_tab_enabled)
+                            UIManager:show(ConfirmBox:new{
+                                text = T(
+                                    _("The GrimmLink settings tab will be %1 after restart.\n\nRestart now?"),
+                                    on and _("hidden") or _("shown")
+                                ),
+                                ok_text     = _("Restart"),
+                                cancel_text = _("Later"),
+                                ok_callback = function()
+                                    if self.db and type(self.db.flush) == "function" then
+                                        pcall(self.db.flush, self.db)
+                                    end
+                                    UIManager:restartKOReader()
+                                end,
+                            })
+                        end,
                     },
                 },
             },

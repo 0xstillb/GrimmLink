@@ -1,5 +1,43 @@
 # Changelog
 
+# [Unreleased]
+
+# [v1.4.0]
+
+### Features
+- Added Shelf Sync v2 schema + migration (`shelf_type`) for multi-shelf-safe tracking in `shelf_sync_map`, `pending_shelf_removals`, and `shelf_sync_tombstones`
+- Added Magic Shelf API support in GrimmLink (`/api/koreader/shelves/{shelfType}/{shelfId}/books`) with regular-endpoint fallback
+- Added regular/magic shelf picker groups and typed shelf labels (`[Regular]`, `[Magic]`)
+- Added optional separate Magic Shelf download directory settings
+- Added multi-shelf local-delete safety: keep local file when the book is still tracked by another synced shelf
+- Added rule-based magic shelf remove handling support path (backend may return unsupported; no server/library file deletion)
+- Added local metadata extractor foundation for KOReader DocSettings (rating, highlights/notes, bookmarks)
+- Added local pending metadata queue with stable dedupe keys and synced-history tracking
+- Added metadata batch upload worker (`syncPendingMetadata`) targeting Grimmory `POST /api/koreader/syncs/metadata`
+- Added Metadata Sync settings: enable switch plus per-type toggles for rating, highlights/notes, and bookmarks
+- Added metadata retry/drop policy: retry failed items with max retry cap, drop invalid items with safe logging
+- Added `Preview Metadata` menu action showing rating/count diagnostics and pending metadata total
+- Added file logger rotation/cleanup with sensitive-value redaction and new `Clear Logs` maintenance action
+- Added `Export GrimmLink Debug Info` with redacted connection/auth fields and queue diagnostics
+- Added per-book tracking state (default enabled) and tracking-aware sync guards for open/close/session/metadata flows
+- Added guarded FileManager long-press integration for per-book actions when hold-menu APIs are available
+- Added conservative network QoL settings for manual/offline sync confirmation and resume-triggered pending sync cooldown
+- Added Maintenance/Data Management actions for local queues/history/tombstones with confirmation prompts and DB status counters
+- Added current-book maintenance helpers: rebuild metadata queue, force metadata resync, and re-match current book
+- Added manual KOReader read-status UI with backend capability detection and status labels (Reading/Read/Unread/On Hold/Abandoned/Re-reading)
+- Added explicit shelf ID validation/save flow with selectable shelf type (`regular`/`magic`) using KOReader shelf APIs
+- Added per-book disk-space checks before shelf downloads with safe skip-and-continue behavior when storage is insufficient
+- Added KOReader backend endpoints for supported manual statuses and manual status updates
+- Added CI guards for forbidden legacy endpoints, legacy naming drift, risky secret logging, and plugin structure validation
+
+### Notes
+- Metadata sync is upload-only in this phase (KOReader/GrimmLink -> Grimmory)
+- No metadata pull-to-KOReader behavior yet
+- No deletion sync behavior in this phase
+- Shelf sync local cleanup only applies to GrimmLink-managed local files; server/library files are never deleted
+- Simultaneous regular+magic auto-run is currently partial: when both are enabled, regular shelf runs first
+- If free-space checks are unavailable on a device build, shelf download proceeds with a safe warning (no crash/no forced block)
+
 # [v1.3.3]
 
 ### Features

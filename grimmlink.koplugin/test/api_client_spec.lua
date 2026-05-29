@@ -96,6 +96,12 @@ package.preload["json"] = function()
             if value == '{"message":"bad"}' then
                 return { message = "bad" }
             end
+            if value == '{"statuses":["UNREAD","READING","READ","PAUSED","ABANDONED","RE_READING"]}' then
+                return { statuses = { "UNREAD", "READING", "READ", "PAUSED", "ABANDONED", "RE_READING" } }
+            end
+            if value == '{"status":"ok","readStatus":"READ"}' then
+                return { status = "ok", readStatus = "READ" }
+            end
             error("invalid json")
         end,
     }
@@ -178,5 +184,103 @@ describe("GrimmLink API client", function()
 
         client:submitSessionBatch(99, "hash-1", "PDF", "KOReader", "device-1", {})
         assert.are.equal("/api/v1/reading-sessions/batch", captured_request.url:match("/api/v1/reading%-sessions/batch$") and "/api/v1/reading-sessions/batch" or nil)
+    end)
+
+    it("builds metadata batch payloads", function()
+        local payload = client:buildMetadataBatchPayload(
+            88,
+            "hash-meta",
+            900,
+            "EPUB",
+            "KOReader",
+            "device-1",
+            { dedupeKey = "r-1", value = 4, scale = 5 },
+            { { dedupeKey = "a-1", text = "Highlight" } },
+            { { dedupeKey = "b-1", title = "Bookmark" } }
+        )
+        assert.are.equal(88, payload.bookId)
+        assert.are.equal("hash-meta", payload.bookHash)
+        assert.are.equal(900, payload.bookFileId)
+        assert.are.equal("EPUB", payload.fileFormat)
+        assert.are.equal("incremental", payload.syncMode)
+        assert.are.equal(1, #payload.annotations)
+        assert.are.equal(1, #payload.bookmarks)
+    end)
+
+    it("submits metadata batch to the koreader metadata endpoint", function()
+        local success, _, _ = client:submitMetadataBatch({
+            schemaVersion = 1,
+            syncMode = "incremental",
+            bookId = 88,
+            bookHash = "hash-meta",
+            annotations = {},
+            bookmarks = {},
+        })
+        assert.is_true(success)
+        assert.are.equal("/api/koreader/syncs/metadata", captured_request.url:match("/api/koreader/syncs/metadata$") and "/api/koreader/syncs/metadata" or nil)
+    end)
+
+    it("fetches supported read statuses from koreader endpoint", function()
+        next_http_response = {
+            body = '{"statuses":["UNREAD","READING","READ","PAUSED","ABANDONED","RE_READING"]}',
+            code = 200,
+            headers = {},
+            ok = 1,
+        }
+
+        local success, statuses = client:getSupportedReadStatuses()
+        assert.is_true(success)
+        assert.are.same({ "UNREAD", "READING", "READ", "PAUSED", "ABANDONED", "RE_READING" }, statuses)
+        assert.are.equal("/api/koreader/books/read-statuses", captured_request.url:match("/api/koreader/books/read%-statuses$") and "/api/koreader/books/read-statuses" or nil)
+    end)
+
+    it("updates read status through koreader endpoint", function()
+        next_http_response = {
+            body = '{"status":"ok","readStatus":"READ"}',
+            code = 200,
+            headers = {},
+            ok = 1,
+        }
+
+        local success, response = client:updateBookReadStatus(123, "read")
+        assert.is_true(success)
+        assert.are.equal("READ", response.readStatus)
+        assert.are.equal("/api/koreader/books/123/status", captured_request.url:match("/api/koreader/books/123/status$") and "/api/koreader/books/123/status" or nil)
+        assert.is_true(captured_request.source:find('"status":"READ"', 1, true) ~= nil)
+    end)
+
+    it("normalizes shelf book file format from extension when format is missing", function()
+        local normalized = client:normalizeShelfBookObject({
+            bookId = 321,
+            title = "Demo",
+            fileName = "demo_book.pdf",
+            extension = "pdf",
+        })
+        assert.is_not_nil(normalized)
+        assert.are.equal("pdf", normalized.extension)
+        assert.are.equal("PDF", normalized.fileFormat)
+    end)
+
+    it("normalizes shelf book file format from filename extension when only fileName exists", function()
+        local normalized = client:normalizeShelfBookObject({
+            id = 654,
+            title = "Demo EPUB",
+            fileName = "demo_epub.epub",
+        })
+        assert.is_not_nil(normalized)
+        assert.are.equal("epub", normalized.extension)
+        assert.are.equal("EPUB", normalized.fileFormat)
+    end)
+
+    it("normalizes shelf book file format from mime type values", function()
+        local normalized = client:normalizeShelfBookObject({
+            id = 987,
+            title = "Demo PDF Mime",
+            fileFormat = "application/pdf",
+            fileName = "demo_pdf.pdf",
+        })
+        assert.is_not_nil(normalized)
+        assert.are.equal("pdf", normalized.extension)
+        assert.are.equal("PDF", normalized.fileFormat)
     end)
 end)

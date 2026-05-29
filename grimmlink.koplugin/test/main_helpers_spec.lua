@@ -12,6 +12,7 @@ package.loaded["json"] = nil
 package.loaded["logger"] = nil
 local Grimmlink = require("main")
 local UIManager = require("ui/uimanager")
+local json = require("json")
 restore_stubs()
 
 local function getMenuItemText(item)
@@ -47,6 +48,8 @@ local function newDb()
         progress_state = {},
         pending_progress = {},
         pending_sessions = {},
+        pending_metadata_items = {},
+        synced_metadata_items = {},
         book_cache_calls = {},
     }
 
@@ -225,6 +228,164 @@ local function newDb()
         return false
     end
 
+    function db:upsertPendingMetadataItem(item)
+        local existing = nil
+        for _, row in ipairs(self.pending_metadata_items) do
+            if row.file_hash == item.file_hash
+                and row.item_type == item.item_type
+                and row.dedupe_key == item.dedupe_key then
+                existing = row
+                break
+            end
+        end
+        if existing then
+            existing.book_id = item.book_id
+            existing.book_file_id = item.book_file_id
+            existing.payload_json = item.payload_json
+            existing.retry_count = 0
+            existing.last_retry_at = nil
+            existing.updated_at = os.time()
+            return true
+        end
+
+        self.pending_metadata_items[#self.pending_metadata_items + 1] = {
+            id = #self.pending_metadata_items + 1,
+            file_hash = item.file_hash,
+            book_id = item.book_id,
+            book_file_id = item.book_file_id,
+            item_type = item.item_type,
+            dedupe_key = item.dedupe_key,
+            payload_json = item.payload_json,
+            retry_count = 0,
+            last_retry_at = nil,
+            created_at = os.time(),
+            updated_at = os.time(),
+        }
+        return true
+    end
+
+    function db:getPendingMetadataItems(_limit)
+        return self.pending_metadata_items
+    end
+
+    function db:deletePendingMetadataItem(id)
+        for index, row in ipairs(self.pending_metadata_items) do
+            if row.id == id then
+                table.remove(self.pending_metadata_items, index)
+                return true
+            end
+        end
+        return false
+    end
+
+    function db:incrementPendingMetadataRetry(id)
+        for _, row in ipairs(self.pending_metadata_items) do
+            if row.id == id then
+                row.retry_count = (row.retry_count or 0) + 1
+                row.last_retry_at = os.time()
+                row.updated_at = os.time()
+                return true
+            end
+        end
+        return false
+    end
+
+    function db:markMetadataItemSynced(item)
+        local existing = nil
+        for _, row in ipairs(self.synced_metadata_items) do
+            if row.file_hash == item.file_hash
+                and row.item_type == item.item_type
+                and row.dedupe_key == item.dedupe_key then
+                existing = row
+                break
+            end
+        end
+        if existing then
+            existing.book_id = item.book_id
+            existing.server_id = item.server_id
+            existing.synced_at = os.time()
+            return true
+        end
+
+        self.synced_metadata_items[#self.synced_metadata_items + 1] = {
+            file_hash = item.file_hash,
+            book_id = item.book_id,
+            item_type = item.item_type,
+            dedupe_key = item.dedupe_key,
+            server_id = item.server_id,
+            synced_at = os.time(),
+        }
+        return true
+    end
+
+    function db:isMetadataItemSynced(file_hash, item_type, dedupe_key)
+        for _, row in ipairs(self.synced_metadata_items) do
+            if row.file_hash == file_hash and row.item_type == item_type and row.dedupe_key == dedupe_key then
+                return true
+            end
+        end
+        return false
+    end
+
+    function db:getPendingMetadataCount()
+        return #self.pending_metadata_items
+    end
+
+    function db:deleteAllPendingMetadata()
+        self.pending_metadata_items = {}
+        return true
+    end
+
+    function db:clearSyncedMetadataHistory()
+        self.synced_metadata_items = {}
+        return true
+    end
+
+    function db:isTrackingEnabled(file_hash, file_path)
+        self.book_tracking_state = self.book_tracking_state or {}
+        local key = tostring(file_hash or "") .. "|" .. tostring(file_path or "")
+        if self.book_tracking_state[key] == nil then
+            return true
+        end
+        return self.book_tracking_state[key] == true
+    end
+
+    function db:setTrackingEnabled(file_hash, file_path, enabled)
+        self.book_tracking_state = self.book_tracking_state or {}
+        local key = tostring(file_hash or "") .. "|" .. tostring(file_path or "")
+        self.book_tracking_state[key] = enabled == true
+        return true
+    end
+
+    function db:toggleTracking(file_hash, file_path)
+        local current = self:isTrackingEnabled(file_hash, file_path)
+        local next_value = not current
+        self:setTrackingEnabled(file_hash, file_path, next_value)
+        return next_value
+    end
+
+    function db:getPendingCountsForFileHash(file_hash)
+        local progress = 0
+        local sessions = 0
+        local metadata = 0
+        for _, row in ipairs(self.pending_progress or {}) do
+            if row.file_hash == file_hash then
+                progress = progress + 1
+            end
+        end
+        for _, row in ipairs(self.pending_sessions or {}) do
+            if row.bookHash == file_hash or row.book_hash == file_hash then
+                sessions = sessions + 1
+            end
+        end
+        for _, row in ipairs(self.pending_metadata_items or {}) do
+            if row.file_hash == file_hash then
+                metadata = metadata + 1
+            end
+        end
+        return { progress = progress, sessions = sessions, metadata = metadata }
+    end
+
     function db:getShelfSyncEntryByLocalPath()
         return nil
     end
@@ -291,6 +452,7 @@ local function newApi()
         next_update_pdf = { success = true, response = {}, code = 200 },
         next_session = { success = true, response = {}, code = 202 },
         next_session_batch = { success = true, response = { status = "ok" }, code = 200 },
+        next_metadata_batch = { success = true, response = { ok = true, results = { annotations = {}, bookmarks = {} } }, code = 200 },
     }
 
     function api:init(...)
@@ -349,6 +511,27 @@ local function newApi()
         return self.next_session_batch.success, self.next_session_batch.response, self.next_session_batch.code
     end
 
+    function api:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks)
+        return {
+            schemaVersion = 1,
+            syncMode = "incremental",
+            bookId = book_id,
+            bookHash = book_hash,
+            bookFileId = book_file_id,
+            fileFormat = file_format,
+            device = device,
+            deviceId = device_id,
+            rating = rating,
+            annotations = annotations or {},
+            bookmarks = bookmarks or {},
+        }
+    end
+
+    function api:submitMetadataBatch(payload)
+        self.calls[#self.calls + 1] = { name = "submitMetadataBatch", payload = payload }
+        return self.next_metadata_batch.success, self.next_metadata_batch.response, self.next_metadata_batch.code
+    end
+
     return api
 end
 
@@ -380,6 +563,11 @@ local function newPlugin(overrides)
         update_channel = "stable",
         update_repo = "0xstillb/grimmlink",
         allow_prerelease_updates = false,
+        metadata_sync_enabled = false,
+        rating_sync_enabled = true,
+        annotations_sync_enabled = true,
+        bookmarks_sync_enabled = true,
+        metadata_retry_max = 5,
         db = newDb(),
         api = newApi(),
         isOnline = function()
@@ -681,6 +869,196 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(0, #plugin.db.pending_progress)
     end)
 
+    it("queues close progress before scheduled sync so document close is not blocked by an immediate push", function()
+        local plugin = newPlugin()
+        local update_calls = 0
+        local schedule_calls = 0
+        local scheduled_opts = nil
+
+        plugin.api.updateProgress = function()
+            update_calls = update_calls + 1
+            return true, {}, 200
+        end
+        plugin.schedulePendingSync = function(_, _label, _delay, opts)
+            schedule_calls = schedule_calls + 1
+            scheduled_opts = opts
+        end
+        plugin.ui.document.getCurrentPos = function()
+            return "/100"
+        end
+        plugin.ui.document.getXPointer = function()
+            return "/100"
+        end
+        plugin.ui.document.getCurrentPage = function()
+            return 100
+        end
+        plugin.ui.paging.getCurrentPage = function()
+            return 100
+        end
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-close-100",
+            book_id = 21,
+            book_file_id = 22,
+            start_time = os.time() - 120,
+            start_snapshot = {
+                percentage = 90,
+                currentPage = 90,
+                totalPages = 100,
+                location = "/90",
+            },
+            book_type = "EPUB",
+        }
+
+        assert.is_true(plugin:endSession({ reason = "close" }))
+        assert.are.equal(0, update_calls)
+        assert.are.equal(1, #plugin.db.pending_progress)
+        assert.are.equal("native", plugin.db.pending_progress[1].kind)
+        assert.are.equal(1, schedule_calls)
+        assert.are.equal(10, scheduled_opts.progress_limit)
+        assert.are.equal(25, scheduled_opts.session_limit)
+    end)
+
+    it("captures sessions and queues progress without an API client while offline", function()
+        local plugin = newPlugin({
+            api = nil,
+            isOnline = function()
+                return false
+            end,
+        })
+        plugin.calculateBookHash = function()
+            return "offline-hash"
+        end
+
+        plugin:startSession()
+        assert.is_not_nil(plugin.current_session)
+        assert.are.equal(nil, plugin.current_session.book_id)
+
+        plugin.ui.document.getCurrentPos = function()
+            return "/12"
+        end
+        plugin.ui.document.getXPointer = function()
+            return "/12"
+        end
+        plugin.ui.document.getCurrentPage = function()
+            return 12
+        end
+        plugin.ui.paging.getCurrentPage = function()
+            return 12
+        end
+        plugin.current_session.start_time = os.time() - 120
+        plugin.current_session.start_snapshot = {
+            percentage = 4,
+            currentPage = 4,
+            totalPages = 100,
+            location = "/4",
+        }
+
+        assert.is_true(plugin:endSession({ reason = "close" }))
+        assert.are.equal(1, #plugin.db.pending_sessions)
+        assert.are.equal(1, #plugin.db.pending_progress)
+        assert.are.equal("native", plugin.db.pending_progress[1].kind)
+    end)
+
+    it("leaves pending queues untouched when the API client is not ready", function()
+        local plugin = newPlugin({
+            api = {},
+        })
+        plugin.db.pending_progress = {
+            {
+                id = 1,
+                file_hash = "hash-api-not-ready",
+                kind = "native",
+                payload_json = {
+                    bookHash = "hash-api-not-ready",
+                    percentage = 42,
+                },
+                retry_count = 0,
+            },
+        }
+        plugin.db.pending_sessions = {
+            {
+                id = 1,
+                bookId = 21,
+                bookHash = "hash-api-not-ready",
+                bookType = "EPUB",
+                device = "KOReader",
+                deviceId = "device-1",
+                startTime = "2026-05-26T00:00:00Z",
+                endTime = "2026-05-26T00:02:00Z",
+                durationSeconds = 120,
+                startProgress = 40,
+                endProgress = 42,
+                progressDelta = 2,
+                startLocation = "/40",
+                endLocation = "/42",
+                currentPage = 42,
+                totalPages = 100,
+            },
+        }
+
+        local progress_synced, progress_failed = plugin:syncPendingProgress(true)
+        local sessions_synced, sessions_failed = plugin:syncPendingSessions(true)
+
+        assert.is_false(plugin:isApiReady())
+        assert.are.equal(0, progress_synced)
+        assert.are.equal(0, progress_failed)
+        assert.are.equal(0, sessions_synced)
+        assert.are.equal(0, sessions_failed)
+        assert.are.equal(1, #plugin.db.pending_progress)
+        assert.are.equal(1, #plugin.db.pending_sessions)
+    end)
+
+    it("throttles automatic pending sync scheduling during the cooldown window", function()
+        local plugin = newPlugin()
+        local sync_calls = 0
+        plugin.syncPendingNow = function()
+            sync_calls = sync_calls + 1
+        end
+
+        plugin:schedulePendingSync("first auto sync", 0, {
+            respect_cooldown = true,
+            cooldown_seconds = 300,
+        })
+        plugin:schedulePendingSync("second auto sync", 0, {
+            respect_cooldown = true,
+            cooldown_seconds = 300,
+        })
+
+        assert.are.equal(1, sync_calls)
+    end)
+
+    it("queues exit progress without running a full pending sync on exit", function()
+        local plugin = newPlugin()
+        local full_sync_calls = 0
+        local scheduled_sync_calls = 0
+        plugin.syncPendingNow = function()
+            full_sync_calls = full_sync_calls + 1
+        end
+        plugin.schedulePendingSync = function()
+            scheduled_sync_calls = scheduled_sync_calls + 1
+        end
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-exit",
+            book_id = 21,
+            book_file_id = 22,
+            start_time = os.time() - 120,
+            start_snapshot = {
+                percentage = 50,
+                currentPage = 50,
+                totalPages = 100,
+                location = "/50",
+            },
+            book_type = "EPUB",
+        }
+
+        plugin:onExit()
+        assert.are.equal(0, full_sync_calls)
+        assert.are.equal(1, scheduled_sync_calls)
+        assert.are.equal(1, #plugin.db.pending_progress)
+    end)
+
     it("queues PDF bridge progress while offline and replays it later", function()
         local plugin = newPlugin({
             pdf_web_reader_bridge_enabled = true,
@@ -812,12 +1190,326 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("hash-8", plugin.db.book_cache_calls[1].file_hash)
     end)
 
+    it("queues metadata items on close and dedupes on repeated close", function()
+        local plugin = newPlugin()
+        plugin.extractMetadataForContext = function()
+            return {
+                rating = { raw = 4, normalized = 8 },
+                highlights = {
+                    {
+                        text = "Quote A",
+                        note = "Note A",
+                        datetime = "2026-05-27T10:00:00Z",
+                        pos0 = "xp-1",
+                        pos1 = "xp-2",
+                    },
+                },
+                bookmarks = {
+                    {
+                        page = "12",
+                        datetime = "2026-05-27T10:05:00Z",
+                    },
+                },
+                counts = {
+                    rating_present = true,
+                    highlights_count = 1,
+                    notes_count = 1,
+                    bookmarks_count = 1,
+                },
+            }
+        end
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-meta-close",
+            book_id = 50,
+            book_file_id = 60,
+            start_time = os.time() - 100,
+            start_snapshot = {
+                percentage = 20,
+                currentPage = 20,
+                totalPages = 100,
+                location = "/20",
+            },
+            book_type = "EPUB",
+        }
+
+        assert.is_true(plugin:endSession({ reason = "close" }))
+        assert.are.equal(3, #plugin.db.pending_metadata_items)
+
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-meta-close",
+            book_id = 50,
+            book_file_id = 60,
+            start_time = os.time() - 100,
+            start_snapshot = {
+                percentage = 25,
+                currentPage = 25,
+                totalPages = 100,
+                location = "/25",
+            },
+            book_type = "EPUB",
+        }
+        assert.is_true(plugin:endSession({ reason = "close" }))
+        assert.are.equal(3, #plugin.db.pending_metadata_items)
+    end)
+
+    it("queues metadata during manual sync when a current session exists", function()
+        local plugin = newPlugin()
+        plugin.extractMetadataForContext = function()
+            return {
+                rating = { raw = 5, normalized = 10 },
+                highlights = {},
+                bookmarks = {},
+                counts = {
+                    rating_present = true,
+                    highlights_count = 0,
+                    notes_count = 0,
+                    bookmarks_count = 0,
+                },
+            }
+        end
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-meta-manual",
+            book_id = 70,
+            book_file_id = 71,
+        }
+        plugin.isOnline = function()
+            return false
+        end
+
+        plugin:syncPendingNow(false)
+        assert.are.equal(1, #plugin.db.pending_metadata_items)
+        assert.are.equal("rating", plugin.db.pending_metadata_items[1].item_type)
+    end)
+
+    it("syncs pending metadata rows using per-item statuses", function()
+        local plugin = newPlugin({
+            metadata_sync_enabled = true,
+        })
+        plugin.db.pending_metadata_items = {
+            {
+                id = 1,
+                file_hash = "hash-meta-sync",
+                book_id = 70,
+                book_file_id = 71,
+                item_type = "rating",
+                dedupe_key = "r-1",
+                payload_json = json.encode({ rating = 4, datetime = "2026-05-27T00:00:00Z" }),
+                retry_count = 0,
+            },
+            {
+                id = 2,
+                file_hash = "hash-meta-sync",
+                book_id = 70,
+                book_file_id = 71,
+                item_type = "annotation",
+                dedupe_key = "a-1",
+                payload_json = json.encode({ text = "Highlight", pos0 = "xp-1", pos1 = "xp-2" }),
+                retry_count = 0,
+            },
+            {
+                id = 3,
+                file_hash = "hash-meta-sync",
+                book_id = 70,
+                book_file_id = 71,
+                item_type = "bookmark",
+                dedupe_key = "b-1",
+                payload_json = json.encode({ title = "Bookmark", page = "12" }),
+                retry_count = 0,
+            },
+        }
+        plugin.api.next_metadata_batch = {
+            success = true,
+            response = {
+                ok = true,
+                results = {
+                    rating = { dedupeKey = "r-1", itemType = "rating", status = "synced", serverId = "11" },
+                    annotations = { { dedupeKey = "a-1", itemType = "annotation", status = "duplicate", serverId = "12" } },
+                    bookmarks = { { dedupeKey = "b-1", itemType = "bookmark", status = "updated", serverId = "13" } },
+                },
+            },
+            code = 200,
+        }
+
+        local synced, failed = plugin:syncPendingMetadata(true)
+        assert.are.equal(3, synced)
+        assert.are.equal(0, failed)
+        assert.are.equal(0, #plugin.db.pending_metadata_items)
+        assert.are.equal(3, #plugin.db.synced_metadata_items)
+    end)
+
+    it("keeps failed metadata rows pending with retry increment", function()
+        local plugin = newPlugin({
+            metadata_sync_enabled = true,
+        })
+        plugin.db.pending_metadata_items = {
+            {
+                id = 1,
+                file_hash = "hash-meta-retry",
+                book_id = 70,
+                book_file_id = 71,
+                item_type = "annotation",
+                dedupe_key = "a-retry",
+                payload_json = json.encode({ text = "Highlight", pos0 = "xp-1" }),
+                retry_count = 0,
+            },
+        }
+        plugin.api.next_metadata_batch = {
+            success = false,
+            response = "HTTP 500",
+            code = 500,
+        }
+
+        local synced, failed = plugin:syncPendingMetadata(true)
+        assert.are.equal(0, synced)
+        assert.are.equal(1, failed)
+        assert.are.equal(1, #plugin.db.pending_metadata_items)
+        assert.are.equal(1, plugin.db.pending_metadata_items[1].retry_count)
+    end)
+
+    it("drops invalid metadata rows and stops retrying after max retry", function()
+        local plugin = newPlugin({
+            metadata_sync_enabled = true,
+            metadata_retry_max = 1,
+        })
+        plugin.db.pending_metadata_items = {
+            {
+                id = 1,
+                file_hash = "hash-meta-invalid",
+                book_id = 70,
+                book_file_id = 71,
+                item_type = "annotation",
+                dedupe_key = "a-invalid",
+                payload_json = json.encode({ text = "Highlight", pos0 = "xp-1" }),
+                retry_count = 0,
+            },
+            {
+                id = 2,
+                file_hash = "hash-meta-drop",
+                book_id = 70,
+                book_file_id = 71,
+                item_type = "bookmark",
+                dedupe_key = "b-drop",
+                payload_json = json.encode({ title = "Bookmark", page = "1" }),
+                retry_count = 1,
+            },
+        }
+        plugin.api.next_metadata_batch = {
+            success = true,
+            response = {
+                ok = false,
+                results = {
+                    annotations = { { dedupeKey = "a-invalid", itemType = "annotation", status = "invalid", error = "invalid_payload" } },
+                    bookmarks = { { dedupeKey = "b-drop", itemType = "bookmark", status = "failed", error = "server_error" } },
+                },
+            },
+            code = 200,
+        }
+
+        local synced, failed = plugin:syncPendingMetadata(true)
+        assert.are.equal(0, synced)
+        assert.are.equal(2, failed)
+        assert.are.equal(0, #plugin.db.pending_metadata_items)
+    end)
+
+    it("skips close auto sync/session/metadata when tracking is disabled for the book", function()
+        local plugin = newPlugin()
+        plugin.db:setTrackingEnabled("hash-track-off", "/books/demo.epub", false)
+        plugin.extractMetadataForContext = function()
+            return {
+                rating = { raw = 5, normalized = 10 },
+                highlights = { { text = "h1", pos0 = "p1" } },
+                bookmarks = { { page = "1" } },
+                counts = {
+                    rating_present = true,
+                    highlights_count = 1,
+                    notes_count = 0,
+                    bookmarks_count = 1,
+                },
+            }
+        end
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-track-off",
+            book_id = 70,
+            book_file_id = 71,
+            start_time = os.time() - 120,
+            start_snapshot = {
+                percentage = 4,
+                currentPage = 4,
+                totalPages = 100,
+                location = "/4",
+            },
+            book_type = "EPUB",
+            tracking_enabled = false,
+        }
+
+        plugin:endSession({ reason = "close" })
+        assert.are.equal(0, #plugin.db.pending_progress)
+        assert.are.equal(0, #plugin.db.pending_sessions)
+        assert.are.equal(0, #plugin.db.pending_metadata_items)
+    end)
+
+    it("exports debug info with redacted secrets", function()
+        local plugin = newPlugin()
+        plugin.password = "super-secret-password"
+        plugin.server_url = "http://192.168.1.100:6060"
+        plugin.remote_url = "https://example.com"
+        plugin.file_logger = {
+            getLogPath = function()
+                return "/tmp/grimmlink.log"
+            end,
+        }
+
+        plugin:exportDebugInfo()
+        local dialog = UIManager.getLastShown()
+        assert.is_not_nil(dialog)
+        assert.is_true(type(dialog.text) == "string")
+        assert.is_true(dialog.text:find("GrimmLink Debug Info", 1, true) ~= nil)
+        assert.is_true(dialog.text:find("super-secret-password", 1, true) == nil)
+        assert.is_true(dialog.text:find("username: re...", 1, true) ~= nil)
+    end)
+
+    it("shows metadata preview with counts and pending metadata total", function()
+        local plugin = newPlugin()
+        plugin.db.pending_metadata_items = {
+            { id = 1, file_hash = "a", item_type = "rating", dedupe_key = "a:rating" },
+            { id = 2, file_hash = "a", item_type = "annotation", dedupe_key = "a:annotation:x" },
+        }
+        plugin.extractMetadataForContext = function()
+            return {
+                rating = { raw = 3, normalized = 6 },
+                highlights = { { text = "h1" }, { text = "h2" } },
+                bookmarks = { { page = 1 } },
+                counts = {
+                    rating_present = true,
+                    highlights_count = 2,
+                    notes_count = 1,
+                    bookmarks_count = 1,
+                },
+            }
+        end
+
+        plugin:showMetadataPreview()
+        local dialog = UIManager.getLastShown()
+        assert.is_not_nil(dialog)
+        assert.is_true(type(dialog.text) == "string")
+        assert.is_true(dialog.text:find("Metadata Preview", 1, true) ~= nil)
+        assert.is_true(dialog.text:find("Pending metadata: 2", 1, true) ~= nil)
+    end)
+
     it("shows connection and settings items in the restructured menu", function()
         local plugin = newPlugin()
         local menu = {}
         plugin:addToMainMenu(menu)
 
         local top = menu.grimmlink.sub_item_table
+        local status_menu = findMenuItem(top, "Status / About")
+        assert.is_not_nil(status_menu)
+        local preview_item = findMenuItem(status_menu.sub_item_table, "Preview Metadata")
+        assert.is_not_nil(preview_item)
         local settings_menu = findMenuItem(top, "Settings")
         assert.is_not_nil(settings_menu)
         local connection_menu = findMenuItem(settings_menu.sub_item_table, "Connection")
@@ -828,6 +1520,85 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(test_item)
         local password_item = findMenuItem(connection_menu.sub_item_table, "Password")
         assert.is_not_nil(password_item)
+    end)
+
+    it("registers long-press file actions via FileManager file dialog buttons API", function()
+        local rows = {}
+        local plugin = newPlugin({
+            ui = {
+                file_dialog = { id = "dialog" },
+                addFileDialogButtons = function(_, row_id, row_func)
+                    rows[row_id] = row_func
+                end,
+            },
+        })
+        local calls = {}
+        plugin.syncThisBookFromPath = function(_, file_path)
+            calls[#calls + 1] = { name = "sync", file_path = file_path }
+        end
+        plugin.pullRemoteProgressFromPath = function(_, file_path)
+            calls[#calls + 1] = { name = "pull", file_path = file_path }
+        end
+        plugin.toggleTrackingByPath = function(_, file_path)
+            calls[#calls + 1] = { name = "toggle", file_path = file_path }
+        end
+        plugin.matchBookByPath = function(_, file_path)
+            calls[#calls + 1] = { name = "match", file_path = file_path }
+        end
+        plugin.showBookDebugInfoByPath = function(_, file_path)
+            calls[#calls + 1] = { name = "debug", file_path = file_path }
+        end
+
+        assert.is_true(plugin:registerFileManagerHoldActions())
+        assert.is_not_nil(rows.grimmlink_file_dialog_separator)
+        assert.is_not_nil(rows.grimmlink_file_dialog_primary)
+        assert.is_not_nil(rows.grimmlink_file_dialog_secondary)
+
+        local separator = rows.grimmlink_file_dialog_separator("/books/demo.epub", true, nil)
+        assert.are.same({}, separator)
+
+        local primary = rows.grimmlink_file_dialog_primary("/books/demo.epub", true, nil)
+        assert.are.equal(3, #primary)
+        primary[1].callback()
+        primary[2].callback()
+        primary[3].callback()
+
+        local secondary = rows.grimmlink_file_dialog_secondary("/books/demo.epub", true, nil)
+        assert.are.equal(2, #secondary)
+        secondary[1].callback()
+        secondary[2].callback()
+
+        assert.are.equal(5, #calls)
+        assert.are.equal("sync", calls[1].name)
+        assert.are.equal("pull", calls[2].name)
+        assert.are.equal("toggle", calls[3].name)
+        assert.are.equal("match", calls[4].name)
+        assert.are.equal("debug", calls[5].name)
+        for _, call in ipairs(calls) do
+            assert.are.equal("/books/demo.epub", call.file_path)
+        end
+
+        assert.is_nil(rows.grimmlink_file_dialog_primary("/books", false, nil))
+    end)
+
+    it("does not reuse legacy shelf-books cache key across explicit shelf types", function()
+        local plugin = newPlugin()
+        plugin._shelf_books_cache = {
+            ["2"] = {
+                ts = os.time(),
+                books = {
+                    { bookId = 999 },
+                },
+            },
+        }
+
+        local magic_books = plugin:getCachedShelfBooks(2, "magic", 120)
+        assert.is_nil(magic_books)
+
+        local legacy_books = plugin:getCachedShelfBooks(2, nil, 120)
+        assert.is_not_nil(legacy_books)
+        assert.are.equal(1, #legacy_books)
+        assert.are.equal(999, legacy_books[1].bookId)
     end)
 
     it("uses live release checks for manual update checks", function()
