@@ -3,7 +3,7 @@
   <p align="center">KOReader companion plugin for <a href="https://github.com/0xstillb/grimmory">Grimmory (0xstillb fork)</a></p>
 </p>
 
-> GrimmLink ออกแบบมาสำหรับ Grimmory โดยเฉพาะ (ไม่ใช่ปลั๊กอิน universal sync)
+> GrimmLink is built specifically for Grimmory (not a universal sync plugin).
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-KOReader-blue" alt="Platform">
@@ -14,57 +14,57 @@
 
 ---
 
-## GrimmLink คืออะไร
+## What Is GrimmLink?
 
-GrimmLink คือปลั๊กอิน KOReader ที่เชื่อมการอ่านบนเครื่อง (EPUB/PDF/CBZ ฯลฯ) เข้ากับ Grimmory เพื่อ:
+GrimmLink is a KOReader plugin that connects local reading (EPUB/PDF/CBZ and more) to Grimmory for:
 
-- sync progress แบบ push/pull
-- sync reading sessions
-- sync metadata แบบ upload-only (rating/highlight/note/bookmark)
-- sync shelf (regular + magic shelf) และดาวน์โหลดไฟล์ลงเครื่อง
-- มี maintenance/debug tools สำหรับดูสถานะคิวและแก้ปัญหาได้เอง
+- progress push/pull sync
+- reading session sync
+- metadata sync (upload-only: rating/highlight/note/bookmark)
+- shelf sync (regular + magic shelf) with file download
+- maintenance and debug tools for queue visibility and recovery
 
 ---
 
-## GrimmLink ทำอะไรได้บ้าง
+## Core Capabilities
 
 ### 1) Progress Sync
 
-- Pull remote progress ตอนเปิดหนังสือ
-- Push local progress ตอนปิด/พัก/สั่ง manual sync
-- มี conflict prompt ก่อนกระโดดตำแหน่ง
-- รองรับ read status flow ที่ผูกกับ Grimmory (`UNREAD`, `READING`, `READ`, และสถานะเสริมที่ backend รองรับ)
-- สำหรับ EPUB/reflowable sync ใช้ KOReader-native location/progress เป็นหลัก (ไม่ใช้ percent เป็น authoritative)
-- สำหรับ PDF/CBX (fixed-page) ยัง sync page/percentage ได้ตามเดิม
-- PDF web reader bridge ยังเป็น PDF-only และไม่ทำ EPUB CFI/web-bridge conversion
+- Pull remote progress when opening a book.
+- Push local progress when closing/suspending/manual sync.
+- Show a conflict prompt before jumping to another location.
+- Support Grimmory read status flow (`UNREAD`, `READING`, `READ`, plus backend-supported custom statuses).
+- For EPUB/reflowable formats, sync uses KOReader-native location/progress as the source of truth (percentage is not authoritative).
+- For fixed-page formats (PDF/CBZ), page/percentage sync remains available.
+- PDF web reader bridge remains PDF-only; no EPUB CFI/web bridge conversion.
 
 ### 2) Reading Session Sync
 
-- เก็บ session การอ่านในเครื่อง
-- อัปโหลดตอนออนไลน์
-- ถ้าเน็ตล่มจะค้างในคิวและ retry ภายหลัง
+- Track local reading sessions.
+- Upload when online.
+- Keep sessions in queue and retry when connection returns.
 
 ### 3) Metadata Sync (Upload-only)
 
-- ดึง rating/highlight/note/bookmark จาก KOReader
-- ส่ง batch ไป endpoint เดียว:
+- Collect rating/highlight/note/bookmark from KOReader.
+- Send in batch to:
   - `/api/koreader/syncs/metadata`
-- ใช้ auth header:
+- Auth headers:
   - `x-auth-user`
   - `x-auth-key`
-- ไม่มี Bearer token
-- ไม่มี pull metadata กลับเข้า KOReader ใน phase ปัจจุบัน
-- ไม่มี deletion sync ของ annotation/bookmark ใน phase ปัจจุบัน
+- No Bearer token.
+- No metadata pull-back into KOReader in current phase.
+- No annotation/bookmark deletion sync in current phase.
 
 ### 4) Shelf Sync (Regular + Magic)
 
-- เลือก sync ได้ทั้ง regular shelf และ magic shelf
-- รองรับ private shelf แบบใส่ ID ตรงๆ พร้อม validate ก่อนใช้งาน
-- ดาวน์โหลดไฟล์พร้อม progress dialog/cancel
-- มี async + blocking fallback ตามความสามารถเครื่อง
-- หลังดาวน์โหลดใหม่ จะ refresh KOReader book info/cover cache อัตโนมัติ เพื่อให้ปกแสดงโดยไม่ต้องเปิดเล่มหรือกด refresh เอง
-- มี local tombstone/queue จัดการการลบฝั่ง local อย่างปลอดภัย
-- ไม่ลบไฟล์ server/library ของ Grimmory
+- Sync regular shelf and magic shelf.
+- Support private shelf ID with validation.
+- Download files with progress dialog/cancel.
+- Use async path with blocking fallback based on device capability.
+- Refresh KOReader book info/cover cache automatically after download.
+- Use local tombstone/queue for safe local deletion handling.
+- Never delete server/library files in Grimmory.
 
 ### 5) Maintenance / Debug / Recovery
 
@@ -74,15 +74,15 @@ GrimmLink คือปลั๊กอิน KOReader ที่เชื่อม
 - clear local metadata synced history
 - clear shelf tombstones/pending removals
 - rebuild SimpleUI metadata cache
-- rebuild/force metadata resync รายเล่ม
+- rebuild/force metadata resync per book
 - re-match current book
 - show DB status/pending counts
 
-ทุก action ที่ทำลายข้อมูล local จะมี confirmation ก่อน
+All local destructive actions are confirmation-gated.
 
 ---
 
-## เมนูหลักปัจจุบัน (ย่อให้ใช้ง่าย)
+## Main Menu Overview
 
 `Tools -> GrimmLink`
 
@@ -97,107 +97,107 @@ GrimmLink คือปลั๊กอิน KOReader ที่เชื่อม
 - Advanced Setting
 - Status / About
 
-หมายเหตุ:
+Notes:
 
-- `Preview Metadata` อยู่ใน `Advanced Setting -> Metadata Sync`
+- `Preview Metadata` is under `Advanced Setting -> Metadata Sync`.
 
 ---
 
-## ความต่าง GrimmLink vs KoSync
+## GrimmLink vs KoSync
 
-KoSync คือระบบ sync พื้นฐานของ KOReader สำหรับ reading progress ระหว่างอุปกรณ์เป็นหลัก
-GrimmLink คือ integration กับ Grimmory แบบครบวงจร
+KoSync is KOReader's baseline progress sync between devices.
+GrimmLink is an end-to-end Grimmory integration.
 
-| หัวข้อ | GrimmLink | KoSync |
+| Topic | GrimmLink | KoSync |
 |---|---|---|
-| เป้าหมาย | ผูกกับ Grimmory โดยตรง | sync progress ทั่วไปของ KOReader |
-| Auth | `x-auth-user` + `x-auth-key` | ตามระบบ KoSync |
-| Progress push/pull | มี | มี |
-| Reading sessions | มี | โดยทั่วไปไม่มี |
-| Metadata (rating/highlight/note/bookmark) | มี (upload-only) | โดยทั่วไปไม่มี |
-| Shelf sync + ดาวน์โหลดไฟล์ | มี (regular/magic/private ID) | ไม่มี |
-| Manual reading status menu | มี (ตาม backend capability) | ไม่มี |
-| Maintenance queues/debug export | มี | จำกัดกว่า |
-| Grimmory-specific API | ใช้โดยตรง | ไม่ได้ออกแบบมาเพื่อ Grimmory |
+| Goal | Direct Grimmory integration | General KOReader progress sync |
+| Auth | `x-auth-user` + `x-auth-key` | KoSync auth model |
+| Progress push/pull | Yes | Yes |
+| Reading sessions | Yes | Usually no |
+| Metadata (rating/highlight/note/bookmark) | Yes (upload-only) | Usually no |
+| Shelf sync + file download | Yes (regular/magic/private ID) | No |
+| Manual reading status menu | Yes (backend capability aware) | No |
+| Maintenance queues/debug export | Yes | More limited |
+| Grimmory-specific API | Native | Not designed for Grimmory |
 
-สรุปสั้นๆ:
+Short version:
 
-- ถ้าต้องการแค่ sync ตำแหน่งอ่านระหว่าง KOReader อาจใช้ KoSync ได้
-- ถ้าต้องการ workflow เต็มกับ Grimmory (shelf + metadata + sessions + maintenance) ให้ใช้ GrimmLink
+- If you only need KOReader-to-KOReader position sync, KoSync may be enough.
+- If you need full Grimmory workflow (shelf + metadata + sessions + maintenance), use GrimmLink.
 
 ---
 
-## การติดตั้ง
+## Installation
 
-1. ดาวน์โหลด `grimmlink.koplugin.zip` จาก [Release ล่าสุด](https://github.com/0xstillb/grimmlink/releases/latest)
-2. แตกไฟล์ลง `plugins/` ของ KOReader
-3. รีสตาร์ท KOReader
-4. เข้า `Tools -> GrimmLink -> Connection`
-5. ใส่:
+1. Download `grimmlink.koplugin.zip` from the [latest release](https://github.com/0xstillb/grimmlink/releases/latest).
+2. Extract it into KOReader `plugins/`.
+3. Restart KOReader.
+4. Open `Tools -> GrimmLink -> Connection`.
+5. Enter:
    - Grimmory Server URL
    - Username
    - Password
-6. กด Test Connection
+6. Tap Test Connection.
 
-หมายเหตุ:
+Notes:
 
-- ปลั๊กอินจะคำนวณ `x-auth-key` ภายในเองจากรหัสผ่าน
-- ผู้ใช้ไม่ต้องกรอก token/bearer key เอง
+- The plugin computes `x-auth-key` internally from your password.
+- Users do not need to provide token/bearer keys manually.
 
 ---
 
-## ค่าตั้งค่าสำคัญ
+## Important Settings
 
-| Setting | Default | ความหมาย |
+| Setting | Default | Meaning |
 |---|---|---|
-| `metadata_sync_enabled` | `false` | เปิด metadata sync |
-| `rating_sync_enabled` | `true` | ส่ง rating |
-| `annotations_sync_enabled` | `true` | ส่ง highlights/notes |
-| `bookmarks_sync_enabled` | `true` | ส่ง bookmarks |
-| `sync_regular_shelf_enabled` | `false` | เปิด regular shelf sync |
-| `sync_magic_shelf_enabled` | `false` | เปิด magic shelf sync |
-| `ask_wifi_before_sync` | `true` | ถามก่อนใช้ Wi-Fi เมื่อสั่ง sync ตอน offline |
-| `sync_on_network_connected` | `false` | sync อัตโนมัติเมื่อเน็ตกลับมา |
-| `network_sync_cooldown_seconds` | `300` | กัน sync ถี่เกิน |
-| `send_reflowable_percentage` | `false` | internal guard: ไม่ส่งเปอร์เซ็นต์ของ reflowable เป็นค่า authoritative |
-| `auto_update_enabled` | `false` | อัปเดตอัตโนมัติ |
-| `check_update_on_startup` | `false` | เช็กอัปเดตตอนเปิด KOReader |
+| `metadata_sync_enabled` | `false` | Enable metadata sync |
+| `rating_sync_enabled` | `true` | Upload rating |
+| `annotations_sync_enabled` | `true` | Upload highlights/notes |
+| `bookmarks_sync_enabled` | `true` | Upload bookmarks |
+| `sync_regular_shelf_enabled` | `false` | Enable regular shelf sync |
+| `sync_magic_shelf_enabled` | `false` | Enable magic shelf sync |
+| `ask_wifi_before_sync` | `true` | Ask before Wi-Fi sync when currently offline |
+| `sync_on_network_connected` | `false` | Auto sync when network returns |
+| `network_sync_cooldown_seconds` | `300` | Prevent over-frequent sync |
+| `send_reflowable_percentage` | `false` | Internal guard: do not send reflowable percentage as authoritative progress |
+| `auto_update_enabled` | `false` | Enable auto updates |
+| `check_update_on_startup` | `false` | Check updates at KOReader startup |
 
 ---
 
 ## Privacy / Logging Policy
 
-GrimmLink ตั้งใจไม่เขียนข้อมูลลับหรือ content เต็มลง log/debug export:
+GrimmLink avoids writing sensitive data or full content into logs/debug export:
 
-- ไม่ log รหัสผ่าน
-- ไม่ log `x-auth-key`
-- ไม่ log bearer/authorization token
-- ไม่ dump เต็มของ `payload_json`
-- ไม่ export ข้อความ highlight/note เต็ม
+- no password logs
+- no `x-auth-key` logs
+- no bearer/authorization token logs
+- no full `payload_json` dump
+- no full highlight/note content export
 
-Debug export จะเน้น counters, queue status, และข้อมูลเชิงวินิจฉัยที่ปลอดภัย
+Debug export focuses on counters, queue status, and safe diagnostic metadata.
 
 ---
 
 ## Delete Policy
 
-- ลบได้เฉพาะไฟล์ local ที่ GrimmLink ดาวน์โหลดและ track เอง
-- ถ้าหนังสือยังถูก track โดย shelf อื่น จะไม่ลบไฟล์
-- ไม่ลบไฟล์/records ฝั่ง Grimmory server/library
+- Only local files downloaded and tracked by GrimmLink can be deleted by GrimmLink.
+- If a book is still tracked by another shelf, GrimmLink will not delete that file.
+- Grimmory server/library files and records are never deleted.
 
 ---
 
-## Known Limitations (ปัจจุบัน)
+## Known Limitations
 
-- Metadata sync เป็น upload-only
-- ยังไม่ดึง annotation/bookmark จาก Grimmory กลับเข้า KOReader
-- ยังไม่มี deletion sync ของ annotation/bookmark
-- ความสามารถบางสถานะอ่านขึ้นกับ backend capability
-- EPUB web bridge / CFI conversion ยังอยู่นอก scope
+- Metadata sync is upload-only.
+- Annotation/bookmark pull-back from Grimmory is not implemented yet.
+- Annotation/bookmark deletion sync is not implemented yet.
+- Some manual read statuses depend on backend capability.
+- EPUB web bridge / CFI conversion remains out of scope.
 
 ---
 
-## โครงสร้างโปรเจกต์
+## Project Structure
 
 ```text
 grimmlink.koplugin/
@@ -215,10 +215,11 @@ grimmlink.koplugin/
 
 ## Credits
 
-GrimmLink มีจุดเริ่มต้นจากแนวคิดของ BookLoreSync plugin และพัฒนาต่อให้ตรงกับ Grimmory workflow
+GrimmLink started from ideas in the BookLoreSync plugin and was extended to fit Grimmory workflows.
 
 ---
 
 ## License
 
-ดูที่ [LICENSE](LICENSE)
+See [LICENSE](LICENSE).
+

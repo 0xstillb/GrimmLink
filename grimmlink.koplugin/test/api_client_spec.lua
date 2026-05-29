@@ -87,6 +87,9 @@ package.preload["json"] = function()
             if type(value) == "table" and value.message then
                 return '{"message":"' .. value.message .. '"}'
             end
+            if type(value) == "table" and value.status then
+                return '{"status":"' .. tostring(value.status) .. '"}'
+            end
             return "{}"
         end,
         decode = function(value)
@@ -246,7 +249,9 @@ describe("GrimmLink API client", function()
         assert.is_true(success)
         assert.are.equal("READ", response.readStatus)
         assert.are.equal("/api/koreader/books/123/status", captured_request.url:match("/api/koreader/books/123/status$") and "/api/koreader/books/123/status" or nil)
-        assert.is_true(captured_request.source:find('"status":"READ"', 1, true) ~= nil)
+        local request_payload = type(captured_request.source) == "function" and captured_request.source() or nil
+        assert.is_true(type(request_payload) == "string")
+        assert.is_true(request_payload:find('"status":"READ"', 1, true) ~= nil)
     end)
 
     it("normalizes shelf book file format from extension when format is missing", function()
