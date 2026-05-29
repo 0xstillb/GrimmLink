@@ -3278,52 +3278,48 @@ function Grimmlink:syncPendingMetadata(silent, limit)
     end
 
     for _, group in pairs(groups) do
-        if group.rating == nil and #group.annotations == 0 and #group.bookmarks == 0 then
-            goto continue_group
-        end
+        local has_payload_items = not (group.rating == nil and #group.annotations == 0 and #group.bookmarks == 0)
+        if has_payload_items then
+            local payload = self.api:buildMetadataBatchPayload(
+                group.book_id,
+                group.book_hash,
+                group.book_file_id,
+                group.file_format,
+                self.device_name,
+                self.device_id,
+                group.rating,
+                group.annotations,
+                group.bookmarks
+            )
 
-        local payload = self.api:buildMetadataBatchPayload(
-            group.book_id,
-            group.book_hash,
-            group.book_file_id,
-            group.file_format,
-            self.device_name,
-            self.device_id,
-            group.rating,
-            group.annotations,
-            group.bookmarks
-        )
+            local ok_submit, response, code = self.api:submitMetadataBatch(payload)
+            if not ok_submit or type(response) ~= "table" then
+                for _, row in ipairs(group.rows) do
+                    self:handleMetadataRowRetry(row, safeToString(response or code or "network_error"))
+                    failed = failed + 1
+                end
+            else
+                local processed_ids = {}
+                local results = response.results or {}
+                if type(results.rating) == "table" then
+                    handleResult(group, results.rating, "rating", processed_ids)
+                end
+                for _, item in ipairs(results.annotations or {}) do
+                    handleResult(group, item, "annotation", processed_ids)
+                end
+                for _, item in ipairs(results.bookmarks or {}) do
+                    handleResult(group, item, "bookmark", processed_ids)
+                end
 
-        local ok_submit, response, code = self.api:submitMetadataBatch(payload)
-        if not ok_submit or type(response) ~= "table" then
-            for _, row in ipairs(group.rows) do
-                self:handleMetadataRowRetry(row, safeToString(response or code or "network_error"))
-                failed = failed + 1
-            end
-            goto continue_group
-        end
-
-        local processed_ids = {}
-        local results = response.results or {}
-        if type(results.rating) == "table" then
-            handleResult(group, results.rating, "rating", processed_ids)
-        end
-        for _, item in ipairs(results.annotations or {}) do
-            handleResult(group, item, "annotation", processed_ids)
-        end
-        for _, item in ipairs(results.bookmarks or {}) do
-            handleResult(group, item, "bookmark", processed_ids)
-        end
-
-        -- Any item with no explicit result is treated as retryable failure.
-        for _, row in ipairs(group.rows) do
-            if not processed_ids[row.id] then
-                self:handleMetadataRowRetry(row, "missing_result")
-                failed = failed + 1
+                -- Any item with no explicit result is treated as retryable failure.
+                for _, row in ipairs(group.rows) do
+                    if not processed_ids[row.id] then
+                        self:handleMetadataRowRetry(row, "missing_result")
+                        failed = failed + 1
+                    end
+                end
             end
         end
-
-        ::continue_group::
     end
 
     if not silent and (synced > 0 or failed > 0) then
