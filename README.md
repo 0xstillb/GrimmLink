@@ -159,7 +159,7 @@ Notes:
 | `ask_wifi_before_sync` | `true` | Ask before Wi-Fi sync when currently offline |
 | `sync_on_network_connected` | `false` | Auto sync when network returns |
 | `network_sync_cooldown_seconds` | `300` | Prevent over-frequent sync |
-| `send_reflowable_percentage` | `false` | Internal guard: do not send reflowable percentage as authoritative progress |
+| `send_reflowable_percentage` | `true` | Internal guard: send reflowable percentage for display only (authoritative sync still uses KOReader-native location) |
 | `auto_update_enabled` | `false` | Enable auto updates |
 | `check_update_on_startup` | `false` | Check updates at KOReader startup |
 

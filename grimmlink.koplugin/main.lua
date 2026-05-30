@@ -100,7 +100,7 @@ local DEFAULTS = {
     annotations_sync_enabled = true,
     bookmarks_sync_enabled = true,
     metadata_retry_max = 5,
-    send_reflowable_percentage = false,
+    send_reflowable_percentage = true,
 }
 
 local DISK_SPACE_SAFETY_MARGIN_BYTES = 20 * 1024 * 1024
@@ -6204,6 +6204,12 @@ function Grimmlink:init()
     self.log_to_file = self:readSetting("log_to_file", DEFAULTS.log_to_file)
     self.threshold_percent = self:readSetting("threshold_percent", DEFAULTS.threshold_percent)
     self.send_reflowable_percentage = self:readSetting("send_reflowable_percentage", DEFAULTS.send_reflowable_percentage)
+    if self.send_reflowable_percentage ~= true then
+        self.send_reflowable_percentage = true
+        if self.db then
+            self.db:savePluginSetting("send_reflowable_percentage", true)
+        end
+    end
     self.threshold_minutes = self:readSetting("threshold_minutes", DEFAULTS.threshold_minutes)
     self.threshold_pages = self:readSetting("threshold_pages", DEFAULTS.threshold_pages)
     self.session_min_seconds = self:readSetting("session_min_seconds", DEFAULTS.session_min_seconds)

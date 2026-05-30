@@ -629,6 +629,7 @@ describe("GrimmLink helper methods", function()
 
     it("builds native EPUB progress payloads without bridge-specific fields or percentage", function()
         local plugin = newPlugin()
+        plugin.send_reflowable_percentage = false
         local payload = plugin:prepareNativeProgressPayload({
             document = "hash-1",
             bookHash = "hash-1",
@@ -653,6 +654,29 @@ describe("GrimmLink helper methods", function()
         assert.is_nil(payload.percentage)
         assert.is_nil(payload.cfi)
         assert.is_nil(payload.rawKoreaderLocation)
+    end)
+
+    it("builds native EPUB progress payloads with percentage when reflowable percentage is enabled", function()
+        local plugin = newPlugin()
+        plugin.send_reflowable_percentage = true
+        local payload = plugin:prepareNativeProgressPayload({
+            document = "hash-1",
+            bookHash = "hash-1",
+            bookId = 7,
+            bookFileId = 9,
+            fileFormat = "EPUB",
+            progress = "/4",
+            location = "/4",
+            percentage = 12.5,
+            currentPage = 4,
+            totalPages = 100,
+            device = "KOReader",
+            deviceId = "device-1",
+            timestamp = 123,
+        })
+
+        assert.are.equal(12.5, payload.percentage)
+        assert.is_nil(payload.cfi)
     end)
 
     it("builds native fixed-page payloads with percentage intact", function()
