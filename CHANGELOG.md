@@ -2,13 +2,28 @@
 
 # [Unreleased]
 
+### Notes
+- In progress
+
+# [v1.4.1]
+
 ### Features
-- Added automatic KOReader book info / cover cache refresh after Shelf Sync downloads so newly synced books show covers without manual refresh.
+- Connection setup now includes both Local URL and Remote URL in one flow, with optional nickname fields inline (`Home URL Nickname`, `Remote URL Nickname`).
+- Added friendly target labeling in connection tests: `Active server` now prefers configured nickname, then falls back to `Local`/`Remote`.
+- Added split test modes:
+  - `Test Connection`: concise output
+  - `Test Connection with Diagnostics`: extended route/failure details
+- Added richer debug export for connection routing and recent test outcomes.
 
 ### Fixes
-- KOReader native sync policy for EPUB/reflowable formats now treats KOReader-native location/progress as source of truth and suppresses reflowable percentage from native progress payloads by default (`send_reflowable_percentage=false`).
-- Remote EPUB apply path now skips percentage-to-page fallback and requires KOReader-native location; if missing, GrimmLink shows: `No KOReader-native location available for this book.`
-- Fixed-page formats (PDF/CBX family) keep existing page/percentage sync behavior, and PDF web-reader bridge remains PDF-only.
+- Reworked URL routing to local-first policy without requiring SSID detection; temporary remote fallback is driven by recent local transport failures/cooldown.
+- Fixed fallback stickiness by keeping primary URL stable and preventing unintended permanent server URL switching.
+- Prevented `Test Connection` from double-wait behavior by disabling fallback retry during the test attempt.
+- Reduced perceived UI freeze during connection tests:
+  - shorter auth test timeouts
+  - immediate `Testing connection...` popup with explicit duration output
+- Reduced wake/resume lag by deferring resume-time network work and adding a post-resume grace window to avoid duplicate immediate network-trigger sync.
+- Updated connection menu structure to reduce extra items by moving nickname input into Local/Remote URL edit flows.
 
 # [v1.4.0]
 

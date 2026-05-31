@@ -77,6 +77,10 @@ function APIClient:setFallbackUrl(url)
     end
 end
 
+function APIClient:getLastPrimaryFailure()
+    return self._last_primary_failure
+end
+
 function APIClient:_resolveAuthKey()
     if self.password == "" then
         return ""
@@ -173,18 +177,31 @@ function APIClient:extractErrorMessage(response_text, code)
     return fallback[code] or ("HTTP " .. tostring(code))
 end
 
-function APIClient:request(method, path, body, extra_headers, timeout_sec)
-    if not self.server_url or self.server_url == "" then
-        return false, nil, "Server URL not configured"
+local function cloneHeaders(headers)
+    local copied = {}
+    for key, value in pairs(headers or {}) do
+        copied[key] = value
     end
+    return copied
+end
 
-    local url = self.server_url .. path
-    self:log("info", "GrimmLink API:", method, url)
+local function summarizeUrlForLogs(url)
+    local text = tostring(url or "")
+    local protocol, host = text:match("^(https?://)([^/%?]+)")
+    if protocol and host then
+        return protocol .. host
+    end
+    return text:gsub("%?.*$", "")
+end
+
+function APIClient:_performRequest(base_url, method, path, body, extra_headers, timeout_sec)
+    local url = tostring(base_url or "") .. tostring(path or "")
+    self:log("info", "GrimmLink API:", method, summarizeUrlForLogs(url))
 
     local protocol = url:match("^https://") and https or http
     protocol.TIMEOUT = timeout_sec or self.timeout
 
-    local headers = extra_headers or {}
+    local headers = cloneHeaders(extra_headers)
     headers["Accept"] = headers["Accept"] or "application/json"
 
     if self.username ~= "" and self.password ~= "" then
@@ -215,25 +232,16 @@ function APIClient:request(method, path, body, extra_headers, timeout_sec)
     }
 
     if type(code) ~= "number" then
-        -- Connection failed — try fallback URL if available
-        if self.fallback_url and self.fallback_url ~= "" and self.fallback_url ~= self.server_url and not self._in_fallback then
-            self:log("info", "GrimmLink API: primary failed, trying fallback:", self.fallback_url)
-            local orig_url = self.server_url
-            self.server_url = self.fallback_url
-            self._in_fallback = true
-            local fb_ok, fb_code, fb_resp, fb_headers = self:request(method, path, body, extra_headers, timeout_sec)
-            self._in_fallback = nil
-            if fb_ok or type(fb_code) == "number" then
-                -- Fallback succeeded (got HTTP response) — keep using it
-                self:log("info", "GrimmLink API: fallback succeeded, switching to:", self.fallback_url)
-                return fb_ok, fb_code, fb_resp, fb_headers
-            end
-            -- Both failed — restore original and report
-            self.server_url = orig_url
-        end
         local error_message = tostring(code or ok or "connection failed")
         self:log("warn", "GrimmLink API request failed:", error_message)
-        return false, nil, error_message
+        return {
+            success = false,
+            code = nil,
+            response = error_message,
+            headers = response_headers,
+            transport_error = true,
+            url = url,
+        }
     end
 
     local response_text = table.concat(response_buffer)
@@ -243,15 +251,84 @@ function APIClient:request(method, path, body, extra_headers, timeout_sec)
     end
 
     if code >= 200 and code < 300 then
-        return true, code, parsed or response_text, response_headers
+        return {
+            success = true,
+            code = code,
+            response = parsed or response_text,
+            headers = response_headers,
+            transport_error = false,
+            url = url,
+        }
     end
 
     local error_message = self:extractErrorMessage(response_text, code)
     self:log("warn", "GrimmLink API HTTP", code, error_message)
-    return false, code, error_message, response_headers
+    return {
+        success = false,
+        code = code,
+        response = error_message,
+        headers = response_headers,
+        transport_error = false,
+        url = url,
+    }
 end
 
-function APIClient:testAuth()
+function APIClient:request(method, path, body, extra_headers, timeout_sec)
+    if not self.server_url or self.server_url == "" then
+        return false, nil, "Server URL not configured", nil, {
+            category = "url_missing",
+            used_url = "",
+            used_fallback = false,
+            fallback_attempted = false,
+            fallback_success = false,
+        }
+    end
+
+    local primary = self:_performRequest(self.server_url, method, path, body, extra_headers, timeout_sec)
+    local now_ts = os.time()
+    local details = {
+        primary_url = self.server_url .. path,
+        used_url = primary.url,
+        used_fallback = false,
+        fallback_attempted = false,
+        fallback_success = false,
+    }
+
+    if primary.transport_error and self.fallback_url and self.fallback_url ~= "" and self.fallback_url ~= self.server_url then
+        self._last_primary_failure = {
+            url = self.server_url,
+            at = now_ts,
+            error = primary.response,
+        }
+        details.fallback_attempted = true
+        self:log("info", "GrimmLink API: primary failed, trying fallback:", summarizeUrlForLogs(self.fallback_url))
+        local fallback_timeout = self.fallback_timeout
+        if fallback_timeout == nil then
+            fallback_timeout = timeout_sec or self.timeout
+        end
+        local fallback = self:_performRequest(self.fallback_url, method, path, body, extra_headers, fallback_timeout)
+        details.used_url = fallback.url
+        details.used_fallback = true
+        details.fallback_success = not fallback.transport_error
+        details.fallback_http_code = fallback.code
+        details.fallback_error = fallback.response
+        if fallback.success then
+            self:log("info", "GrimmLink API: remote fallback succeeded")
+        elseif fallback.transport_error then
+            self:log("warn", "GrimmLink API: remote fallback failed")
+        end
+        return fallback.success, fallback.code, fallback.response, fallback.headers, details
+    end
+
+    if primary.success and type(self._last_primary_failure) == "table"
+        and tostring(self._last_primary_failure.url or "") == tostring(self.server_url) then
+        self._last_primary_failure = nil
+    end
+
+    return primary.success, primary.code, primary.response, primary.headers, details
+end
+
+function APIClient:testAuth(timeout_sec)
     if self.username == "" then
         return false, "Username not configured"
     end
@@ -259,11 +336,17 @@ function APIClient:testAuth()
         return false, "Password not configured"
     end
 
-    local success, code, response = self:request("GET", "/api/koreader/users/auth")
+    local success, code, response, _headers, details = self:request(
+        "GET",
+        "/api/koreader/users/auth",
+        nil,
+        nil,
+        timeout_sec
+    )
     if success then
-        return true, response, code
+        return true, response, code, details
     end
-    return false, response or ("HTTP " .. tostring(code or "?")), code
+    return false, response or ("HTTP " .. tostring(code or "?")), code, details
 end
 
 function APIClient:getBookByHash(book_hash)

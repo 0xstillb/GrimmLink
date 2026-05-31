@@ -134,15 +134,24 @@ Short version:
 3. Restart KOReader.
 4. Open `Tools -> GrimmLink -> Connection`.
 5. Enter:
-   - Grimmory Server URL
+   - Grimmory Local URL (home network)
+   - Grimmory Remote URL (external, optional)
+   - Home SSID (optional but recommended for automatic switching)
    - Username
    - Password
-6. Tap Test Connection.
+6. Tap `Test Connection with Diagnostics`.
+7. During setup, GrimmLink can ask whether to use the current Wi-Fi SSID as Home SSID for local/remote auto switching.
 
 Notes:
 
 - The plugin computes `x-auth-key` internally from your password.
 - Users do not need to provide token/bearer keys manually.
+- URL selection policy:
+  - Home SSID matched -> Local URL first
+  - Away from Home SSID -> Remote URL
+  - SSID unavailable -> Local URL first, then temporary Remote fallback when local transport fails recently
+  - Local URL fail at home -> temporary Remote fallback only for that request
+  - Back on Home SSID -> Local URL is tried first again automatically
 
 ---
 
@@ -159,6 +168,9 @@ Notes:
 | `ask_wifi_before_sync` | `true` | Ask before Wi-Fi sync when currently offline |
 | `sync_on_network_connected` | `false` | Auto sync when network returns |
 | `network_sync_cooldown_seconds` | `300` | Prevent over-frequent sync |
+| `server_url` | `""` | Local URL (LAN / home network) |
+| `remote_url` | `""` | Remote URL (internet / proxy / VPN) |
+| `home_ssid` | `""` | Home Wi-Fi SSID used for local/remote switching |
 | `send_reflowable_percentage` | `true` | Internal guard: send reflowable percentage for display only (authoritative sync still uses KOReader-native location) |
 | `auto_update_enabled` | `false` | Enable auto updates |
 | `check_update_on_startup` | `false` | Check updates at KOReader startup |

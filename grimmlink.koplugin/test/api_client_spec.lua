@@ -8,6 +8,7 @@ package.path = table.concat({
 
 local captured_request
 local next_http_response
+local next_http_responses
 
 package.preload["logger"] = function()
     return {
@@ -49,12 +50,17 @@ package.preload["socket.http"] = function()
     return {
         request = function(arguments)
             captured_request = arguments
-            local response = next_http_response or {
-                body = '{"status":"ok"}',
-                code = 200,
-                headers = {},
-                ok = 1,
-            }
+            local response = nil
+            if type(next_http_responses) == "table" and #next_http_responses > 0 then
+                response = table.remove(next_http_responses, 1)
+            else
+                response = next_http_response or {
+                    body = '{"status":"ok"}',
+                    code = 200,
+                    headers = {},
+                    ok = 1,
+                }
+            end
             if arguments.sink and response.body then
                 arguments.sink(response.body)
             end
@@ -67,12 +73,17 @@ package.preload["ssl.https"] = function()
     return {
         request = function(arguments)
             captured_request = arguments
-            local response = next_http_response or {
+            local response = nil
+            if type(next_http_responses) == "table" and #next_http_responses > 0 then
+                response = table.remove(next_http_responses, 1)
+            else
+                response = next_http_response or {
                 body = '{"status":"ok"}',
                 code = 200,
                 headers = {},
                 ok = 1,
             }
+            end
             if arguments.sink and response.body then
                 arguments.sink(response.body)
             end
@@ -126,6 +137,7 @@ describe("GrimmLink API client", function()
     before_each(function()
         captured_request = nil
         next_http_response = nil
+        next_http_responses = nil
         client = APIClient:new()
         client:init("http://example.com", "reader", "secret-password", false)
     end)
@@ -287,5 +299,93 @@ describe("GrimmLink API client", function()
         assert.is_not_nil(normalized)
         assert.are.equal("pdf", normalized.extension)
         assert.are.equal("PDF", normalized.fileFormat)
+    end)
+
+    it("uses fallback URL temporarily without overwriting primary server_url", function()
+        client:setFallbackUrl("https://backup.example.com")
+        next_http_responses = {
+            {
+                body = nil,
+                code = "timeout",
+                headers = {},
+                ok = nil,
+            },
+            {
+                body = '{"status":"ok"}',
+                code = 200,
+                headers = {},
+                ok = 1,
+            },
+        }
+
+        local success, code, payload, _headers, details = client:request("GET", "/api/koreader/users/auth")
+        assert.is_true(success)
+        assert.are.equal(200, code)
+        assert.are.equal("ok", payload.status)
+        assert.are.equal("http://example.com", client.server_url)
+        assert.is_true(details.used_fallback)
+        assert.are.equal("https://backup.example.com/api/koreader/users/auth", details.used_url)
+        local last_failure = client:getLastPrimaryFailure()
+        assert.is_true(type(last_failure) == "table")
+        assert.are.equal("http://example.com", last_failure.url)
+    end)
+
+    it("clears last primary failure after primary recovers", function()
+        client:setFallbackUrl("https://backup.example.com")
+        next_http_responses = {
+            {
+                body = nil,
+                code = "timeout",
+                headers = {},
+                ok = nil,
+            },
+            {
+                body = '{"status":"ok"}',
+                code = 200,
+                headers = {},
+                ok = 1,
+            },
+        }
+        local ok_first = select(1, client:request("GET", "/api/koreader/users/auth"))
+        assert.is_true(ok_first)
+        assert.is_not_nil(client:getLastPrimaryFailure())
+
+        next_http_response = {
+            body = '{"status":"ok"}',
+            code = 200,
+            headers = {},
+            ok = 1,
+        }
+        local ok_second = select(1, client:request("GET", "/api/koreader/users/auth"))
+        assert.is_true(ok_second)
+        assert.is_nil(client:getLastPrimaryFailure())
+    end)
+
+    it("uses dedicated fallback timeout when primary transport fails", function()
+        client.timeout = 15
+        client.fallback_timeout = 7
+        client:setFallbackUrl("https://backup.example.com")
+        next_http_responses = {
+            {
+                body = nil,
+                code = "timeout",
+                headers = {},
+                ok = nil,
+            },
+            {
+                body = nil,
+                code = "timeout",
+                headers = {},
+                ok = nil,
+            },
+        }
+
+        local ok, code, message, _headers, details = client:request("GET", "/api/koreader/users/auth")
+        assert.is_false(ok)
+        assert.is_nil(code)
+        assert.is_true(type(message) == "string")
+        assert.is_true(details.used_fallback)
+        assert.are.equal(15, require("socket.http").TIMEOUT)
+        assert.are.equal(7, require("ssl.https").TIMEOUT)
     end)
 end)

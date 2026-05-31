@@ -13,6 +13,7 @@ package.loaded["logger"] = nil
 local Grimmlink = require("main")
 local UIManager = require("ui/uimanager")
 local json = require("json")
+local NetworkMgr = require("ui/network/manager")
 restore_stubs()
 
 local function getMenuItemText(item)
@@ -540,6 +541,8 @@ local function newPlugin(overrides)
         enabled = true,
         server_url = "http://example.com",
         remote_url = "",
+        local_url_nickname = "",
+        remote_url_nickname = "",
         home_ssid = "",
         username = "reader",
         password = "secret-password",
@@ -618,6 +621,9 @@ describe("GrimmLink helper methods", function()
         if UIManager.reset then
             UIManager:reset()
         end
+        NetworkMgr.getCurrentNetwork = nil
+        NetworkMgr.getCurrentSSID = nil
+        NetworkMgr.getSSID = nil
     end)
 
     it("keeps the PDF Web Reader Bridge disabled by default", function()
@@ -1587,6 +1593,10 @@ describe("GrimmLink helper methods", function()
         plugin.password = "super-secret-password"
         plugin.server_url = "http://192.168.1.100:6060"
         plugin.remote_url = "https://example.com"
+        plugin.home_ssid = "MyHomeWiFi"
+        NetworkMgr.getCurrentNetwork = function()
+            return { ssid = "CoffeeShop" }
+        end
         plugin.file_logger = {
             getLogPath = function()
                 return "/tmp/grimmlink.log"
@@ -1600,6 +1610,149 @@ describe("GrimmLink helper methods", function()
         assert.is_true(dialog.text:find("GrimmLink Debug Info", 1, true) ~= nil)
         assert.is_true(dialog.text:find("super-secret-password", 1, true) == nil)
         assert.is_true(dialog.text:find("username: re...", 1, true) ~= nil)
+        assert.is_true(dialog.text:find("active_url_source:", 1, true) ~= nil)
+        assert.is_true(dialog.text:find("last_connection_error_category:", 1, true) ~= nil)
+    end)
+
+    it("keeps local URL regardless of SSID when local is configured", function()
+        local plugin = newPlugin()
+        plugin.server_url = "http://192.168.1.100:6060"
+        plugin.remote_url = "https://example.com"
+
+        local current_ssid = "HomeWiFi"
+        NetworkMgr.getCurrentNetwork = function()
+            return { ssid = current_ssid }
+        end
+
+        local first = plugin:resolveServerUrl(true)
+        assert.are.equal("http://192.168.1.100:6060", first)
+        assert.are.equal("local", plugin.active_url_source)
+        assert.are.equal("local_first_policy", plugin.last_url_switch_reason)
+
+        current_ssid = "CoffeeShop"
+        local second = plugin:resolveServerUrl(true)
+        assert.are.equal("http://192.168.1.100:6060", second)
+        assert.are.equal("local", plugin.active_url_source)
+        assert.are.equal("local_first_policy", plugin.last_url_switch_reason)
+    end)
+
+    it("uses remote when local recently failed", function()
+        local plugin = newPlugin()
+        plugin.server_url = "http://192.168.1.100:6060"
+        plugin.remote_url = "https://example.com"
+        plugin.local_fail_cooldown_seconds = 60
+
+        plugin.api = {
+            getLastPrimaryFailure = function()
+                return {
+                    url = "http://192.168.1.100:6060",
+                    at = os.time(),
+                    error = "timeout",
+                }
+            end,
+        }
+        NetworkMgr.getCurrentNetwork = function()
+            return nil
+        end
+
+        local selected = plugin:resolveServerUrl(true)
+        assert.are.equal("https://example.com", selected)
+        assert.are.equal("fallback", plugin.active_url_source)
+        assert.are.equal("local_recently_failed", plugin.last_url_switch_reason)
+    end)
+
+    it("sets fallback only when active source is local", function()
+        local plugin = newPlugin()
+        plugin.server_url = "http://192.168.1.100:6060"
+        plugin.remote_url = "https://example.com"
+        plugin.local_request_timeout_seconds = 2
+        plugin.remote_request_timeout_seconds = 1
+
+        NetworkMgr.getCurrentNetwork = function() return { ssid = "AnyWiFi" } end
+
+        plugin:refreshApiClient(true)
+        assert.are.equal("https://example.com", plugin.api.fallback_url)
+        assert.are.equal(2, plugin.api.timeout)
+        assert.are.equal(1, plugin.api.fallback_timeout)
+
+        plugin._local_fail_cooldown_until = os.time() + 30
+        plugin:refreshApiClient(true)
+        assert.is_nil(plugin.api.fallback_url)
+        assert.are.equal(1, plugin.api.timeout)
+        assert.are.equal(1, plugin.api.fallback_timeout)
+    end)
+
+    it("reports Connected when SSID exists", function()
+        local plugin = newPlugin()
+        assert.are.equal("Connected", plugin:getNetworkStateLabel("CoffeeShop"))
+    end)
+
+    it("reports SSID unavailable when SSID cannot be detected", function()
+        local plugin = newPlugin()
+        assert.are.equal("SSID unavailable", plugin:getNetworkStateLabel(nil))
+    end)
+
+    it("uses URL nickname for target display when configured", function()
+        local plugin = newPlugin()
+        plugin.local_url_nickname = "My Home API"
+        plugin.remote_url_nickname = "My Remote API"
+
+        local local_target = plugin:getTargetDisplayLabel("local", "http://192.168.1.100:6060/api/koreader/users/auth")
+        assert.are.equal("My Home API", local_target)
+
+        local remote_target = plugin:getTargetDisplayLabel("remote", "https://example.com/api/koreader/users/auth")
+        assert.are.equal("My Remote API", remote_target)
+    end)
+
+    it("allows setup flow to skip immediate test prompt via saveConnectionSettings options", function()
+        local plugin = newPlugin()
+        local prompted = false
+        local saved_callback = false
+        plugin.promptTestConnectionAfterSetup = function()
+            prompted = true
+        end
+
+        plugin:saveConnectionSettings("http://192.168.1.10:6060", "reader", "secret", "https://grimmory.example.com", {
+            prompt_test = false,
+            on_saved = function()
+                saved_callback = true
+            end,
+        })
+
+        assert.are.equal("http://192.168.1.10:6060", plugin.server_url)
+        assert.are.equal("https://grimmory.example.com", plugin.remote_url)
+        assert.are.equal("reader", plugin.username)
+        assert.are.equal("secret", plugin.password)
+        assert.is_true(saved_callback)
+        assert.is_false(prompted)
+    end)
+
+    it("skips immediate onNetworkConnected sync during resume grace window", function()
+        local plugin = newPlugin()
+        local refresh_calls = 0
+        local scheduled_calls = 0
+        plugin.ensureMainMenuRegistered = function() end
+        plugin.refreshApiClient = function()
+            refresh_calls = refresh_calls + 1
+            return true
+        end
+        plugin.schedulePendingSync = function()
+            scheduled_calls = scheduled_calls + 1
+        end
+        plugin.sync_on_network_connected = true
+        plugin.resume_network_grace_seconds = 8
+        plugin.isOnline = function() return true end
+
+        plugin:onResume()
+        assert.is_true(refresh_calls >= 1)
+        assert.are.equal(1, scheduled_calls)
+
+        plugin:onNetworkConnected()
+        assert.are.equal(1, scheduled_calls)
+
+        plugin._last_resume_at = os.time() - 20
+        plugin:onNetworkConnected()
+        assert.are.equal(2, scheduled_calls)
     end)
 
     it("shows metadata preview with counts and pending metadata total", function()
@@ -1642,8 +1795,14 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(connection_menu)
         local setup_item = findMenuItem(connection_menu.sub_item_table, "Setup Connection")
         assert.is_not_nil(setup_item)
+        local local_nickname_item = findMenuItem(connection_menu.sub_item_table, "Home URL Nickname")
+        assert.is_nil(local_nickname_item)
+        local remote_nickname_item = findMenuItem(connection_menu.sub_item_table, "Remote URL Nickname")
+        assert.is_nil(remote_nickname_item)
         local test_item = findMenuItem(connection_menu.sub_item_table, "Test Connection")
         assert.is_not_nil(test_item)
+        local test_diag_item = findMenuItem(connection_menu.sub_item_table, "Test Connection with Diagnostics")
+        assert.is_not_nil(test_diag_item)
         local password_item = findMenuItem(connection_menu.sub_item_table, "Password")
         assert.is_not_nil(password_item)
         local advanced_menu = findMenuItem(top, "Advanced Setting")
