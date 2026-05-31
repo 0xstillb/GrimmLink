@@ -5,7 +5,7 @@
 ### Notes
 - In progress
 
-# [v1.4.1]
+# [v1.4.3]
 
 ### Features
 - Connection setup now includes both Local URL and Remote URL in one flow, with optional nickname fields inline (`Home URL Nickname`, `Remote URL Nickname`).
