@@ -8,8 +8,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/platform-KOReader-blue" alt="Platform">
   <img src="https://img.shields.io/badge/language-Lua-purple" alt="Language">
-  <img src="https://img.shields.io/github/v/release/0xstillb/grimmlink?label=release" alt="Release">
-  <img src="https://img.shields.io/github/license/0xstillb/grimmlink" alt="License">
+  <img src="https://img.shields.io/github/v/release/0xstillb/GrimmLink?label=release" alt="Release">
+  <img src="https://img.shields.io/github/license/0xstillb/GrimmLink" alt="License">
 </p>
 
 ---
@@ -129,29 +129,55 @@ Short version:
 
 ## Installation
 
-1. Download `grimmlink.koplugin.zip` from the [latest release](https://github.com/0xstillb/grimmlink/releases/latest).
+1. Download `grimmlink.koplugin.zip` from the [latest release](https://github.com/0xstillb/GrimmLink/releases/latest).
 2. Extract it into KOReader `plugins/`.
 3. Restart KOReader.
 4. Open `Tools -> GrimmLink -> Connection`.
 5. Enter:
-   - Grimmory Local URL (home network)
-   - Grimmory Remote URL (external, optional)
-   - Home SSID (optional but recommended for automatic switching)
+   - Grimmory Local URL
+   - Home URL Nickname (optional)
+   - Grimmory Remote URL (optional)
+   - Remote URL Nickname (optional)
    - Username
    - Password
 6. Tap `Test Connection with Diagnostics`.
-7. During setup, GrimmLink can ask whether to use the current Wi-Fi SSID as Home SSID for local/remote auto switching.
 
 Notes:
 
 - The plugin computes `x-auth-key` internally from your password.
 - Users do not need to provide token/bearer keys manually.
 - URL selection policy:
-  - Home SSID matched -> Local URL first
-  - Away from Home SSID -> Remote URL
-  - SSID unavailable -> Local URL first, then temporary Remote fallback when local transport fails recently
-  - Local URL fail at home -> temporary Remote fallback only for that request
-  - Back on Home SSID -> Local URL is tried first again automatically
+  - Local-first policy (does not require SSID detection).
+  - Temporary remote fallback when recent local transport failure/cooldown is active.
+  - `Test Connection` disables fallback retry for the single test attempt to avoid long double waits.
+
+---
+
+## Required Grimmory API Endpoints
+
+GrimmLink expects these endpoints on the Grimmory backend:
+
+- `GET /api/koreader/users/auth`
+- `GET /api/koreader/books/by-hash/{hash}`
+- `GET /api/koreader/syncs/progress/{hash}`
+- `PUT /api/koreader/syncs/progress`
+- `POST /api/v1/reading-sessions`
+- `POST /api/v1/reading-sessions/batch`
+- `POST /api/koreader/syncs/metadata`
+- `GET /api/koreader/shelves`
+- `GET /api/koreader/shelves/{type}/{id}/books`
+- `GET /api/koreader/shelves/{id}/books` (fallback path)
+- `POST /api/koreader/shelves/{type}/{id}/books/{bookId}/remove`
+- `POST /api/koreader/shelves/{id}/books/{bookId}/remove` (fallback path)
+- `GET /api/koreader/books/read-statuses`
+- `PUT /api/koreader/books/{bookId}/status`
+- `GET /api/koreader/books/{bookId}/pdf-progress`
+- `PUT /api/koreader/books/{bookId}/pdf-progress`
+
+Required request headers for authenticated endpoints:
+
+- `x-auth-user`
+- `x-auth-key`
 
 ---
 
@@ -170,7 +196,9 @@ Notes:
 | `network_sync_cooldown_seconds` | `300` | Prevent over-frequent sync |
 | `server_url` | `""` | Local URL (LAN / home network) |
 | `remote_url` | `""` | Remote URL (internet / proxy / VPN) |
-| `home_ssid` | `""` | Home Wi-Fi SSID used for local/remote switching |
+| `local_url_nickname` | `""` | Friendly name shown for Local target in connection test dialogs |
+| `remote_url_nickname` | `""` | Friendly name shown for Remote target in connection test dialogs |
+| `home_ssid` | `""` | Legacy field (no longer required for URL routing policy) |
 | `send_reflowable_percentage` | `true` | Internal guard: send reflowable percentage for display only (authoritative sync still uses KOReader-native location) |
 | `auto_update_enabled` | `false` | Enable auto updates |
 | `check_update_on_startup` | `false` | Check updates at KOReader startup |
