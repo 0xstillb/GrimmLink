@@ -1682,25 +1682,15 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(1, plugin.api.fallback_timeout)
     end)
 
-    it("reports Connected when SSID exists", function()
-        local plugin = newPlugin()
-        assert.are.equal("Connected", plugin:getNetworkStateLabel("CoffeeShop"))
-    end)
-
-    it("reports SSID unavailable when SSID cannot be detected", function()
-        local plugin = newPlugin()
-        assert.are.equal("SSID unavailable", plugin:getNetworkStateLabel(nil))
-    end)
-
     it("uses URL nickname for target display when configured", function()
         local plugin = newPlugin()
         plugin.local_url_nickname = "My Home API"
         plugin.remote_url_nickname = "My Remote API"
 
-        local local_target = plugin:getTargetDisplayLabel("local", "http://192.168.1.100:6060/api/koreader/users/auth")
+        local local_target = plugin:getTargetDisplayLabel("local")
         assert.are.equal("My Home API", local_target)
 
-        local remote_target = plugin:getTargetDisplayLabel("remote", "https://example.com/api/koreader/users/auth")
+        local remote_target = plugin:getTargetDisplayLabel("remote")
         assert.are.equal("My Remote API", remote_target)
     end)
 

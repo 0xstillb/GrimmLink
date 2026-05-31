@@ -6314,13 +6314,6 @@ function Grimmlink:onGrimmLinkSyncShelf()
     end)
 end
 
-function Grimmlink:getNetworkStateLabel(current_ssid)
-    if not current_ssid or current_ssid == "" then
-        return "SSID unavailable"
-    end
-    return "Connected"
-end
-
 function Grimmlink:getActiveSourceLabel(active_source)
     local source = safeToString(active_source)
     if source == "local" then
@@ -6333,7 +6326,7 @@ function Grimmlink:getActiveSourceLabel(active_source)
     return _("Unknown")
 end
 
-function Grimmlink:getTargetDisplayLabel(active_source, tested_url)
+function Grimmlink:getTargetDisplayLabel(active_source)
     local source = safeToString(active_source)
     local nickname = ""
     if source == "local" then
@@ -6482,7 +6475,7 @@ function Grimmlink:testConnection(diagnostics_mode)
         local lines = {
             _("Connection Test"),
             _("Result: success"),
-            T(_("Active server: %1"), self:getTargetDisplayLabel(active_source, tested_url)),
+            T(_("Active server: %1"), self:getTargetDisplayLabel(active_source)),
             T(_("Duration: %1s"), tostring(elapsed_seconds)),
         }
         if show_diagnostics then
@@ -6531,7 +6524,7 @@ function Grimmlink:testConnection(diagnostics_mode)
     local lines = {
         _("Connection Test"),
         _("Result: failed"),
-        T(_("Active server: %1"), self:getTargetDisplayLabel(active_source, tested_url)),
+        T(_("Active server: %1"), self:getTargetDisplayLabel(active_source)),
         T(_("Duration: %1s"), tostring(elapsed_seconds)),
     }
     if show_diagnostics then
