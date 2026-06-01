@@ -2052,6 +2052,10 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(metadata_menu)
         local preview_item = findMenuItem(metadata_menu.sub_item_table, "Preview Metadata")
         assert.is_not_nil(preview_item)
+        local device_menu = findMenuItem(advanced_menu.sub_item_table, "Device Identity")
+        assert.is_not_nil(device_menu)
+        assert.is_not_nil(findMenuItemByContains(device_menu.sub_item_table, "Device Name:"))
+        assert.is_not_nil(findMenuItemByContains(device_menu.sub_item_table, "Device ID:"))
 
         local shelf_menu = findMenuItem(advanced_menu.sub_item_table, "Shelf Sync Settings")
         assert.is_not_nil(shelf_menu)
@@ -2071,6 +2075,35 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(findMenuItem(separate_magic_item.sub_item_table, "Turn ON"))
         assert.is_not_nil(findMenuItem(separate_magic_item.sub_item_table, "Default (Auto)"))
         assert.is_not_nil(findMenuItem(separate_magic_item.sub_item_table, "Select folder"))
+    end)
+
+    it("saves configured device identity with normalized display text", function()
+        local plugin = newPlugin()
+        local message_count = 0
+
+        plugin.showTextInput = function(_, title, current_value, _, _, on_save)
+            if title == "Device Name" then
+                assert.are.equal("KOReader", current_value)
+                on_save("  Kindle   PW5  ")
+            elseif title == "Device ID" then
+                assert.are.equal("device-1", current_value)
+                on_save("  kindle-pw5-main  ")
+            else
+                error("unexpected input title: " .. tostring(title))
+            end
+        end
+        plugin.showMessage = function()
+            message_count = message_count + 1
+        end
+
+        plugin:configureDeviceName()
+        plugin:configureDeviceId()
+
+        assert.are.equal("Kindle PW5", plugin.device_name)
+        assert.are.equal("kindle-pw5-main", plugin.device_id)
+        assert.are.equal("Kindle PW5", plugin.db.settings.device_name)
+        assert.are.equal("kindle-pw5-main", plugin.db.settings.device_id)
+        assert.are.equal(2, message_count)
     end)
 
     it("asks to move files back when disabling separate magic folder", function()

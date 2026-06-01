@@ -5,6 +5,21 @@
 ### Notes
 - Ongoing development branch.
 
+# [v1.4.6]
+
+### Features
+- Added configurable Device Identity settings under `Advanced Setting > Device Identity`.
+- Added editable `device_name` and `device_id` values for progress, session, and metadata sync payloads.
+
+### Improvements
+- Normalized configured device identity text by trimming extra whitespace and collapsing repeated spaces.
+- Updated debug export to show the configured device name instead of only the default KOReader model.
+- Documented `device_name` and `device_id` in README settings.
+
+### Tests
+- Added menu and save-flow coverage for Device Identity settings.
+- Confirmed focused helper specs and full Lua spec suite pass locally.
+
 # [v1.4.5]
 
 ### Fixes

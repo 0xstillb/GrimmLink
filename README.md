@@ -102,6 +102,8 @@ When **a book is open**:
 | Setting | Default | Description |
 |---|---|---|
 | `metadata_sync_enabled` | `false` | Enable metadata sync pipeline |
+| `device_name` | KOReader device model | Friendly device name sent with progress, sessions, and metadata |
+| `device_id` | Generated stable ID | Stable device identifier used to distinguish readers |
 | `sync_regular_shelf_enabled` | `false` | Enable Regular shelf sync |
 | `sync_magic_shelf_enabled` | `false` | Enable Magic shelf sync |
 | `use_separate_magic_download_dir` | `false` | Use a separate directory for Magic-only files |

@@ -416,6 +416,19 @@ local function normalizeNickname(value)
     return text
 end
 
+local function normalizeDeviceIdentityText(value, fallback, max_len)
+    local text = safeToString(value)
+    text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+    if text == "" then
+        text = safeToString(fallback)
+    end
+    local limit = tonumber(max_len) or 80
+    if limit > 0 and #text > limit then
+        text = text:sub(1, limit)
+    end
+    return text
+end
+
 local function normalizeSsid(value)
     local ssid = safeToString(value)
     ssid = ssid:gsub("^%s+", ""):gsub("%s+$", "")
@@ -847,7 +860,7 @@ end
 function Grimmlink:defaultDeviceName()
     local ok, device = pcall(require, "device")
     if ok and device then
-        return device.model or device.name or DEFAULTS.device_name
+        return normalizeDeviceIdentityText(device.model or device.name, DEFAULTS.device_name, 80)
     end
     return DEFAULTS.device_name
 end
@@ -1356,10 +1369,7 @@ end
 
 function Grimmlink:configureDeviceName()
     self:showTextInput(_("Device Name"), self.device_name, _("Enter device name"), false, function(value)
-        local normalized = safeToString(value)
-        if normalized == "" then
-            normalized = self:defaultDeviceName()
-        end
+        local normalized = normalizeDeviceIdentityText(value, self:defaultDeviceName(), 80)
         self:saveSetting("device_name", normalized)
         self:showMessage(_("Device name saved"), 2)
     end)
@@ -1367,10 +1377,7 @@ end
 
 function Grimmlink:configureDeviceId()
     self:showTextInput(_("Device ID"), self.device_id, _("Enter stable device ID"), false, function(value)
-        local normalized = safeToString(value)
-        if normalized == "" then
-            normalized = self:defaultDeviceId()
-        end
+        local normalized = normalizeDeviceIdentityText(value, self:defaultDeviceId(), 128)
         self:saveSetting("device_id", normalized)
         self:showMessage(_("Device ID saved"), 2)
     end)
@@ -2633,7 +2640,7 @@ function Grimmlink:buildDebugInfo(context)
     local shelf_map = context.book_id and safeDbValueCall(self.db, "getShelfSyncEntry", nil, context.book_id) or nil
     local async_download = self.api and type(self.api.isAsyncDownloadAvailable) == "function"
         and self.api:isAsyncDownloadAvailable() or false
-    local device_name = self:defaultDeviceName()
+    local device_name = normalizeDeviceIdentityText(self.device_name, self:defaultDeviceName(), 80)
     local log_path = self.file_logger and type(self.file_logger.getLogPath) == "function"
         and self.file_logger:getLogPath() or ""
     local current_ssid = self:getCurrentSSID()
@@ -8043,6 +8050,26 @@ function Grimmlink:addToMainMenu(menu_items)
                                         end,
                                     },
                                 },
+                            },
+                        },
+                    },
+                    {
+                        text = _("Device Identity"),
+                        sub_item_table = {
+                            {
+                                text_func = function()
+                                    return T(
+                                        _("Device Name: %1"),
+                                        normalizeDeviceIdentityText(self.device_name, self:defaultDeviceName(), 80)
+                                    )
+                                end,
+                                callback = function() self:configureDeviceName() end,
+                            },
+                            {
+                                text_func = function()
+                                    return T(_("Device ID: %1"), shortPrefix(self.device_id, 16))
+                                end,
+                                callback = function() self:configureDeviceId() end,
                             },
                         },
                     },
