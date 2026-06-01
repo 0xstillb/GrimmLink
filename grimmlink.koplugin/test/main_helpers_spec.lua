@@ -41,6 +41,16 @@ local function findMenuItem(items, expected_text)
     return nil
 end
 
+local function findMenuItemByContains(items, expected_part)
+    for _, item in ipairs(items or {}) do
+        local text = getMenuItemText(item)
+        if type(text) == "string" and text:find(expected_part, 1, true) ~= nil then
+            return item
+        end
+    end
+    return nil
+end
+
 local function newDb()
     local db = {
         settings = {},
@@ -1773,6 +1783,247 @@ describe("GrimmLink helper methods", function()
         assert.is_true(dialog.text:find("Pending metadata: 2", 1, true) ~= nil)
     end)
 
+    it("shows a message when manual metadata sync is disabled", function()
+        local plugin = newPlugin({
+            metadata_sync_enabled = false,
+        })
+        local last_message = nil
+        local sync_called = false
+        plugin.showMessage = function(_, text)
+            last_message = text
+        end
+        plugin.syncPendingMetadata = function()
+            sync_called = true
+            return 0, 0
+        end
+
+        plugin:syncMetadataNow()
+
+        assert.are.equal("Metadata sync is disabled", last_message)
+        assert.is_false(sync_called)
+    end)
+
+    it("shows progress/result messages for manual metadata sync", function()
+        local plugin = newPlugin({
+            metadata_sync_enabled = true,
+        })
+        plugin.db.pending_metadata_items = {
+            { id = 1, file_hash = "a", item_type = "rating", dedupe_key = "a:rating" },
+        }
+        local messages = {}
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+        plugin.extractAndQueueCurrentMetadata = function()
+            return {
+                queued = {
+                    queued = 2,
+                    failed = 1,
+                },
+            }
+        end
+        plugin.syncPendingMetadata = function(_, silent)
+            assert.is_true(silent)
+            return 1, 0
+        end
+
+        plugin:syncMetadataNow()
+
+        assert.is_true(#messages >= 2)
+        assert.are.equal("Syncing metadata...", messages[1])
+        assert.is_true(messages[#messages]:find("Metadata sync result", 1, true) ~= nil)
+    end)
+
+    it("opens manual path input directly for magic folder selection", function()
+        local plugin = newPlugin({
+            download_dir = "/sdcard/koreader",
+        })
+
+        plugin:showMagicDirectoryInputChooser(function() end)
+        local input_dialog = UIManager.getLastShown()
+        assert.is_not_nil(input_dialog)
+        assert.are.equal("Magic Download Directory", input_dialog.title)
+        assert.is_true(type(input_dialog.input) == "string" and input_dialog.input ~= "")
+    end)
+
+    it("auto-creates default magic directory when enabling separate mode without manual selection", function()
+        local plugin = newPlugin({
+            download_dir = "/sdcard/koreader/Book",
+            magic_download_dir = "",
+            use_separate_magic_download_dir = false,
+        })
+        local chooser_called = false
+        local confirm_called = 0
+        local saved_magic = nil
+        local saved_enabled = nil
+
+        plugin.validateMagicDownloadDirectory = function(_, path_value)
+            return true, path_value
+        end
+        plugin.showMagicDirectoryInputChooser = function()
+            chooser_called = true
+        end
+        plugin.showConfirmAction = function(_, _, _, _)
+            confirm_called = confirm_called + 1
+        end
+        plugin.saveSetting = function(self, key, value)
+            if key == "magic_download_dir" then
+                saved_magic = value
+                self.magic_download_dir = value
+            elseif key == "use_separate_magic_download_dir" then
+                saved_enabled = value
+                self.use_separate_magic_download_dir = value
+            end
+            return true
+        end
+
+        plugin:enableSeparateMagicDownloadDirectory()
+
+        assert.is_false(chooser_called)
+        assert.are.equal("/sdcard/koreader/Book/Magic_Shelf", saved_magic)
+        assert.is_true(saved_enabled)
+        assert.are.equal(1, confirm_called)
+    end)
+
+    it("auto default magic directory follows resolved shared Book directory", function()
+        local plugin = newPlugin({
+            download_dir = "",
+            magic_download_dir = "",
+            use_separate_magic_download_dir = false,
+        })
+        local saved_magic = nil
+
+        plugin.shelf_sync = {
+            resolveDownloadDir = function(_, configured)
+                assert.are.equal("", configured)
+                return "/storage/emulated/0/koreader/Book"
+            end,
+        }
+        plugin.validateMagicDownloadDirectory = function(_, path_value)
+            return true, path_value
+        end
+        plugin.saveSetting = function(self, key, value)
+            if key == "magic_download_dir" then
+                saved_magic = value
+                self.magic_download_dir = value
+            elseif key == "use_separate_magic_download_dir" then
+                self.use_separate_magic_download_dir = value
+            end
+            return true
+        end
+        plugin.showConfirmAction = function() end
+
+        plugin:setSeparateMagicDownloadDirectoryDefault()
+
+        assert.are.equal("/storage/emulated/0/koreader/Book/Magic_Shelf", saved_magic)
+    end)
+
+    it("does not append Magic_Shelf twice when download dir already points to magic shelf", function()
+        local plugin = newPlugin({
+            download_dir = "/sdcard/koreader/Book/Magic_shelf",
+            magic_download_dir = "",
+            use_separate_magic_download_dir = false,
+        })
+        local saved_magic = nil
+        plugin.validateMagicDownloadDirectory = function(_, path_value)
+            return true, path_value
+        end
+        plugin.saveSetting = function(self, key, value)
+            if key == "magic_download_dir" then
+                saved_magic = value
+                self.magic_download_dir = value
+            elseif key == "use_separate_magic_download_dir" then
+                self.use_separate_magic_download_dir = value
+            end
+            return true
+        end
+        plugin.showConfirmAction = function() end
+
+        plugin:setSeparateMagicDownloadDirectoryDefault()
+
+        assert.are.equal("/sdcard/koreader/Book/Magic_shelf", saved_magic)
+    end)
+
+    it("collapses repeated trailing Magic_Shelf segments in auto default path", function()
+        local plugin = newPlugin({
+            download_dir = "/sdcard/koreader/Book/Magic_shelf/Magic_Shelf/Magic_shelf",
+            magic_download_dir = "",
+            use_separate_magic_download_dir = false,
+        })
+        local saved_magic = nil
+        plugin.validateMagicDownloadDirectory = function(_, path_value)
+            return true, path_value
+        end
+        plugin.saveSetting = function(self, key, value)
+            if key == "magic_download_dir" then
+                saved_magic = value
+                self.magic_download_dir = value
+            elseif key == "use_separate_magic_download_dir" then
+                self.use_separate_magic_download_dir = value
+            end
+            return true
+        end
+        plugin.showConfirmAction = function() end
+
+        plugin:setSeparateMagicDownloadDirectoryDefault()
+
+        assert.are.equal("/sdcard/koreader/Book/Magic_shelf", saved_magic)
+    end)
+
+    it("uses resolved shared dir when moving Magic Shelf files back in auto mode", function()
+        local plugin = newPlugin({
+            download_dir = "",
+            magic_download_dir = "/sdcard/koreader/Book/Magic_Shelf",
+        })
+        local captured_shared_dir = nil
+        local captured_opts = nil
+        plugin.shelf_sync = {
+            resolveDownloadDir = function(_, configured)
+                assert.are.equal("", configured)
+                return "/sdcard/koreader/Book"
+            end,
+            moveMagicShelfFilesBackToSharedDirectory = function(_, shared_dir, opts)
+                captured_shared_dir = shared_dir
+                captured_opts = opts
+                return { moved = 0, skipped = 0, failed = 0, shared = 0, sidecar_warnings = 0, errors = {} }
+            end,
+        }
+        plugin.showMagicMoveSummary = function() end
+
+        plugin:moveMagicShelfFilesBackToSharedDirectory()
+
+        assert.are.equal("/sdcard/koreader/Book", captured_shared_dir)
+        assert.are.equal("/sdcard/koreader/Book", captured_opts.download_dir)
+        assert.are.equal("/sdcard/koreader/Book/Magic_Shelf", captured_opts.magic_dir)
+    end)
+
+    it("uses resolved shared dir when moving Magic Shelf files to magic folder in auto mode", function()
+        local plugin = newPlugin({
+            download_dir = "",
+            magic_download_dir = "/sdcard/koreader/Book/Magic_Shelf",
+        })
+        local captured_target_dir = nil
+        local captured_opts = nil
+        plugin.shelf_sync = {
+            resolveDownloadDir = function(_, configured)
+                assert.are.equal("", configured)
+                return "/sdcard/koreader/Book"
+            end,
+            moveMagicShelfFilesToDirectory = function(_, target_dir, opts)
+                captured_target_dir = target_dir
+                captured_opts = opts
+                return { moved = 0, skipped = 0, failed = 0, shared = 0, sidecar_warnings = 0, errors = {} }
+            end,
+        }
+        plugin.showMagicMoveSummary = function() end
+
+        plugin:moveMagicShelfFilesToMagicDirectory()
+
+        assert.are.equal("/sdcard/koreader/Book/Magic_Shelf", captured_target_dir)
+        assert.are.equal("/sdcard/koreader/Book", captured_opts.shared_dir)
+        assert.are.equal("/sdcard/koreader/Book", captured_opts.download_dir)
+    end)
+
     it("shows connection and settings items in the restructured menu", function()
         local plugin = newPlugin()
         local menu = {}
@@ -1801,6 +2052,110 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(metadata_menu)
         local preview_item = findMenuItem(metadata_menu.sub_item_table, "Preview Metadata")
         assert.is_not_nil(preview_item)
+
+        local shelf_menu = findMenuItem(advanced_menu.sub_item_table, "Shelf Sync Settings")
+        assert.is_not_nil(shelf_menu)
+        local download_settings = findMenuItem(shelf_menu.sub_item_table, "Download Settings")
+        assert.is_not_nil(download_settings)
+
+        local shelf_dir_item = findMenuItem(download_settings.sub_item_table, "Shelf Sync Download Directory")
+        assert.is_not_nil(shelf_dir_item)
+        assert.is_nil(shelf_dir_item.checked_func)
+        local current_mode_item = findMenuItemByContains(shelf_dir_item.sub_item_table, "Current:")
+        assert.is_not_nil(current_mode_item)
+        assert.is_not_nil(findMenuItem(shelf_dir_item.sub_item_table, "Default (Auto)"))
+        assert.is_not_nil(findMenuItem(shelf_dir_item.sub_item_table, "Select folder"))
+
+        local separate_magic_item = findMenuItemByContains(download_settings.sub_item_table, "Separate magic shelf folder:")
+        assert.is_not_nil(separate_magic_item)
+        assert.is_not_nil(findMenuItem(separate_magic_item.sub_item_table, "Turn ON"))
+        assert.is_not_nil(findMenuItem(separate_magic_item.sub_item_table, "Default (Auto)"))
+        assert.is_not_nil(findMenuItem(separate_magic_item.sub_item_table, "Select folder"))
+    end)
+
+    it("asks to move files back when disabling separate magic folder", function()
+        local plugin = newPlugin({
+            use_separate_magic_download_dir = true,
+        })
+        local confirm_calls = 0
+        plugin.showConfirmAction = function()
+            confirm_calls = confirm_calls + 1
+        end
+
+        plugin:disableSeparateMagicDownloadDirectory()
+
+        assert.is_false(plugin.use_separate_magic_download_dir)
+        assert.are.equal(1, confirm_calls)
+    end)
+
+    it("shows Turn OFF action in separate magic submenu when already enabled", function()
+        local plugin = newPlugin({
+            use_separate_magic_download_dir = true,
+        })
+        local menu = {}
+        plugin:addToMainMenu(menu)
+        local top = menu.grimmlink.sub_item_table
+        local advanced_menu = findMenuItem(top, "Advanced Setting")
+        assert.is_not_nil(advanced_menu)
+        local shelf_menu = findMenuItem(advanced_menu.sub_item_table, "Shelf Sync Settings")
+        assert.is_not_nil(shelf_menu)
+        local download_settings = findMenuItem(shelf_menu.sub_item_table, "Download Settings")
+        assert.is_not_nil(download_settings)
+        local separate_magic_item = findMenuItemByContains(download_settings.sub_item_table, "Separate magic shelf folder:")
+        assert.is_not_nil(separate_magic_item)
+        assert.is_not_nil(findMenuItem(separate_magic_item.sub_item_table, "Turn OFF"))
+    end)
+
+    it("shows planning batch size control in shelf sync behavior settings", function()
+        local plugin = newPlugin()
+        local menu = {}
+        plugin:addToMainMenu(menu)
+
+        local top = menu.grimmlink.sub_item_table
+        local advanced_menu = findMenuItem(top, "Advanced Setting")
+        assert.is_not_nil(advanced_menu)
+        local shelf_menu = findMenuItem(advanced_menu.sub_item_table, "Shelf Sync Settings")
+        assert.is_not_nil(shelf_menu)
+        local behavior_menu = findMenuItem(shelf_menu.sub_item_table, "Sync Behavior")
+        assert.is_not_nil(behavior_menu)
+
+        local found = false
+        for _, item in ipairs(behavior_menu.sub_item_table or {}) do
+            local text = getMenuItemText(item)
+            if type(text) == "string" and text:find("Planning Batch Size", 1, true) then
+                found = true
+                break
+            end
+        end
+        assert.is_true(found)
+    end)
+
+    it("hides Pull Remote Progress in top menu when no active reading session", function()
+        local plugin = newPlugin()
+        local menu = {}
+        plugin:addToMainMenu(menu)
+        local top = menu.grimmlink.sub_item_table
+        local pull_item = findMenuItem(top, "Pull Remote Progress")
+        local manual_status_item = findMenuItem(top, "Manual Reading Status")
+        local toggle_item = findMenuItem(top, "Toggle Tracking (Current Book)")
+        assert.is_nil(pull_item)
+        assert.is_nil(manual_status_item)
+        assert.is_nil(toggle_item)
+    end)
+
+    it("shows Pull Remote Progress in top menu during active reading session", function()
+        local plugin = newPlugin()
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            book_id = 123,
+        }
+        local menu = {}
+        plugin:addToMainMenu(menu)
+        local top = menu.grimmlink.sub_item_table
+        local pull_item = findMenuItem(top, "Pull Remote Progress")
+        local manual_status_item = findMenuItem(top, "Manual Reading Status")
+        assert.is_not_nil(pull_item)
+        assert.is_not_nil(manual_status_item)
     end)
 
     it("registers long-press file actions via FileManager file dialog buttons API", function()
@@ -1816,9 +2171,6 @@ describe("GrimmLink helper methods", function()
         local calls = {}
         plugin.syncThisBookFromPath = function(_, file_path)
             calls[#calls + 1] = { name = "sync", file_path = file_path }
-        end
-        plugin.pullRemoteProgressFromPath = function(_, file_path)
-            calls[#calls + 1] = { name = "pull", file_path = file_path }
         end
         plugin.toggleTrackingByPath = function(_, file_path)
             calls[#calls + 1] = { name = "toggle", file_path = file_path }
@@ -1845,16 +2197,14 @@ describe("GrimmLink helper methods", function()
         primary[3].callback()
 
         local secondary = rows.grimmlink_file_dialog_secondary("/books/demo.epub", true, nil)
-        assert.are.equal(2, #secondary)
+        assert.are.equal(1, #secondary)
         secondary[1].callback()
-        secondary[2].callback()
 
-        assert.are.equal(5, #calls)
+        assert.are.equal(4, #calls)
         assert.are.equal("sync", calls[1].name)
-        assert.are.equal("pull", calls[2].name)
-        assert.are.equal("toggle", calls[3].name)
-        assert.are.equal("match", calls[4].name)
-        assert.are.equal("debug", calls[5].name)
+        assert.are.equal("toggle", calls[2].name)
+        assert.are.equal("match", calls[3].name)
+        assert.are.equal("debug", calls[4].name)
         for _, call in ipairs(calls) do
             assert.are.equal("/books/demo.epub", call.file_path)
         end
@@ -1880,6 +2230,47 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(legacy_books)
         assert.are.equal(1, #legacy_books)
         assert.are.equal(999, legacy_books[1].bookId)
+    end)
+
+    it("uses configured shelf_plan_batch_size when preparing shelf sync plan", function()
+        local captured_plan_batch_size = nil
+        local plugin = newPlugin({
+            shelf_sync_enabled = true,
+            sync_regular_shelf_enabled = true,
+            selected_regular_shelf_id = 7,
+            selected_regular_shelf_name = "Regular Shelf",
+            sync_magic_shelf_enabled = false,
+            shelf_plan_batch_size = 123,
+            requireReady = function() return true end,
+            refreshApiClient = function() return true end,
+            isOnline = function() return true end,
+            readShelfSnapshotToken = function() return nil end,
+        })
+        plugin.shelf_sync = {
+            prepareSyncPlan = function(_, opts)
+                captured_plan_batch_size = opts.plan_batch_size
+                return {
+                    result = {
+                        synced = 0,
+                        skipped = 0,
+                        failed = 0,
+                        deleted = 0,
+                        errors = {},
+                        snapshot_unchanged = true,
+                        snapshot_token = "token",
+                    },
+                    download_queue = {},
+                    cleanup = {
+                        remote_delete_sync = false,
+                        downloaded_files_to_refresh = {},
+                        downloaded_files_to_refresh_set = {},
+                    },
+                }
+            end,
+        }
+
+        plugin:syncShelfNow(true)
+        assert.are.equal(123, captured_plan_batch_size)
     end)
 
     it("uses live release checks for manual update checks", function()
@@ -1939,5 +2330,62 @@ describe("GrimmLink helper methods", function()
 
         dialog.ok_callback()
         assert.are.equal(1, install_calls)
+    end)
+
+    it("skips metadata index/cache writes for unchanged snapshot with no downloads", function()
+        local write_index_called = 0
+        local upsert_cache_called = 0
+        local plugin = newPlugin({
+            shelf_sync_enabled = true,
+            sync_regular_shelf_enabled = true,
+            selected_regular_shelf_id = 1,
+            selected_regular_shelf_name = "Regular Shelf",
+            sync_magic_shelf_enabled = false,
+            two_way_shelf_delete_sync = false,
+            shelf_fast_sync_enabled = false,
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            refreshApiClient = function() return true end,
+            requireReady = function() return true end,
+        })
+        plugin.shelf_sync = {
+            prepareSyncPlan = function()
+                return {
+                    result = {
+                        synced = 0,
+                        skipped = 5,
+                        failed = 0,
+                        deleted = 0,
+                        errors = {},
+                        snapshot_token = "snapshot-token",
+                        snapshot_unchanged = true,
+                    },
+                    download_queue = {},
+                    cleanup = {
+                        shelf_id = 1,
+                        shelf_type = "regular",
+                        download_dir = "/storage/emulated/0/koreader/books/Book",
+                        delete_sdr = false,
+                        remote_delete_sync = false,
+                        sync_start = os.time(),
+                        downloaded_files_to_refresh = {},
+                        downloaded_files_to_refresh_set = {},
+                    },
+                }
+            end,
+            resolveDownloadDir = function(_, dir) return dir end,
+            writeMetadataIndex = function()
+                write_index_called = write_index_called + 1
+                return "/tmp/index.json"
+            end,
+            upsertBookInfoCache = function()
+                upsert_cache_called = upsert_cache_called + 1
+                return { inserted = 0, updated = 0, skipped = 0 }
+            end,
+        }
+
+        local result = plugin:syncShelfNow(true)
+        assert.is_nil(result)
+        assert.are.equal(0, write_index_called)
+        assert.are.equal(0, upsert_cache_called)
     end)
 end)

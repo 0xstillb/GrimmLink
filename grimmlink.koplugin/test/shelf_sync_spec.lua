@@ -10,6 +10,7 @@ local created_dirs = {}
 local mock_attrs = {}
 local mock_dir_entries = {}
 local removed_paths = {}
+local renamed_paths = {}
 
 package.preload["datastorage"] = function()
     return {
@@ -36,6 +37,9 @@ package.preload["lfs"] = function()
         attributes = function(path)
             if mock_attrs[path] then
                 return mock_attrs[path]
+            end
+            if path == "/storage/emulated/0/koreader" then
+                return { mode = "directory" }
             end
             if path == "/storage/emulated/0/koreader/books" then
                 return { mode = "directory" }
@@ -91,29 +95,60 @@ local ShelfSync = require("grimmlink_shelf_sync")
 
 describe("GrimmLink shelf sync download directory", function()
     local original_os_remove = os.remove
+    local original_os_rename = os.rename
+    local original_reader_settings = _G.G_reader_settings
 
     before_each(function()
         created_dirs = {}
         mock_attrs = {}
         mock_dir_entries = {}
         removed_paths = {}
+        renamed_paths = {}
         os.remove = function(path)
             removed_paths[#removed_paths + 1] = path
             mock_attrs[path] = nil
             return true
         end
+        os.rename = function(from_path, to_path)
+            renamed_paths[#renamed_paths + 1] = { from_path, to_path }
+            if mock_attrs[from_path] then
+                mock_attrs[to_path] = mock_attrs[from_path]
+                mock_attrs[from_path] = nil
+                return true
+            end
+            return nil, "missing_source"
+        end
     end)
 
     after_each(function()
         os.remove = original_os_remove
+        os.rename = original_os_rename
+        _G.G_reader_settings = original_reader_settings
     end)
 
     it("creates and uses a Book subfolder for auto-detected downloads", function()
         local sync = ShelfSync:new({}, {})
         local dir = sync:resolveDownloadDir("")
 
-        assert.are.equal("/storage/emulated/0/koreader/books/Book", dir)
-        assert.is_true(created_dirs["/storage/emulated/0/koreader/books/Book"])
+        assert.are.equal("/storage/emulated/0/koreader/Book", dir)
+        assert.is_true(created_dirs["/storage/emulated/0/koreader/Book"])
+    end)
+
+    it("prefers KOReader home_dir when auto download dir is used", function()
+        _G.G_reader_settings = {
+            readSetting = function(_, key)
+                if key == "home_dir" then
+                    return "/storage/emulated/0/ReaderHome"
+                end
+                return nil
+            end,
+        }
+        mock_attrs["/storage/emulated/0/ReaderHome"] = { mode = "directory" }
+
+        local sync = ShelfSync:new({}, {})
+        local dir = sync:resolveDownloadDir("")
+
+        assert.are.equal("/storage/emulated/0/ReaderHome", dir)
     end)
 
     it("keeps an explicit download directory unchanged", function()
@@ -255,7 +290,7 @@ describe("GrimmLink shelf sync download directory", function()
 
         local result = sync:syncShelf({
             shelf_id = 9,
-            download_dir = "/storage/emulated/0/koreader/books/Book",
+            download_dir = "/storage/emulated/0/koreader/Book",
             use_original_filename = true,
             two_way_delete_sync = false,
             delete_sdr_on_book_delete = false,
@@ -264,8 +299,556 @@ describe("GrimmLink shelf sync download directory", function()
         assert.are.equal(1, result.synced)
         assert.is_not_nil(saved_entry)
         assert.is_not_nil(cached_book)
-        assert.are.equal("/storage/emulated/0/koreader/books/Book/Shelf Book.pdf", cached_book.file_path)
+        assert.are.equal("/storage/emulated/0/koreader/Book/Shelf Book.pdf", cached_book.file_path)
         assert.are.equal("", cached_book.file_hash)
         assert.are.equal(123, cached_book.book_id)
     end)
+
+    it("resolves shelf download directory by shelf type and settings", function()
+        local sync = ShelfSync:new({}, {})
+        local regular_dir = sync:resolveDownloadDirForShelfType("regular", {
+            download_dir = "/shared",
+            use_separate_magic_download_dir = true,
+            magic_download_dir = "/magic",
+        })
+        local magic_dir = sync:resolveDownloadDirForShelfType("magic", {
+            download_dir = "/shared",
+            use_separate_magic_download_dir = true,
+            magic_download_dir = "/magic",
+        })
+        local magic_shared = sync:resolveDownloadDirForShelfType("magic", {
+            download_dir = "/shared",
+            use_separate_magic_download_dir = false,
+            magic_download_dir = "/magic",
+        })
+
+        assert.are.equal("/shared", regular_dir)
+        assert.are.equal("/magic", magic_dir)
+        assert.are.equal("/shared", magic_shared)
+    end)
+
+    it("moves only magic-only files into the separate magic directory", function()
+        local updated_paths = {}
+        local sync = ShelfSync:new({
+            getMagicOnlyShelfMappings = function()
+                return {
+                    {
+                        book_id = 101,
+                        shelf_id = 7,
+                        shelf_type = "magic",
+                        local_path = "/shared/Alpha.epub",
+                        downloaded_by_grimmlink = 1,
+                        remote_title = "Alpha",
+                        remote_author = "Author A",
+                    },
+                    {
+                        book_id = 202,
+                        shelf_id = 8,
+                        shelf_type = "magic",
+                        local_path = "/shared/Beta.epub",
+                        downloaded_by_grimmlink = 1,
+                    },
+                }
+            end,
+            isBookTrackedByRegularShelf = function(_, book_id)
+                return tonumber(book_id) == 202
+            end,
+            getShelfMappingsForBook = function(_, book_id)
+                return {
+                    {
+                        book_id = book_id,
+                        shelf_id = book_id == 101 and 7 or 8,
+                        shelf_type = "magic",
+                    },
+                }
+            end,
+            updateShelfMappingLocalPath = function(_, book_id, _shelf_id, _shelf_type, local_path)
+                updated_paths[book_id] = local_path
+                return true
+            end,
+            getShelfSyncEntryByLocalPath = function()
+                return nil
+            end,
+            saveBookCache = function()
+                return true
+            end,
+        }, {})
+
+        mock_attrs["/shared"] = { mode = "directory" }
+        mock_attrs["/magic"] = { mode = "directory" }
+        mock_attrs["/storage/emulated/0/koreader"] = { mode = "directory" }
+        mock_attrs["/storage/emulated/0/koreader/settings"] = { mode = "directory" }
+        mock_attrs["/shared/Alpha.epub"] = { mode = "file", size = 1234 }
+        mock_attrs["/shared/Beta.epub"] = { mode = "file", size = 2345 }
+
+        local summary = sync:moveMagicShelfFilesToDirectory("/magic", {
+            shared_dir = "/shared",
+            download_dir = "/shared",
+        })
+
+        assert.are.equal(1, summary.moved)
+        assert.are.equal(1, summary.shared)
+        assert.are.equal(0, summary.failed)
+        assert.are.equal("/magic/Alpha.epub", updated_paths[101])
+        assert.is_nil(updated_paths[202])
+        assert.is_not_nil(mock_attrs["/magic/Alpha.epub"])
+        assert.is_not_nil(mock_attrs["/shared/Beta.epub"])
+    end)
+
+    it("uses snapshot fast-path for unchanged large shelves (100/500/1000)", function()
+        mock_attrs["/storage/emulated/0/koreader/books/Book"] = { mode = "directory" }
+
+        for _, size in ipairs({ 100, 500, 1000 }) do
+            local remote_books = {}
+            local shelf_entries = {}
+            for i = 1, size do
+                remote_books[#remote_books + 1] = {
+                    bookId = i,
+                    title = "Book " .. tostring(i),
+                    author = "Author",
+                    fileName = "Book_" .. tostring(i) .. ".epub",
+                    fileFormat = "EPUB",
+                    fileSizeKb = 256,
+                }
+                local path = "/storage/emulated/0/koreader/books/Book/Book_" .. tostring(i) .. ".epub"
+                mock_attrs[path] = { mode = "file", size = 256 * 1024 }
+                shelf_entries[#shelf_entries + 1] = {
+                    book_id = i,
+                    shelf_id = 12,
+                    shelf_type = "regular",
+                    local_path = path,
+                    downloaded_by_grimmlink = 1,
+                }
+            end
+
+            local sync = ShelfSync:new({
+                getShelfMappingsByShelf = function()
+                    return shelf_entries
+                end,
+                getAllShelfSyncEntries = function()
+                    return shelf_entries
+                end,
+                upsertShelfSyncEntry = function()
+                    return true
+                end,
+            }, {
+                getShelfBooks = function()
+                    return true, remote_books
+                end,
+            })
+
+            local plan_first = sync:prepareSyncPlan({
+                shelf_id = 12,
+                shelf_type = "regular",
+                download_dir = "/storage/emulated/0/koreader/books/Book",
+                remote_delete_sync = true,
+                delete_sdr = false,
+            })
+            assert.is_not_nil(plan_first.result.snapshot_token)
+
+            local plan_second = sync:prepareSyncPlan({
+                shelf_id = 12,
+                shelf_type = "regular",
+                download_dir = "/storage/emulated/0/koreader/books/Book",
+                remote_delete_sync = true,
+                delete_sdr = false,
+                previous_snapshot_token = plan_first.result.snapshot_token,
+                preloaded_remote_books = remote_books,
+            })
+
+            assert.is_true(plan_second.result.snapshot_unchanged == true)
+            assert.are.equal(size, plan_second.result.skipped)
+            assert.are.equal(0, #plan_second.download_queue)
+            assert.is_true(plan_second.cleanup.remote_delete_sync == false)
+        end
+    end)
+
+    it("supports planning cancellation and returns cancelled result", function()
+        local sync = ShelfSync:new({
+            getShelfMappingsByShelf = function()
+                return {}
+            end,
+            getAllShelfSyncEntries = function()
+                return {}
+            end,
+        }, {
+            getShelfBooks = function()
+                return true, {
+                    { bookId = 1, title = "A", fileName = "A.epub", fileFormat = "EPUB", fileSizeKb = 1 },
+                }
+            end,
+        })
+
+        local plan = sync:prepareSyncPlan({
+            shelf_id = 1,
+            shelf_type = "regular",
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            is_cancelled = function()
+                return true
+            end,
+        })
+
+        assert.is_true(plan.result.cancelled == true)
+        assert.is_true(#plan.result.errors > 0)
+    end)
+
+    it("supports batched planning continuation for large shelves", function()
+        local sync = ShelfSync:new({
+            getShelfMappingsByShelf = function()
+                return {}
+            end,
+            getAllShelfSyncEntries = function()
+                return {}
+            end,
+        }, {
+            getShelfBooks = function()
+                return true, {
+                    { bookId = 1, title = "A", fileName = "A.epub", fileFormat = "EPUB", fileSizeKb = 1 },
+                    { bookId = 2, title = "B", fileName = "B.epub", fileFormat = "EPUB", fileSizeKb = 1 },
+                    { bookId = 3, title = "C", fileName = "C.epub", fileFormat = "EPUB", fileSizeKb = 1 },
+                }
+            end,
+        })
+
+        local plan1 = sync:prepareSyncPlan({
+            shelf_id = 11,
+            shelf_type = "regular",
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            plan_batch_size = 1,
+        })
+        assert.is_truthy(plan1.plan_state)
+        assert.is_true((plan1.result.planning_done or 0) >= 1)
+
+        local plan2 = sync:prepareSyncPlan({
+            plan_state = plan1.plan_state,
+            plan_batch_size = 1,
+        })
+        assert.is_truthy(plan2.plan_state)
+        assert.is_true((plan2.result.planning_done or 0) >= 2)
+
+        local plan3 = sync:prepareSyncPlan({
+            plan_state = plan2.plan_state,
+            plan_batch_size = 1,
+        })
+        assert.is_nil(plan3.plan_state)
+        assert.are.equal(3, #plan3.download_queue)
+    end)
+
+    it("processes pending removals before planning downloads", function()
+        local called = false
+        local sync = ShelfSync:new({
+            getShelfMappingsByShelf = function()
+                return {}
+            end,
+            getAllShelfSyncEntries = function()
+                return {}
+            end,
+            getPendingShelfRemovals = function()
+                return {}
+            end,
+        }, {
+            getShelfBooks = function()
+                return true, {}
+            end,
+        })
+
+        sync.processPendingShelfRemovals = function(_, _shelf_id, _shelf_type, _download_dir, _delete_sdr, _skip_ids, result)
+            called = true
+            result.deleted = result.deleted + 1
+        end
+
+        local plan = sync:prepareSyncPlan({
+            shelf_id = 2,
+            shelf_type = "regular",
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            remote_delete_sync = true,
+        })
+
+        assert.is_true(called)
+        assert.are.equal(1, plan.result.deleted)
+    end)
+
+    it("uses pending-removal callback from options when provided", function()
+        local callback_called = false
+        local method_called = false
+        local sync = ShelfSync:new({
+            getShelfMappingsByShelf = function()
+                return {}
+            end,
+            getAllShelfSyncEntries = function()
+                return {}
+            end,
+            getPendingShelfRemovals = function()
+                return {}
+            end,
+        }, {
+            getShelfBooks = function()
+                return true, {}
+            end,
+        })
+
+        sync.processPendingShelfRemovals = function()
+            method_called = true
+        end
+
+        local plan = sync:prepareSyncPlan({
+            shelf_id = 2,
+            shelf_type = "regular",
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            remote_delete_sync = true,
+            process_pending_shelf_removals = function(payload)
+                callback_called = true
+                payload.result.deleted = payload.result.deleted + 2
+            end,
+        })
+
+        assert.is_true(callback_called)
+        assert.is_false(method_called)
+        assert.are.equal(2, plan.result.deleted)
+    end)
+
+    it("falls back to shelf method when pending-removal callback fails", function()
+        local method_called = false
+        local sync = ShelfSync:new({
+            getShelfMappingsByShelf = function()
+                return {}
+            end,
+            getAllShelfSyncEntries = function()
+                return {}
+            end,
+            getPendingShelfRemovals = function()
+                return {}
+            end,
+        }, {
+            getShelfBooks = function()
+                return true, {}
+            end,
+        })
+
+        sync.processPendingShelfRemovals = function(_, _shelf_id, _shelf_type, _download_dir, _delete_sdr, _skip_ids, result)
+            method_called = true
+            result.deleted = result.deleted + 1
+        end
+
+        local plan = sync:prepareSyncPlan({
+            shelf_id = 2,
+            shelf_type = "regular",
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            remote_delete_sync = true,
+            process_pending_shelf_removals = function()
+                error("callback failure")
+            end,
+        })
+
+        assert.is_true(method_called)
+        assert.are.equal(1, plan.result.deleted)
+    end)
+
+    it("deletes local file on cleanup only when still tracked by this shelf", function()
+        local delete_called = false
+        local sync = ShelfSync:new({
+            getAllShelfSyncEntries = function()
+                return {
+                    {
+                        book_id = 501,
+                        shelf_id = 3,
+                        shelf_type = "regular",
+                        local_path = "/storage/emulated/0/koreader/books/Book/remove.epub",
+                        downloaded_by_grimmlink = 1,
+                        last_seen_in_shelf_at = 100,
+                    },
+                }
+            end,
+            isBookTrackedInOtherShelf = function()
+                return false
+            end,
+        }, {})
+        sync.deleteLocalBook = function()
+            delete_called = true
+            return true
+        end
+        sync.removeBookMetadata = function() end
+
+        local result = { synced = 0, skipped = 0, failed = 0, deleted = 0, errors = {} }
+        sync:runCleanupPhase({
+            shelf_id = 3,
+            shelf_type = "regular",
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            delete_sdr = false,
+            remote_delete_sync = true,
+            sync_start = 200,
+        }, result, function() end)
+
+        assert.is_true(delete_called)
+        assert.are.equal(1, result.deleted)
+    end)
+
+    it("keeps local file when another shelf still tracks the book", function()
+        local delete_called = false
+        local mapping_removed = false
+        local sync = ShelfSync:new({
+            getAllShelfSyncEntries = function()
+                return {
+                    {
+                        book_id = 777,
+                        shelf_id = 4,
+                        shelf_type = "magic",
+                        local_path = "/storage/emulated/0/koreader/books/Book/shared.epub",
+                        downloaded_by_grimmlink = 1,
+                        last_seen_in_shelf_at = 100,
+                    },
+                }
+            end,
+            isBookTrackedInOtherShelf = function()
+                return true
+            end,
+            removeShelfMappingOnly = function()
+                mapping_removed = true
+                return true
+            end,
+        }, {})
+        sync.deleteLocalBook = function()
+            delete_called = true
+            return true
+        end
+
+        local result = { synced = 0, skipped = 0, failed = 0, deleted = 0, errors = {} }
+        sync:runCleanupPhase({
+            shelf_id = 4,
+            shelf_type = "magic",
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            delete_sdr = false,
+            remote_delete_sync = true,
+            sync_start = 200,
+        }, result, function() end)
+
+        assert.is_false(delete_called)
+        assert.is_true(mapping_removed)
+        assert.are.equal(0, result.deleted)
+    end)
+
+    it("retries pending removals when remote delete fails", function()
+        local retried = false
+        local sync = ShelfSync:new({
+            getPendingShelfRemovals = function()
+                return {
+                    {
+                        book_id = 88,
+                        shelf_id = 9,
+                        shelf_type = "regular",
+                        local_path = "/storage/emulated/0/koreader/books/Book/fail.epub",
+                    },
+                }
+            end,
+            incrementPendingShelfRemovalRetryCount = function()
+                retried = true
+                return true
+            end,
+        }, {
+            removeBookFromShelf = function()
+                return false, "connection failed"
+            end,
+        })
+
+        local result = { synced = 0, skipped = 0, failed = 0, deleted = 0, errors = {} }
+        sync:processPendingShelfRemovals(9, "regular", "/storage/emulated/0/koreader/books/Book", false, {}, result, function() end)
+
+        assert.is_true(retried)
+        assert.are.equal(1, result.failed)
+        assert.is_true(#result.errors > 0)
+    end)
+
+    it("delegates pending removals to pending_sync module when attached", function()
+        local delegated = false
+        local sync = ShelfSync:new({}, {})
+        sync.pending_sync = {
+            processPendingShelfRemovals = function(_, plugin_arg, payload)
+                delegated = true
+                assert.is_truthy(plugin_arg)
+                payload.result.deleted = payload.result.deleted + 1
+                return true
+            end,
+        }
+        sync.plugin = { db = {}, api = {} }
+        sync.pending_shelf_removal_retry_cooldown_seconds = 33
+
+        local result = { deleted = 0, failed = 0, errors = {} }
+        sync:processPendingShelfRemovals(1, "regular", "/storage/emulated/0/koreader/books/Book", false, {}, result, function() end)
+
+        assert.is_true(delegated)
+        assert.are.equal(1, result.deleted)
+    end)
+
+    it("uses deletion module policy when available", function()
+        local db_deleted = false
+        local sync = ShelfSync:new({
+            deleteShelfSyncEntry = function()
+                db_deleted = true
+                return true
+            end,
+        }, {})
+        sync.deletion = {
+            evaluateLocalDeletePolicy = function()
+                return false, "outside_managed_roots"
+            end,
+        }
+
+        local ok, reason = sync:deleteLocalBook({
+            book_id = 90,
+            shelf_id = 1,
+            shelf_type = "regular",
+            downloaded_by_grimmlink = 1,
+            local_path = "/etc/unsafe.epub",
+        }, false, "/storage/emulated/0/koreader/books/Book")
+
+        assert.is_false(ok)
+        assert.are.equal("outside_managed_roots", reason)
+        assert.is_false(db_deleted)
+    end)
+
+    it("processes cleanup in batches with runCleanupPhaseBatch", function()
+        local removed = {}
+        local sync = ShelfSync:new({
+            getAllShelfSyncEntries = function()
+                return {
+                    {
+                        book_id = 201,
+                        shelf_id = 3,
+                        shelf_type = "regular",
+                        downloaded_by_grimmlink = 0,
+                        last_seen_in_shelf_at = 1,
+                    },
+                    {
+                        book_id = 202,
+                        shelf_id = 3,
+                        shelf_type = "regular",
+                        downloaded_by_grimmlink = 0,
+                        last_seen_in_shelf_at = 1,
+                    },
+                }
+            end,
+            removeShelfMappingOnly = function(_, book_id)
+                removed[#removed + 1] = book_id
+                return true
+            end,
+        }, {})
+
+        local cleanup = {
+            shelf_id = 3,
+            shelf_type = "regular",
+            remote_delete_sync = true,
+            sync_start = 10,
+            delete_sdr = false,
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+        }
+        local result = { deleted = 0, failed = 0, errors = {} }
+        local state, done = sync:runCleanupPhaseBatch(cleanup, result, nil, 1, function() end)
+        assert.is_false(done)
+        assert.are.equal(1, #removed)
+
+        state, done = sync:runCleanupPhaseBatch(cleanup, result, state, 1, function() end)
+        assert.is_true(done)
+        assert.are.equal(2, #removed)
+    end)
 end)
+

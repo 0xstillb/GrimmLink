@@ -300,14 +300,32 @@ function ShelfSync:resolveDownloadDir(setting_value)
         logger.warn("GrimmLink ShelfSync: configured download_dir not accessible:", setting_value)
     end
 
+    -- Prefer KOReader Home folder when available so downloaded books show up in
+    -- the same library UX root the user configured.
+    local home_dir = nil
+    if G_reader_settings and type(G_reader_settings.readSetting) == "function" then
+        local ok_home, value = pcall(G_reader_settings.readSetting, G_reader_settings, "home_dir")
+        if ok_home and type(value) == "string" and value ~= "" then
+            home_dir = value
+        end
+    end
+    if home_dir then
+        local home_attr = lfs.attributes(home_dir)
+        if home_attr and home_attr.mode == "directory" then
+            return home_dir
+        end
+        logger.warn("GrimmLink ShelfSync: configured home_dir not accessible:", home_dir)
+    end
+
     -- Auto-detect a sensible KOReader books directory, then dedicate a
     -- subfolder to GrimmLink downloads so synced books stay grouped together.
+    -- Prefer "<base>/Book" directly (for example: ".../koreader/Book").
     -- /mnt/us/documents is Kindle-specific and indexed by Kindle's native library.
     local data_dir = DataStorage:getDataDir()
     local candidates = {
         "/mnt/us/documents",
-        data_dir .. "/books",
         data_dir,
+        data_dir .. "/books",
     }
     for _, dir in ipairs(candidates) do
         local attr = lfs.attributes(dir)
@@ -423,23 +441,93 @@ local function deleteSdr(local_path)
     end
 end
 
+local function basenameOfPath(path)
+    if not path or path == "" then
+        return ""
+    end
+    return path:match("([^/\\]+)$") or path
+end
+
+local function normalizeManagedRoots(roots)
+    local normalized = {}
+    for _, root in ipairs(roots or {}) do
+        if root and root ~= "" then
+            normalized[#normalized + 1] = root
+        end
+    end
+    return normalized
+end
+
+local function chooseSdrTargetPath(source_sdr_path, source_book_path, target_book_path)
+    if source_sdr_path == source_book_path .. ".sdr" then
+        return target_book_path .. ".sdr"
+    end
+    local source_base = source_book_path:match("^(.*)%.([^/\\]+)$")
+    local target_base = target_book_path:match("^(.*)%.([^/\\]+)$")
+    if source_base and target_base and source_sdr_path == source_base .. ".sdr" then
+        return target_base .. ".sdr"
+    end
+    return target_book_path .. ".sdr"
+end
+
+local function moveSdrSidecarsWithWarning(source_path, target_path)
+    local warning_count = 0
+    for _, sdr_path in ipairs(getSdrCandidatePaths(source_path)) do
+        local attr = safeLfsAttributes(sdr_path)
+        if attr and attr.mode == "directory" then
+            local target_sdr_path = chooseSdrTargetPath(sdr_path, source_path, target_path)
+            if sdr_path ~= target_sdr_path then
+                local target_attr = safeLfsAttributes(target_sdr_path)
+                if target_attr then
+                    warning_count = warning_count + 1
+                    logger.warn("GrimmLink ShelfSync: .sdr target already exists, keeping source sidecar:", target_sdr_path)
+                else
+                    local moved, move_err = os.rename(sdr_path, target_sdr_path)
+                    if moved then
+                        logger.info("GrimmLink ShelfSync: moved .sdr sidecar:", sdr_path, "=>", target_sdr_path)
+                    else
+                        warning_count = warning_count + 1
+                        logger.warn(
+                            "GrimmLink ShelfSync: failed to move .sdr sidecar:",
+                            sdr_path,
+                            "=>",
+                            target_sdr_path,
+                            tostring(move_err)
+                        )
+                    end
+                end
+            end
+        end
+    end
+    return warning_count
+end
+
 -- Safely delete a tracked book and optionally its .sdr sidecar.
 -- Only deletes files where downloaded_by_grimmlink == 1.
 function ShelfSync:deleteLocalBook(entry, delete_sdr, download_dir)
-    if entry.downloaded_by_grimmlink ~= 1 then
-        logger.warn("GrimmLink ShelfSync: skip delete (not downloaded by GrimmLink):", entry.local_path)
-        return false, "not_downloaded_by_grimmlink"
-    end
-
-    if entry.local_path and entry.local_path ~= "" then
-        local managed_roots = {
-            download_dir,
-            DataStorage:getDataDir(),
-            DataStorage:getSettingsDir(),
-        }
-        if not isPathUnderAnyDirectory(entry.local_path, managed_roots) then
-            logger.warn("GrimmLink ShelfSync: skip delete (outside managed roots):", entry.local_path)
-            return false, "outside_managed_roots"
+    local managed_roots = {
+        download_dir,
+        DataStorage:getDataDir(),
+        DataStorage:getSettingsDir(),
+    }
+    if self.deletion and type(self.deletion.evaluateLocalDeletePolicy) == "function" then
+        local allow_delete, reason = self.deletion:evaluateLocalDeletePolicy(entry, {
+            managed_roots = managed_roots,
+        })
+        if not allow_delete then
+            logger.warn("GrimmLink ShelfSync: skip delete (" .. tostring(reason) .. "):", entry and entry.local_path or "")
+            return false, reason
+        end
+    else
+        if entry.downloaded_by_grimmlink ~= 1 then
+            logger.warn("GrimmLink ShelfSync: skip delete (not downloaded by GrimmLink):", entry.local_path)
+            return false, "not_downloaded_by_grimmlink"
+        end
+        if entry.local_path and entry.local_path ~= "" then
+            if not isPathUnderAnyDirectory(entry.local_path, managed_roots) then
+                logger.warn("GrimmLink ShelfSync: skip delete (outside managed roots):", entry.local_path)
+                return false, "outside_managed_roots"
+            end
         end
     end
 
@@ -467,7 +555,239 @@ function ShelfSync:deleteLocalBook(entry, delete_sdr, download_dir)
     self.db:deleteShelfSyncEntry(entry.book_id, entry.shelf_id, entry.shelf_type)
     return true
 end
+
+function ShelfSync:resolveDownloadDirForShelfType(shelf_type, settings)
+    local normalized_type = normalizeShelfType(shelf_type)
+    local current_settings = settings or {}
+    if normalized_type == "magic"
+        and current_settings.use_separate_magic_download_dir == true
+        and current_settings.magic_download_dir
+        and current_settings.magic_download_dir ~= "" then
+        return current_settings.magic_download_dir
+    end
+    return current_settings.download_dir
+end
+
+local function upsertMagicMappingsForBook(db, book_id, local_path)
+    if not db or type(db.getShelfMappingsForBook) ~= "function" then
+        return false
+    end
+    local mappings = db:getShelfMappingsForBook(book_id)
+    local updated = false
+    for _, mapping in ipairs(mappings) do
+        if normalizeShelfType(mapping.shelf_type) == "magic" then
+            local ok = false
+            if type(db.updateShelfMappingLocalPath) == "function" then
+                ok = db:updateShelfMappingLocalPath(mapping.book_id, mapping.shelf_id, mapping.shelf_type, local_path)
+            elseif type(db.upsertShelfSyncEntry) == "function" then
+                mapping.local_path = local_path
+                ok = db:upsertShelfSyncEntry(mapping)
+            end
+            updated = ok or updated
+        end
+    end
+    return updated
+end
+
+local function collectMagicOnlyMappings(db)
+    if not db then
+        return {}
+    end
+    if type(db.getMagicOnlyShelfMappings) == "function" then
+        return db:getMagicOnlyShelfMappings()
+    end
+    local all = type(db.getAllShelfSyncEntries) == "function" and db:getAllShelfSyncEntries() or {}
+    local regular_books = {}
+    for _, entry in ipairs(all) do
+        if normalizeShelfType(entry.shelf_type) == "regular" then
+            regular_books[tostring(entry.book_id)] = true
+        end
+    end
+    local result = {}
+    for _, entry in ipairs(all) do
+        if normalizeShelfType(entry.shelf_type) == "magic"
+            and not regular_books[tostring(entry.book_id)] then
+            result[#result + 1] = entry
+        end
+    end
+    return result
+end
+
+local function moveMagicOnlyFiles(self, source_root, target_root, opts)
+    local options = opts or {}
+    local summary = {
+        moved = 0,
+        skipped = 0,
+        failed = 0,
+        shared = 0,
+        sidecar_warnings = 0,
+        warnings = {},
+        errors = {},
+    }
+
+    if not target_root or target_root == "" then
+        summary.errors[#summary.errors + 1] = "target directory is empty"
+        summary.failed = summary.failed + 1
+        return summary
+    end
+
+    local managed_roots = normalizeManagedRoots({
+        source_root,
+        target_root,
+        options.download_dir,
+        options.magic_download_dir,
+        DataStorage:getDataDir(),
+        DataStorage:getSettingsDir(),
+    })
+
+    local mappings = collectMagicOnlyMappings(self.db)
+    local processed_books = {}
+    for _, mapping in ipairs(mappings) do
+        local book_id = mapping.book_id
+        local book_key = tostring(book_id or "")
+        if book_id and not processed_books[book_key] then
+            processed_books[book_key] = true
+
+            local local_path = mapping.local_path
+            if not local_path or local_path == "" then
+                summary.skipped = summary.skipped + 1
+            elseif mapping.downloaded_by_grimmlink ~= 1 then
+                summary.skipped = summary.skipped + 1
+            elseif type(self.db.isBookTrackedByRegularShelf) == "function" and self.db:isBookTrackedByRegularShelf(book_id) then
+                summary.shared = summary.shared + 1
+            elseif source_root and source_root ~= "" and not isPathUnderDirectory(local_path, source_root) then
+                summary.skipped = summary.skipped + 1
+            elseif not isPathUnderAnyDirectory(local_path, managed_roots) then
+                summary.skipped = summary.skipped + 1
+                summary.warnings[#summary.warnings + 1] = "Skipped outside managed roots for bookId=" .. tostring(book_id)
+            else
+                local attr = safeLfsAttributes(local_path)
+                if not attr or attr.mode ~= "file" then
+                    summary.skipped = summary.skipped + 1
+                else
+                    local filename = basenameOfPath(local_path)
+                    local desired_target = joinPath(target_root, filename)
+                    local final_target = desired_target
+                    local reuse_existing = false
+
+                    local target_attr = safeLfsAttributes(final_target)
+                    if target_attr and target_attr.mode == "file" then
+                        local same_target_entry = type(self.db.getShelfSyncEntryByLocalPath) == "function"
+                            and self.db:getShelfSyncEntryByLocalPath(final_target) or nil
+                        if same_target_entry and tonumber(same_target_entry.book_id) == tonumber(book_id) then
+                            reuse_existing = true
+                        else
+                            final_target = uniquePath(target_root, filename)
+                            local final_attr = safeLfsAttributes(final_target)
+                            if final_attr then
+                                summary.failed = summary.failed + 1
+                                summary.errors[#summary.errors + 1] =
+                                    "Target exists and unique path unavailable for bookId=" .. tostring(book_id)
+                                final_target = nil
+                            end
+                        end
+                    end
+
+                    if final_target then
+                        local move_ok = true
+                        local moved_file = false
+                        if not reuse_existing and normalizePathForCompare(local_path) ~= normalizePathForCompare(final_target) then
+                            local renamed, rename_err = os.rename(local_path, final_target)
+                            move_ok = renamed and true or false
+                            if not move_ok then
+                                summary.failed = summary.failed + 1
+                                summary.errors[#summary.errors + 1] =
+                                    "Failed to move bookId=" .. tostring(book_id) .. ": " .. tostring(rename_err)
+                            else
+                                moved_file = true
+                            end
+                        end
+
+                        if move_ok then
+                            local mapping_ok = upsertMagicMappingsForBook(self.db, book_id, final_target)
+                            if mapping_ok then
+                                local sidecar_warnings = 0
+                                if moved_file then
+                                    sidecar_warnings = moveSdrSidecarsWithWarning(local_path, final_target)
+                                end
+                                summary.sidecar_warnings = summary.sidecar_warnings + sidecar_warnings
+                                if moved_file then
+                                    summary.moved = summary.moved + 1
+                                else
+                                    summary.skipped = summary.skipped + 1
+                                end
+                                if self.db and type(self.db.saveBookCache) == "function" then
+                                    self.db:saveBookCache(final_target, "", book_id, mapping.remote_title, mapping.remote_author)
+                                end
+                            else
+                                if moved_file then
+                                    local rolled_back, rollback_err = os.rename(final_target, local_path)
+                                    if not rolled_back then
+                                        summary.warnings[#summary.warnings + 1] =
+                                            "Rollback failed after DB update failure for bookId="
+                                            .. tostring(book_id)
+                                            .. ": "
+                                            .. tostring(rollback_err)
+                                    end
+                                end
+                                summary.failed = summary.failed + 1
+                                summary.errors[#summary.errors + 1] =
+                                    "Failed to update DB local_path for magic mappings, bookId=" .. tostring(book_id)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return summary
+end
+
+function ShelfSync:moveMagicShelfFilesToDirectory(target_dir, opts)
+    local options = opts or {}
+    return moveMagicOnlyFiles(self, options.shared_dir, target_dir, {
+        download_dir = options.download_dir,
+        magic_download_dir = target_dir,
+    })
+end
+
+function ShelfSync:moveMagicShelfFilesBackToSharedDirectory(shared_dir, opts)
+    local options = opts or {}
+    return moveMagicOnlyFiles(self, options.magic_dir, shared_dir, {
+        download_dir = shared_dir,
+        magic_download_dir = options.magic_dir,
+    })
+end
+
 function ShelfSync:processPendingShelfRemovals(shelf_id, shelf_type, download_dir, delete_sdr, skip_download_ids, result, progress)
+    if self.pending_sync and type(self.pending_sync.processPendingShelfRemovals) == "function" then
+        local pending_plugin = self.plugin
+        if not pending_plugin then
+            pending_plugin = {
+                db = self.db,
+                api = self.api,
+            }
+            if self.pending_shelf_removal_retry_cooldown_seconds then
+                pending_plugin.pending_shelf_removal_retry_cooldown_seconds = self.pending_shelf_removal_retry_cooldown_seconds
+            end
+        end
+        local handled = self.pending_sync:processPendingShelfRemovals(pending_plugin, {
+            shelf_sync = self,
+            shelf_id = shelf_id,
+            shelf_type = shelf_type,
+            download_dir = download_dir,
+            delete_sdr = delete_sdr,
+            skip_download_ids = skip_download_ids,
+            result = result,
+            progress = progress,
+            retry_cooldown_seconds = self.pending_shelf_removal_retry_cooldown_seconds,
+        })
+        if handled then
+            return
+        end
+    end
+
     local normalized_type = normalizeShelfType(shelf_type)
     local pending_entries = self.db:getPendingShelfRemovals(shelf_id, normalized_type)
     for _, entry in ipairs(pending_entries) do
@@ -532,6 +852,62 @@ local function normalizeShelfBooksResponse(remote_books)
     return remote_books
 end
 
+local function classifyShelfFetchError(fetch_code, fetch_error)
+    local message = tostring(fetch_error or "")
+    local lower = message:lower()
+    if tonumber(fetch_code) == 401 then
+        return "Shelf sync failed: authentication failed (401). Check username/password."
+    end
+    if tonumber(fetch_code) == 403 then
+        return "Shelf sync failed: access denied to shelf (403)."
+    end
+    if tonumber(fetch_code) == 404 then
+        return "Shelf sync failed: shelf endpoint not found (404). Check server URL and shelf settings."
+    end
+    if lower:find("server url not configured", 1, true) then
+        return "Shelf sync failed: server URL is not configured."
+    end
+    if lower:find("dns", 1, true) or lower:find("name resolution", 1, true) then
+        return "Shelf sync failed: DNS lookup failed. Verify URL and network."
+    end
+    if lower:find("timeout", 1, true) then
+        return "Shelf sync failed: network timeout while fetching shelf books."
+    end
+    if lower:find("connection", 1, true) or lower:find("refused", 1, true) then
+        return "Shelf sync failed: cannot reach server (connection error)."
+    end
+    local err = "Shelf sync failed to fetch shelf books"
+    if fetch_code ~= nil then
+        err = err .. " (HTTP " .. tostring(fetch_code) .. ")"
+    end
+    return err .. ": " .. message
+end
+
+local function computeShelfSnapshotToken(remote_books)
+    if type(remote_books) ~= "table" then
+        return nil
+    end
+    local lines = {}
+    for _, book in ipairs(remote_books) do
+        local book_id = tonumber(book.bookId or book.id or book.book_id) or 0
+        local name = tostring(book.fileName or "")
+        local size_kb = tonumber(book.fileSizeKb or book.file_size_kb) or 0
+        local fmt = tostring(book.fileFormat or book.file_format or book.extension or "")
+        lines[#lines + 1] = tostring(book_id) .. "|" .. name .. "|" .. tostring(size_kb) .. "|" .. fmt
+    end
+    table.sort(lines)
+
+    local mod = 65521
+    local a, b = 1, 0
+    for _, line in ipairs(lines) do
+        for i = 1, #line do
+            a = (a + string.byte(line, i)) % mod
+            b = (b + a) % mod
+        end
+    end
+    return tostring(#lines) .. ":" .. tostring(a) .. ":" .. tostring(b)
+end
+
 -- ============================================================
 -- Async-friendly sync architecture.
 -- The monolithic syncShelf is split into:
@@ -551,22 +927,25 @@ end
 -- }
 -- On error the returned plan.result.errors is non-empty and download_queue is {}.
 function ShelfSync:prepareSyncPlan(opts)
-    local result = { synced = 0, skipped = 0, failed = 0, deleted = 0, errors = {} }
-    local plan   = { result = result, download_queue = {}, cleanup = nil }
+    local default_result = { synced = 0, skipped = 0, failed = 0, deleted = 0, errors = {} }
+    local default_plan = { result = default_result, download_queue = {}, cleanup = nil }
 
     if type(opts) ~= "table" then
-        result.errors[#result.errors + 1] = "Invalid shelf sync options"
-        return plan
+        default_result.errors[#default_result.errors + 1] = "Invalid shelf sync options"
+        return default_plan
     end
-    local shelf_id = tonumber(opts.shelf_id) or opts.shelf_id
-    local shelf_type = normalizeShelfType(opts.shelf_type)
     if not self.db then
-        result.errors[#result.errors + 1] = "Database unavailable"
-        return plan
+        default_result.errors[#default_result.errors + 1] = "Database unavailable"
+        return default_plan
     end
     if not self.api then
-        result.errors[#result.errors + 1] = "API client unavailable"
-        return plan
+        default_result.errors[#default_result.errors + 1] = "API client unavailable"
+        return default_plan
+    end
+
+    local plan_batch_size = tonumber(opts.plan_batch_size)
+    if plan_batch_size and plan_batch_size < 1 then
+        plan_batch_size = 1
     end
 
     local function progress(msg)
@@ -574,56 +953,221 @@ function ShelfSync:prepareSyncPlan(opts)
         logger.info("GrimmLink ShelfSync:", msg)
     end
 
-    -- Fetch remote book list.
-    local remote_books = opts.preloaded_remote_books
-    if type(remote_books) == "table" then
-        progress("Using cached shelf books snapshot...")
+    local state = opts.plan_state
+    local plan = nil
+    local result = nil
+    local shelf_id = nil
+    local shelf_type = nil
+    local remote_books = nil
+    local sync_start = nil
+    local download_dir = nil
+    local use_original = nil
+    local skip_download_ids = nil
+    local shelf_entry_by_book = nil
+    local reusable_mapping_by_book = nil
+
+    if type(state) == "table"
+        and type(state.remote_books) == "table"
+        and type(state.result) == "table"
+        and type(state.download_queue) == "table"
+        and type(state.cleanup) == "table" then
+        result = state.result
+        plan = {
+            result = result,
+            download_queue = state.download_queue,
+            cleanup = state.cleanup,
+        }
+        shelf_id = state.shelf_id
+        shelf_type = state.shelf_type
+        remote_books = state.remote_books
+        sync_start = state.sync_start
+        download_dir = state.download_dir
+        use_original = state.use_original
+        skip_download_ids = state.skip_download_ids or {}
+        shelf_entry_by_book = state.shelf_entry_by_book or {}
+        reusable_mapping_by_book = state.reusable_mapping_by_book or {}
+        state.next_index = math.max(1, tonumber(state.next_index) or 1)
     else
-        progress("Fetching shelf books from server...")
-        local ok, fetched_books, fetch_code = self.api:getShelfBooks(shelf_id, shelf_type)
-        if not ok then
-            local err = "Failed to fetch shelf books"
-            if fetch_code ~= nil then
-                err = err .. " (HTTP " .. tostring(fetch_code) .. ")"
+        result = { synced = 0, skipped = 0, failed = 0, deleted = 0, errors = {} }
+        plan = { result = result, download_queue = {}, cleanup = nil }
+
+        shelf_id = tonumber(opts.shelf_id) or opts.shelf_id
+        shelf_type = normalizeShelfType(opts.shelf_type)
+
+        remote_books = opts.preloaded_remote_books
+        if type(remote_books) == "table" then
+            progress("Using cached shelf books snapshot...")
+        else
+            progress("Fetching shelf books from server...")
+            local ok, fetched_books, fetch_code = self.api:getShelfBooks(shelf_id, shelf_type)
+            if not ok then
+                local err = classifyShelfFetchError(fetch_code, fetched_books)
+                result.errors[#result.errors + 1] = err
+                logger.warn("GrimmLink ShelfSync:", err)
+                return plan
             end
-            err = err .. ": " .. tostring(fetched_books)
-            result.errors[#result.errors + 1] = err
-            logger.warn("GrimmLink ShelfSync:", err)
+            remote_books = fetched_books
+        end
+
+        remote_books = normalizeShelfBooksResponse(remote_books)
+        if type(remote_books) ~= "table" then
+            result.errors[#result.errors + 1] = "Unexpected shelf books response"
             return plan
         end
-        remote_books = fetched_books
+        if opts.on_fetched_remote_books and type(opts.on_fetched_remote_books) == "function" then
+            pcall(opts.on_fetched_remote_books, remote_books)
+        end
+
+        sync_start = os.time()
+        download_dir = self:resolveDownloadDir(opts.download_dir)
+        use_original = opts.use_original_filename ~= false
+        local remote_delete_sync = opts.remote_delete_sync ~= false
+        local delete_sdr = opts.delete_sdr == true
+        skip_download_ids = {}
+        local snapshot_token = computeShelfSnapshotToken(remote_books)
+        result.snapshot_token = snapshot_token
+
+        plan.cleanup = {
+            shelf_id            = shelf_id,
+            shelf_type          = shelf_type,
+            download_dir        = download_dir,
+            delete_sdr          = delete_sdr,
+            remote_delete_sync  = remote_delete_sync,
+            sync_start          = sync_start,
+            downloaded_files_to_refresh = {},
+            downloaded_files_to_refresh_set = {},
+        }
+
+        local process_pending_cb = type(opts.process_pending_shelf_removals) == "function" and opts.process_pending_shelf_removals or nil
+        if remote_delete_sync and process_pending_cb then
+            local ok_cb = pcall(process_pending_cb, {
+                shelf_sync = self,
+                shelf_id = shelf_id,
+                shelf_type = shelf_type,
+                download_dir = download_dir,
+                delete_sdr = delete_sdr,
+                skip_download_ids = skip_download_ids,
+                result = result,
+                progress = progress,
+            })
+            if not ok_cb then
+                logger.warn("GrimmLink ShelfSync: pending-removal callback failed; falling back to ShelfSync method")
+                if type(self.processPendingShelfRemovals) == "function"
+                    and self.db
+                    and type(self.db.getPendingShelfRemovals) == "function" then
+                    self:processPendingShelfRemovals(
+                        shelf_id,
+                        shelf_type,
+                        download_dir,
+                        delete_sdr,
+                        skip_download_ids,
+                        result,
+                        progress
+                    )
+                end
+            end
+        elseif remote_delete_sync
+            and type(self.processPendingShelfRemovals) == "function"
+            and self.db
+            and type(self.db.getPendingShelfRemovals) == "function" then
+            self:processPendingShelfRemovals(
+                shelf_id,
+                shelf_type,
+                download_dir,
+                delete_sdr,
+                skip_download_ids,
+                result,
+                progress
+            )
+        end
+
+        local shelf_entries = {}
+        if type(self.db.getShelfMappingsByShelf) == "function" then
+            shelf_entries = self.db:getShelfMappingsByShelf(shelf_id, shelf_type) or {}
+        else
+            shelf_entries = self.db:getAllShelfSyncEntries(shelf_id, shelf_type) or {}
+        end
+        shelf_entry_by_book = {}
+        for _, entry in ipairs(shelf_entries) do
+            local key = tostring(entry.book_id or "")
+            if key ~= "" and not shelf_entry_by_book[key] then
+                shelf_entry_by_book[key] = entry
+            end
+        end
+
+        reusable_mapping_by_book = {}
+        if type(self.db.getAllShelfSyncEntries) == "function" then
+            local all_entries = self.db:getAllShelfSyncEntries() or {}
+            for _, mapping in ipairs(all_entries) do
+                local key = tostring(mapping.book_id or "")
+                if key ~= "" and not reusable_mapping_by_book[key] then
+                    reusable_mapping_by_book[key] = mapping
+                end
+            end
+        end
+
+        if opts.previous_snapshot_token
+            and snapshot_token
+            and tostring(opts.previous_snapshot_token) == tostring(snapshot_token) then
+            local all_present = true
+            for _, book in ipairs(remote_books) do
+                local bid = tonumber(book.bookId or book.id or book.book_id)
+                if bid then
+                    local existing = shelf_entry_by_book[tostring(bid)]
+                    local path = existing and existing.local_path or nil
+                    local attr = path and lfs.attributes(path) or nil
+                    if not (attr and attr.mode == "file") then
+                        all_present = false
+                        break
+                    end
+                end
+            end
+            if all_present then
+                result.skipped = result.skipped + #remote_books
+                result.snapshot_unchanged = true
+                if plan.cleanup then
+                    plan.cleanup.remote_delete_sync = false
+                end
+                progress("Shelf snapshot unchanged; skipping full re-process.")
+                return plan
+            end
+        end
+
+        state = {
+            shelf_id = shelf_id,
+            shelf_type = shelf_type,
+            remote_books = remote_books,
+            sync_start = sync_start,
+            download_dir = download_dir,
+            use_original = use_original,
+            skip_download_ids = skip_download_ids,
+            shelf_entry_by_book = shelf_entry_by_book,
+            reusable_mapping_by_book = reusable_mapping_by_book,
+            next_index = 1,
+            result = result,
+            cleanup = plan.cleanup,
+            download_queue = plan.download_queue,
+        }
     end
 
-    remote_books = normalizeShelfBooksResponse(remote_books)
-    if type(remote_books) ~= "table" then
-        result.errors[#result.errors + 1] = "Unexpected shelf books response"
-        return plan
-    end
-    if opts.on_fetched_remote_books and type(opts.on_fetched_remote_books) == "function" then
-        pcall(opts.on_fetched_remote_books, remote_books)
+    local total_books = #remote_books
+    if state.next_index <= 1 then
+        progress("Processing " .. total_books .. " books in shelf...")
     end
 
-    local sync_start   = os.time()
-    local download_dir = self:resolveDownloadDir(opts.download_dir)
-    local use_original = opts.use_original_filename ~= false
-    local remote_delete_sync = opts.remote_delete_sync ~= false
-    local delete_sdr   = opts.delete_sdr == true
-    local skip_download_ids = {}
+    local processed_in_call = 0
+    local index = state.next_index
+    while index <= total_books do
+        if opts.is_cancelled and opts.is_cancelled() then
+            result.cancelled = true
+            result.errors[#result.errors + 1] = "Shelf sync cancelled during planning."
+            return plan
+        end
+        if index % 40 == 0 then
+            progress("Planning " .. tostring(index) .. " / " .. tostring(total_books))
+        end
 
-    plan.cleanup = {
-        shelf_id            = shelf_id,
-        shelf_type          = shelf_type,
-        download_dir        = download_dir,
-        delete_sdr          = delete_sdr,
-        remote_delete_sync  = remote_delete_sync,
-        sync_start          = sync_start,
-        downloaded_files_to_refresh = {},
-        downloaded_files_to_refresh_set = {},
-    }
-
-    -- Classify each book.
-    progress("Processing " .. #remote_books .. " books in shelf...")
-    for _, book in ipairs(remote_books) do
+        local book = remote_books[index]
         local should_continue = false
         local existing = nil
         local book_id = nil
@@ -646,11 +1190,7 @@ function ShelfSync:prepareSyncPlan(opts)
             local book_id_key = tostring(book_id)
             should_continue = skip_download_ids[book_id_key] == true
 
-            if self.db.getShelfMapping then
-                existing = self.db:getShelfMapping(book_id, shelf_id, shelf_type)
-            else
-                existing = self.db:getShelfSyncEntry(book_id)
-            end
+            existing = shelf_entry_by_book[book_id_key]
             if not should_continue and existing then
                 self.db:upsertShelfSyncEntry({
                     book_id = book_id,
@@ -717,39 +1257,35 @@ function ShelfSync:prepareSyncPlan(opts)
                 end
             end
 
-            if not should_continue and self.db and type(self.db.getShelfMappingsForBook) == "function" then
-                local other_mappings = self.db:getShelfMappingsForBook(book_id)
-                for _, mapping in ipairs(other_mappings) do
-                    if mapping.local_path and mapping.local_path ~= "" then
-                        local mapped_attr = lfs.attributes(mapping.local_path)
-                        if mapped_attr and mapped_attr.mode == "file" then
-                            self.db:upsertShelfSyncEntry({
-                                book_id = book_id,
-                                shelf_id = shelf_id,
-                                shelf_type = shelf_type,
-                                remote_filename = book.fileName,
-                                remote_title = book.title,
-                                remote_author = book.author,
-                                remote_format = resolveBookFormat(book) or book.fileFormat,
-                                remote_file_size_kb = book.fileSizeKb,
-                                remote_series_name = book.seriesName,
-                                remote_series_number = book.seriesNumber,
-                                local_path = mapping.local_path,
-                                downloaded_at = mapping.downloaded_at or os.time(),
-                                last_seen_in_shelf_at = sync_start,
-                                downloaded_by_grimmlink = mapping.downloaded_by_grimmlink == 1,
-                            })
-                            result.skipped = result.skipped + 1
-                            should_continue = true
-                            progress("Same book found in multiple shelves; using existing local file")
-                            break
-                        end
+            if not should_continue then
+                local mapping = reusable_mapping_by_book[book_id_key]
+                if mapping and mapping.local_path and mapping.local_path ~= "" then
+                    local mapped_attr = lfs.attributes(mapping.local_path)
+                    if mapped_attr and mapped_attr.mode == "file" then
+                        self.db:upsertShelfSyncEntry({
+                            book_id = book_id,
+                            shelf_id = shelf_id,
+                            shelf_type = shelf_type,
+                            remote_filename = book.fileName,
+                            remote_title = book.title,
+                            remote_author = book.author,
+                            remote_format = resolveBookFormat(book) or book.fileFormat,
+                            remote_file_size_kb = book.fileSizeKb,
+                            remote_series_name = book.seriesName,
+                            remote_series_number = book.seriesNumber,
+                            local_path = mapping.local_path,
+                            downloaded_at = mapping.downloaded_at or os.time(),
+                            last_seen_in_shelf_at = sync_start,
+                            downloaded_by_grimmlink = mapping.downloaded_by_grimmlink == 1,
+                        })
+                        result.skipped = result.skipped + 1
+                        should_continue = true
+                        progress("Same book found in multiple shelves; using existing local file")
                     end
                 end
             end
         end
 
-        -- Check on-disk candidate before queuing for download.
         if entry_ok and book_id and not should_continue then
             local filename = self:buildSafeFilename(book, use_original)
             if not filename or filename == "" then
@@ -792,7 +1328,6 @@ function ShelfSync:prepareSyncPlan(opts)
             end
         end
 
-        -- Still needs download — queue it.
         if entry_ok and book_id and not should_continue then
             local filename = self:buildSafeFilename(book, use_original)
             if not filename or filename == "" then
@@ -809,8 +1344,23 @@ function ShelfSync:prepareSyncPlan(opts)
                 }
             end
         end
+
+        index = index + 1
+        state.next_index = index
+        processed_in_call = processed_in_call + 1
+        if plan_batch_size and processed_in_call >= plan_batch_size and index <= total_books then
+            result.planning_in_progress = true
+            result.planning_done = index - 1
+            result.planning_total = total_books
+            plan.plan_state = state
+            return plan
+        end
     end
 
+    result.planning_in_progress = nil
+    result.planning_done = total_books
+    result.planning_total = total_books
+    plan.plan_state = nil
     return plan
 end
 
@@ -1030,10 +1580,50 @@ end
 -- result  table is the running result accumulator.
 -- progress_fn is optional function(msg).
 function ShelfSync:runCleanupPhase(cleanup, result, progress_fn)
-    if not cleanup or not cleanup.remote_delete_sync then return end
-    local shelf_type = normalizeShelfType(cleanup.shelf_type)
-    local all_entries = self.db:getAllShelfSyncEntries(cleanup.shelf_id, shelf_type)
-    for _, entry in ipairs(all_entries) do
+    local cleanup_state = nil
+    local done = false
+    while not done do
+        cleanup_state, done = self:runCleanupPhaseBatch(cleanup, result, cleanup_state, nil, progress_fn)
+    end
+end
+
+function ShelfSync:runCleanupPhaseBatch(cleanup, result, cleanup_state, max_items, progress_fn)
+    if not cleanup or not cleanup.remote_delete_sync then
+        return cleanup_state or { done = true }, true
+    end
+    if not self.db or type(self.db.getAllShelfSyncEntries) ~= "function" then
+        return cleanup_state or { done = true }, true
+    end
+
+    result = result or { synced = 0, skipped = 0, failed = 0, deleted = 0, errors = {} }
+    result.errors = type(result.errors) == "table" and result.errors or {}
+
+    if not cleanup_state then
+        cleanup_state = {
+            index = 1,
+            shelf_type = normalizeShelfType(cleanup.shelf_type),
+            entries = self.db:getAllShelfSyncEntries(cleanup.shelf_id, normalizeShelfType(cleanup.shelf_type)) or {},
+            done = false,
+        }
+    end
+    if cleanup_state.done then
+        return cleanup_state, true
+    end
+
+    local item_limit = tonumber(max_items)
+    if item_limit and item_limit < 1 then
+        item_limit = 1
+    end
+    local processed = 0
+
+    while cleanup_state.index <= #cleanup_state.entries do
+        if item_limit and processed >= item_limit then
+            break
+        end
+        local entry = cleanup_state.entries[cleanup_state.index]
+        cleanup_state.index = cleanup_state.index + 1
+        processed = processed + 1
+
         if entry.last_seen_in_shelf_at == nil or entry.last_seen_in_shelf_at < cleanup.sync_start then
             local tracked_elsewhere = self.db.isBookTrackedInOtherShelf
                 and self.db:isBookTrackedInOtherShelf(entry.book_id, entry.shelf_id, entry.shelf_type)
@@ -1052,10 +1642,10 @@ function ShelfSync:runCleanupPhase(cleanup, result, progress_fn)
                 end
                 local delete_ok, delete_err = self:deleteLocalBook(entry, cleanup.delete_sdr, cleanup.download_dir)
                 if delete_ok then
-                    self:removeBookMetadata(entry, cleanup.shelf_id, shelf_type)
-                    result.deleted = result.deleted + 1
+                    self:removeBookMetadata(entry, cleanup.shelf_id, cleanup_state.shelf_type)
+                    result.deleted = (tonumber(result.deleted) or 0) + 1
                 else
-                    result.failed = result.failed + 1
+                    result.failed = (tonumber(result.failed) or 0) + 1
                     local err = "Failed to delete local bookId=" .. tostring(entry.book_id) .. ": " .. tostring(delete_err)
                     result.errors[#result.errors + 1] = err
                     logger.warn("GrimmLink ShelfSync:", err)
@@ -1069,6 +1659,9 @@ function ShelfSync:runCleanupPhase(cleanup, result, progress_fn)
             end
         end
     end
+
+    cleanup_state.done = cleanup_state.index > #cleanup_state.entries
+    return cleanup_state, cleanup_state.done
 end
 
 -- Backward-compatible blocking wrapper.
