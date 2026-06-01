@@ -35,7 +35,7 @@ function M.normalizePercent(value)
         return nil
     end
     value = tonumber(value)
-    if not value then
+    if not value or value ~= value then
         return nil
     end
     if value >= 0 and value <= 1 then

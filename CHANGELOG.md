@@ -5,6 +5,12 @@
 ### Notes
 - Ongoing development branch.
 
+# [v1.4.5]
+
+### Fixes
+- Fixed `normalizePercent` NaN handling in `grimmlink_util.lua` so CI/runtime behavior is consistent under Lua 5.1 (`tonumber("NaN")` now returns `nil` outcome in normalization flow).
+- Confirmed plugin test suite and CI guard checks pass after the fix.
+
 # [v1.4.4]
 
 ### Features
