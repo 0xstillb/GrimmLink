@@ -4,23 +4,33 @@ set -e
 VERSION_FILE="grimmlink.koplugin/plugin_version.lua"
 META_FILE="grimmlink.koplugin/_meta.lua"
 
-GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DEFAULT_GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT="${GIT_COMMIT_OVERRIDE:-$DEFAULT_GIT_COMMIT}"
 
-if git describe --tags --exact-match HEAD 2>/dev/null; then
-    VERSION=$(git describe --tags --exact-match HEAD)
-    VERSION_TYPE="release"
-elif git describe --tags 2>/dev/null; then
-    VERSION=$(git describe --tags --always)
-    VERSION_TYPE="development"
-elif [ "$GIT_COMMIT" != "unknown" ]; then
-    VERSION="0.0.0-dev+$GIT_COMMIT"
-    VERSION_TYPE="development"
+if [ -n "${VERSION_OVERRIDE:-}" ]; then
+    VERSION="$VERSION_OVERRIDE"
+    VERSION_TYPE="${VERSION_TYPE_OVERRIDE:-release}"
 else
-    VERSION="0.0.0-dev"
-    VERSION_TYPE="development"
+    if git describe --tags --exact-match HEAD 2>/dev/null; then
+        VERSION=$(git describe --tags --exact-match HEAD)
+        VERSION_TYPE="release"
+    elif git describe --tags 2>/dev/null; then
+        VERSION=$(git describe --tags --always)
+        VERSION_TYPE="development"
+    elif [ "$GIT_COMMIT" != "unknown" ]; then
+        VERSION="0.0.0-dev+$GIT_COMMIT"
+        VERSION_TYPE="development"
+    else
+        VERSION="0.0.0-dev"
+        VERSION_TYPE="development"
+    fi
 fi
 
-BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+if [[ "$VERSION" != v* ]]; then
+    VERSION="v$VERSION"
+fi
+
+BUILD_DATE="${BUILD_DATE_OVERRIDE:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 
 cat > "$VERSION_FILE" <<EOF
 return {

@@ -19,10 +19,65 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Derive release metadata
+        id: release_meta
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          if [[ "$VERSION" != v* ]]; then
+            VERSION="v$VERSION"
+          fi
+          TAG_COMMIT=$(git rev-list -n 1 "$GITHUB_REF")
+          TAG_COMMIT_SHORT=$(git rev-parse --short "$TAG_COMMIT")
+          BUILD_DATE=$(git show -s --format=%cI "$TAG_COMMIT")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag_commit=$TAG_COMMIT" >> $GITHUB_OUTPUT
+          echo "tag_commit_short=$TAG_COMMIT_SHORT" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+
       - name: Generate version information
+        env:
+          VERSION_OVERRIDE: ${{ steps.release_meta.outputs.version }}
+          VERSION_TYPE_OVERRIDE: release
+          GIT_COMMIT_OVERRIDE: ${{ steps.release_meta.outputs.tag_commit_short }}
+          BUILD_DATE_OVERRIDE: ${{ steps.release_meta.outputs.build_date }}
         run: |
           chmod +x generate-version.sh
           ./generate-version.sh
+
+      - name: Sync generated version files to main
+        run: |
+          TAG_COMMIT="${{ steps.release_meta.outputs.tag_commit }}"
+          VERSION="${{ steps.release_meta.outputs.version }}"
+
+          git fetch origin main
+          MAIN_COMMIT=$(git rev-parse origin/main)
+          if [ "$MAIN_COMMIT" != "$TAG_COMMIT" ]; then
+            echo "Skip syncing version files: origin/main ($MAIN_COMMIT) is not tag commit ($TAG_COMMIT)."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B main origin/main
+
+          chmod +x generate-version.sh
+          VERSION_OVERRIDE="$VERSION" \
+          VERSION_TYPE_OVERRIDE="release" \
+          GIT_COMMIT_OVERRIDE="${{ steps.release_meta.outputs.tag_commit_short }}" \
+          BUILD_DATE_OVERRIDE="${{ steps.release_meta.outputs.build_date }}" \
+            ./generate-version.sh
+
+          if git diff --quiet -- grimmlink.koplugin/plugin_version.lua grimmlink.koplugin/_meta.lua; then
+            echo "Version files already in sync on main."
+            exit 0
+          fi
+
+          git add grimmlink.koplugin/plugin_version.lua grimmlink.koplugin/_meta.lua
+          git commit -m "chore(release): sync generated version files for ${VERSION}"
+
+          if ! git push origin HEAD:main; then
+            echo "Warning: unable to push generated version files to main."
+          fi
 
       - name: Compile gettext translations
         run: |
@@ -40,10 +95,7 @@ jobs:
       - name: Create plugin archives
         id: assets
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          if [[ "$VERSION" != v* ]]; then
-            VERSION="v$VERSION"
-          fi
+          VERSION=${{ steps.release_meta.outputs.version }}
           echo "asset_version=$VERSION" >> $GITHUB_OUTPUT
           zip -r grimmlink.koplugin.zip grimmlink.koplugin/
           cp grimmlink.koplugin.zip "grimmlink-${VERSION}.zip"
@@ -51,7 +103,7 @@ jobs:
       - name: Extract and prepare changelog
         id: changelog
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION=${{ steps.release_meta.outputs.version }}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
           # Try to extract changelog section for this version from CHANGELOG.md
