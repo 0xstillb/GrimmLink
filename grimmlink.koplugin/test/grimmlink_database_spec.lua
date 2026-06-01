@@ -329,4 +329,79 @@ describe("GrimmLink database helpers", function()
         assert.is_true(toggled)
         assert.is_true(db:isTrackingEnabled("hash-1", "/book.epub"))
     end)
+
+    it("supports magic-only shelf classification and local_path updates", function()
+        local bound_values = {}
+        local updated_path = nil
+
+        local function stmtFor(sql)
+            local stmt = {}
+            function stmt:bind(...)
+                bound_values[sql] = { ... }
+            end
+            function stmt:step()
+                if sql:find("UPDATE shelf_sync_map", 1, true) then
+                    local args = bound_values[sql] or {}
+                    updated_path = args[1]
+                end
+                return 101
+            end
+            function stmt:rows()
+                local emitted = false
+                return function()
+                    if emitted then return nil end
+                    emitted = true
+                    if sql:find("WHERE book_id = %?", 1, false) and sql:find("shelf_type = 'regular'", 1, true) then
+                        return { 1 }
+                    end
+                    if sql:find("SUM%(", 1, false) then
+                        return { 1, 0 }
+                    end
+                    if sql:find("WHERE shelf_type = 'magic'", 1, true) and sql:find("book_id NOT IN", 1, true) then
+                        return {
+                            10,
+                            77,
+                            5,
+                            "magic",
+                            "Title.epub",
+                            "Magic Title",
+                            "Author",
+                            "EPUB",
+                            128,
+                            nil,
+                            nil,
+                            "/shared/Title.epub",
+                            os.time(),
+                            os.time(),
+                            1,
+                            os.time(),
+                            os.time(),
+                        }
+                    end
+                    return nil
+                end
+            end
+            function stmt:close() end
+            return stmt
+        end
+
+        local db = setmetatable({
+            conn = {
+                prepare = function(_, sql)
+                    return stmtFor(sql)
+                end,
+                exec = function()
+                    return 0
+                end,
+            },
+        }, { __index = Database })
+
+        assert.is_true(db:isBookTrackedByRegularShelf(77))
+        assert.is_true(db:isBookTrackedOnlyByMagicShelf(77))
+        local magic_only = db:getMagicOnlyShelfMappings()
+        assert.are.equal(1, #magic_only)
+        assert.are.equal(77, magic_only[1].book_id)
+        assert.is_true(db:updateShelfMappingLocalPath(77, 5, "magic", "/magic/Title.epub"))
+        assert.are.equal("/magic/Title.epub", updated_path)
+    end)
 end)

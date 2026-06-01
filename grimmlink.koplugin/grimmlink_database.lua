@@ -1590,6 +1590,90 @@ function Database:isBookTrackedInOtherShelf(book_id, current_shelf_id, current_s
     return count > 0
 end
 
+function Database:isBookTrackedByRegularShelf(book_id)
+    if not book_id then
+        return false
+    end
+    local stmt = self.conn and self.conn:prepare(
+        [[
+            SELECT COUNT(*)
+            FROM shelf_sync_map
+            WHERE book_id = ?
+              AND shelf_type = 'regular'
+        ]]
+    )
+    if not stmt then
+        return false
+    end
+    stmt:bind(book_id)
+    local count = firstRow(stmt, function(row) return tonumber(row[1]) or 0 end) or 0
+    return count > 0
+end
+
+function Database:isBookTrackedOnlyByMagicShelf(book_id)
+    if not book_id then
+        return false
+    end
+    local stmt = self.conn and self.conn:prepare(
+        [[
+            SELECT
+                SUM(CASE WHEN shelf_type = 'magic' THEN 1 ELSE 0 END) AS magic_count,
+                SUM(CASE WHEN shelf_type = 'regular' THEN 1 ELSE 0 END) AS regular_count
+            FROM shelf_sync_map
+            WHERE book_id = ?
+        ]]
+    )
+    if not stmt then
+        return false
+    end
+    stmt:bind(book_id)
+    local counts = firstRow(stmt, function(row)
+        return {
+            magic_count = tonumber(row[1]) or 0,
+            regular_count = tonumber(row[2]) or 0,
+        }
+    end) or { magic_count = 0, regular_count = 0 }
+    return counts.magic_count > 0 and counts.regular_count == 0
+end
+
+function Database:getMagicOnlyShelfMappings()
+    local stmt = self.conn and self.conn:prepare(
+        SHELF_SYNC_SELECT .. [[
+            WHERE shelf_type = 'magic'
+              AND book_id NOT IN (
+                SELECT DISTINCT book_id
+                FROM shelf_sync_map
+                WHERE shelf_type = 'regular'
+              )
+            ORDER BY updated_at DESC
+        ]]
+    )
+    if not stmt then
+        return {}
+    end
+    return allRows(stmt, mapShelfEntry)
+end
+
+function Database:updateShelfMappingLocalPath(book_id, shelf_id, shelf_type, local_path)
+    if not book_id or shelf_id == nil then
+        return false
+    end
+    local stmt = self.conn and self.conn:prepare(
+        [[
+            UPDATE shelf_sync_map
+            SET local_path = ?, updated_at = ?
+            WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?
+        ]]
+    )
+    if not stmt then
+        return false
+    end
+    stmt:bind(local_path, nowEpoch(), book_id, shelf_id, normalizeShelfType(shelf_type))
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
 function Database:upsertShelfSyncEntry(entry)
     local sql = [[
         INSERT INTO shelf_sync_map (

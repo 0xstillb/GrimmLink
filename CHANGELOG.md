@@ -3,7 +3,31 @@
 # [Unreleased]
 
 ### Notes
-- In progress
+- Ongoing development branch.
+
+# [v1.4.4]
+
+### Features
+- Added queue/action modularization:
+  - `grimmlink_pending_sync.lua`
+  - `grimmlink_progress_sync.lua`
+  - `grimmlink_matching.lua`
+  - `grimmlink_deletion.lua`
+  - `grimmlink_menu_actions.lua`
+  - `grimmlink_util.lua`
+- Added context-aware GrimmLink top-level menu behavior while reading:
+  - focused reading-mode actions (`Pull Remote Progress`, `Manual Reading Status`, `Sync Summary`)
+  - reduced top-level clutter in reader context.
+
+### Improvements
+- Refactored large menu construction paths to reduce duplication and improve maintainability.
+- Moved Maintenance menu builder and status/reader menu helpers into `grimmlink_menu_actions.lua`.
+- Standardized utility delegation and queue counter helpers to simplify core flow code.
+
+### Fixes
+- Hardened menu action/test environment compatibility (`ffi/util` fallback in menu-actions module tests).
+- Added and expanded tests for extracted modules and menu behavior.
+- Preserved CI guard compatibility for updater repo, endpoint policy, naming policy, and logging safety checks.
 
 # [v1.4.3]
 

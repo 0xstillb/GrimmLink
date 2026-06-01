@@ -300,21 +300,15 @@ function ShelfSync:resolveDownloadDir(setting_value)
         logger.warn("GrimmLink ShelfSync: configured download_dir not accessible:", setting_value)
     end
 
-    -- Prefer KOReader Home folder when available so downloaded books show up in
-    -- the same library UX root the user configured.
+    -- Read KOReader Home folder as an optional fallback root.
+    -- Do not prioritize it over DataStorage:getDataDir() because we want
+    -- stable auto-path behavior at "<koreader>/Book".
     local home_dir = nil
     if G_reader_settings and type(G_reader_settings.readSetting) == "function" then
         local ok_home, value = pcall(G_reader_settings.readSetting, G_reader_settings, "home_dir")
         if ok_home and type(value) == "string" and value ~= "" then
             home_dir = value
         end
-    end
-    if home_dir then
-        local home_attr = lfs.attributes(home_dir)
-        if home_attr and home_attr.mode == "directory" then
-            return home_dir
-        end
-        logger.warn("GrimmLink ShelfSync: configured home_dir not accessible:", home_dir)
     end
 
     -- Auto-detect a sensible KOReader books directory, then dedicate a
@@ -327,6 +321,9 @@ function ShelfSync:resolveDownloadDir(setting_value)
         data_dir,
         data_dir .. "/books",
     }
+    if home_dir and home_dir ~= "" then
+        candidates[#candidates + 1] = home_dir
+    end
     for _, dir in ipairs(candidates) do
         local attr = lfs.attributes(dir)
         if attr and attr.mode == "directory" then
@@ -709,6 +706,9 @@ local function moveMagicOnlyFiles(self, source_root, target_root, opts)
                                 local sidecar_warnings = 0
                                 if moved_file then
                                     sidecar_warnings = moveSdrSidecarsWithWarning(local_path, final_target)
+                                    if type(self.deleteFromBookInfoCache) == "function" then
+                                        self:deleteFromBookInfoCache(local_path)
+                                    end
                                 end
                                 summary.sidecar_warnings = summary.sidecar_warnings + sidecar_warnings
                                 if moved_file then
@@ -1730,6 +1730,21 @@ local function normalizePath(path)
     return p
 end
 
+local function normalizeDirectoryValue(directory)
+    if not directory or directory == "" then
+        return ""
+    end
+    local dir = tostring(directory):gsub("\\", "/"):gsub("/+", "/")
+    if dir ~= "/" then
+        dir = dir:gsub("/$", "")
+    end
+    return dir
+end
+
+local function canonicalDirectorySqlExpr()
+    return "(CASE WHEN directory = '/' THEN '/' ELSE rtrim(directory, '/') END)"
+end
+
 --- Write a metadata index JSON file to download_dir after sync.
 -- Source of truth for GrimmLink-managed metadata; survives bookinfo_cache rescans.
 function ShelfSync:writeMetadataIndex(shelf_id, shelf_type_or_download_dir, download_dir)
@@ -1887,21 +1902,26 @@ function ShelfSync:upsertBookInfoCache(shelf_id)
     local has_series = columns["series"]
     local has_series_index = columns["series_index"]
     local has_keywords = columns["keywords"]
+    local canonical_dir_expr = canonicalDirectorySqlExpr()
+    local dedupe_sql = "DELETE FROM bookinfo WHERE bcid NOT IN ("
+        .. "SELECT MAX(bcid) FROM bookinfo GROUP BY " .. canonical_dir_expr .. ", filename)"
 
     cache_conn:exec("BEGIN TRANSACTION")
+    cache_conn:exec(dedupe_sql)
 
     for _, e in ipairs(entries) do
         local norm = normalizePath(e.local_path)
         local file_attr = norm and lfs.attributes(norm)
         if norm and file_attr and file_attr.mode == "file" then
-            local dir = norm:match("^(.*)/[^/]+$") or ""
-            if dir ~= "" and not dir:match("/$") then dir = dir .. "/" end
+            local dir = normalizeDirectoryValue(norm:match("^(.*)/[^/]+$") or "")
             local fname = norm:match("([^/]+)$") or ""
             if fname ~= "" then
                 local exists = false
-                local check_stmt = cache_conn:prepare("SELECT 1 FROM bookinfo WHERE directory = ? AND filename = ?")
+                local check_stmt = cache_conn:prepare(
+                    "SELECT 1 FROM bookinfo WHERE filename = ? AND " .. canonical_dir_expr .. " = ?"
+                )
                 if check_stmt then
-                    check_stmt:bind(dir, fname)
+                    check_stmt:bind(fname, dir)
                     for _ in check_stmt:rows() do exists = true; break end
                     check_stmt:close()
                 end
@@ -1922,8 +1942,10 @@ function ShelfSync:upsertBookInfoCache(shelf_id)
                         sets[#sets + 1] = "series_index = ?"; vals[#vals + 1] = e.remote_series_number
                     end
                     if #sets > 0 then
-                        vals[#vals + 1] = dir; vals[#vals + 1] = fname
-                        local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ") .. " WHERE directory = ? AND filename = ?"
+                        vals[#vals + 1] = fname
+                        vals[#vals + 1] = dir
+                        local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ")
+                            .. " WHERE filename = ? AND " .. canonical_dir_expr .. " = ?"
                         local upd_stmt = cache_conn:prepare(sql)
                         if upd_stmt then
                             upd_stmt:bind(unpack(vals)); upd_stmt:step(); upd_stmt:close()
@@ -1975,7 +1997,7 @@ end
 function ShelfSync:deleteFromBookInfoCache(local_path)
     local norm = normalizePath(local_path)
     if not norm then return false end
-    local dir = norm:match("^(.*)/[^/]+$") or ""
+    local dir = normalizeDirectoryValue(norm:match("^(.*)/[^/]+$") or "")
     local fname = norm:match("([^/]+)$") or ""
     if fname == "" then return false end
 
@@ -1983,10 +2005,12 @@ function ShelfSync:deleteFromBookInfoCache(local_path)
     if not cache_conn then return false end
 
     local SQ3 = require("lua-ljsqlite3/init")
-    local stmt = cache_conn:prepare("DELETE FROM bookinfo WHERE directory = ? AND filename = ?")
+    local stmt = cache_conn:prepare(
+        "DELETE FROM bookinfo WHERE filename = ? AND " .. canonicalDirectorySqlExpr() .. " = ?"
+    )
     local ok = false
     if stmt then
-        stmt:bind(dir, fname)
+        stmt:bind(fname, dir)
         ok = stmt:step() == SQ3.DONE
         stmt:close()
     end
@@ -2026,19 +2050,25 @@ function ShelfSync:rebuildBookInfoCacheFromIndex(download_dir)
     local has_series = columns["series"]
     local has_series_index = columns["series_index"]
     local counts = { inserted = 0, updated = 0, skipped = 0 }
+    local canonical_dir_expr = canonicalDirectorySqlExpr()
+    local dedupe_sql = "DELETE FROM bookinfo WHERE bcid NOT IN ("
+        .. "SELECT MAX(bcid) FROM bookinfo GROUP BY " .. canonical_dir_expr .. ", filename)"
 
     cache_conn:exec("BEGIN TRANSACTION")
+    cache_conn:exec(dedupe_sql)
 
     for _, entry in ipairs(index) do
-        local dir = entry.directory or ""
+        local dir = normalizeDirectoryValue(entry.directory or "")
         local fname = entry.filename or ""
         local full_path = dir ~= "" and (dir .. "/" .. fname) or fname
         local file_attr = fname ~= "" and lfs.attributes(full_path)
         if fname ~= "" and file_attr and file_attr.mode == "file" then
             local exists = false
-            local chk = cache_conn:prepare("SELECT 1 FROM bookinfo WHERE directory = ? AND filename = ?")
+            local chk = cache_conn:prepare(
+                "SELECT 1 FROM bookinfo WHERE filename = ? AND " .. canonical_dir_expr .. " = ?"
+            )
             if chk then
-                chk:bind(dir, fname)
+                chk:bind(fname, dir)
                 for _ in chk:rows() do exists = true; break end
                 chk:close()
             end
@@ -2058,8 +2088,10 @@ function ShelfSync:rebuildBookInfoCacheFromIndex(download_dir)
                     sets[#sets + 1] = "series_index = ?"; vals[#vals + 1] = entry.seriesIndex
                 end
                 if #sets > 0 then
-                    vals[#vals + 1] = dir; vals[#vals + 1] = fname
-                    local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ") .. " WHERE directory = ? AND filename = ?"
+                    vals[#vals + 1] = fname
+                    vals[#vals + 1] = dir
+                    local sql = "UPDATE bookinfo SET " .. table.concat(sets, ", ")
+                        .. " WHERE filename = ? AND " .. canonical_dir_expr .. " = ?"
                     local s = cache_conn:prepare(sql)
                     if s then s:bind(unpack(vals)); s:step(); s:close(); counts.updated = counts.updated + 1 end
                 end

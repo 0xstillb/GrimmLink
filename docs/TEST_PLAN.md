@@ -1,108 +1,177 @@
 # GrimmLink Plugin Test Plan
 
-## CI Gate
+This plan is the release gate for the current connection model (local-first, no SSID dependency) and recent wake/latency tuning.
 
-The branch CI workflow in `.github/workflows/ci.yml` must pass before release.
+## 0) Scope
 
-Current CI checks:
+- Verify connection setup UX and connection-test responsiveness.
+- Verify wake/sleep behavior does not feel blocked by GrimmLink network work.
+- Verify shelf sync refactor safety (planning, cleanup, pending removals, magic shelf paths).
+- Verify release hygiene (tests, docs, tags).
 
-- Lua syntax via `luac -p`
-- active plugin tests via `./run_tests.sh`
-- updater source guard for `0xstillb/grimmlink`
-- failure if release ZIP artifacts are committed
+## 1) Test Environment
 
-The workflow does not require:
+- KOReader device (or emulator) with GrimmLink installed.
+- Grimmory reachable from:
+  - Local URL (LAN), example: `http://192.168.x.x:6060`
+  - Remote URL (WAN), example: `https://example.com`
+- Valid KOReader username + key/password.
+- At least one book already matched in Grimmory.
+- Optional: one regular shelf + one magic shelf with known books.
 
-- a real KOReader runtime
-- a real Grimmory server
-- secrets
-- real GitHub update installs
+## 2) Pre-Flight (Mandatory)
 
-## Local Checks
-
-Run when the toolchain is available:
+Run before device QA:
 
 - `git diff --check`
-- `./run_tests.sh`
-- optional standalone Lua syntax pass (`luac -p`)
+- `./run_tests.sh` (or `busted test`)
+- confirm no release ZIPs are committed
+- confirm docs updated (`README.md`, `CHANGELOG.md`, this file when behavior changes)
 
-If `lua`, `luac`, `luajit`, or `busted` are unavailable locally, rely on CI and
-record that limitation in the release notes.
+Pass criteria:
 
-## Core Runtime Checks
+- tests green
+- no whitespace errors
+- no accidental release artifacts in git
 
-1. Install `grimmlink.koplugin`.
-2. Configure Grimmory server URL, KOReader username, `x-auth-key`, device name, and device ID.
-3. Run **Test Connection**.
-4. Open a matched book.
-5. Verify native progress pull on open.
-6. Read forward and close or suspend.
-7. Verify native progress push or offline queue behavior.
-8. Reopen with a meaningful local/remote difference and verify:
-   - `Use Local`
-   - `Use Remote`
-   - `Ignore`
+## 3) Smoke Test (10-15 Minutes)
 
-## Offline Queue Checks
+1. Open `Tools -> GrimmLink -> Connection -> Setup Connection`.
+2. Enter Local URL, Remote URL, Username, Password.
+3. Run `Test Connection`.
+4. Open a matched book, read forward, close.
+5. Run `Sync Pending Now`.
 
-- sessions queue while offline
-- queue replay preserves ordering when back online
-- manual **Sync Pending Now** flush works
-- duplicate replay does not create duplicate session uploads
+Pass criteria:
 
-## Shelf Sync Checks
+- setup saves successfully
+- connection test returns clear result dialog (success or actionable failure)
+- session/progress sync does not crash
 
-- shelf selection persists
-- tracked shelf downloads are created in the configured directory
-- two-way shelf delete sync stays OFF by default
-- `.sdr` deletion stays OFF by default
-- only GrimmLink-tracked files are removed
-- no Grimmory library/server file delete path is used
-- no Grimmory book record delete path is used
+## 4) Connection Test Matrix (Critical)
 
-## Annotation / Bookmark / Rating Checks
+### CONN-01 Local Healthy
 
-- remote missing locally -> safe import
-- duplicate remote item -> skip
-- local note edited after last remote version -> keep local, mark conflict
-- suspend/close capture runs before pending sync replay
-- raw KOReader xpointer/page survives push + pull
-- no Web Reader annotation fields are written
+- Condition: device on LAN, local URL reachable.
+- Action: `Test Connection`.
+- Expect:
+  - `Result: success`
+  - `Active server` shows local nickname if set, else `Local`
+  - completion feels fast (target around local timeout profile)
 
-## Web Reader Bridge Checks
+### CONN-02 Local Down, Remote Healthy
 
-The bridge conflict dialog is intentionally a separate dialog from the native KOReader sync conflict dialog above; its button labels (`Use KOReader` / `Use Web Reader` / `Ignore`) differ on purpose so the user can tell the two flows apart.
+- Condition: break local endpoint, keep remote reachable.
+- Action: `Test Connection`.
+- Expect:
+  - no freeze perception beyond timeout window
+  - clear failure/success messaging with active route info
+  - if fallback path is used by runtime, messaging remains understandable
 
-- `web_reader_bridge_enabled` defaults to `false`
-- `cfi_conversion_enabled` defaults to `false`
-- with bridge disabled, native KOReader sync behavior is unchanged
-- with bridge enabled, plugin pulls Web Reader progress on open
-- with bridge enabled, plugin pushes bridge progress on close/suspend/manual sync
-- if Web Reader progress is newer, plugin prompts before jumping
-- if both sides changed, plugin offers `Use KOReader`, `Use Web Reader`, `Ignore`
-- if CFI conversion fails, bridge falls back safely without blocking reading
-- if conversion is disabled, percentage/page/raw-location fallback still works when possible
+### CONN-03 No Internet
 
-## Auto-Update Checks
+- Condition: Wi-Fi off / disconnected.
+- Action: `Test Connection`.
+- Expect:
+  - short message: `No network connection`
+  - no long diagnostic wall in normal mode
 
-- updater source repo is `0xstillb/grimmlink`
-- release assets accepted by the updater are:
-  - `grimmlink.koplugin.zip`
-  - `grimmlink-vX.Y.Z.zip`
-- install requires explicit confirmation
-- restart prompt appears after successful install
-- settings/database/cache/downloaded books remain untouched
-- updater backup/rollback path remains available
+### CONN-04 Diagnostics View
 
-## Release Packaging Checks
+- Action: `Test Connection with Diagnostics`.
+- Expect:
+  - header is concise
+  - includes `Result`, `Active server`, `Duration`
+  - includes truncated/testable URL display and route/failure reason
 
-- `.github/workflows/release.yml` exists
-- tagged release builds `grimmlink.koplugin.zip`
-- tagged release also publishes `grimmlink-vX.Y.Z.zip`
-- no ZIP artifacts are committed into the repository
-- `grimmlink.koplugin/plugin_version.lua` is rewritten by the tagged release workflow
+## 5) Wake/Sleep Responsiveness Matrix
 
-## Known Local Limitation
+### WAKE-01 Resume Without Network
 
-This workspace may lack a local Lua toolchain, so final runtime Lua validation
-may need to happen in CI or on a KOReader-capable machine.
+- Condition: device offline.
+- Action: sleep -> wake 10 rounds.
+- Expect:
+  - no long UI stall on wake
+  - no spam dialogs
+
+### WAKE-02 Resume With Network (Sync Disabled)
+
+- Condition: `sync_on_network_connected = false`.
+- Action: sleep -> wake 10 rounds.
+- Expect:
+  - no noticeable blocking on wake
+  - no unexpected pending sync kick-off
+
+### WAKE-03 Resume With Network (Sync Enabled)
+
+- Condition: `sync_on_network_connected = true`.
+- Action: sleep -> wake 10 rounds.
+- Expect:
+  - grace window prevents immediate duplicate trigger after resume
+  - pending sync starts only after delay logic, without UI lockup
+
+## 6) Shelf Sync Regression Matrix
+
+### SHELF-01 Plan/Resume Safety
+
+- Use a shelf with many books.
+- Trigger sync and interrupt once.
+- Re-run sync.
+- Expect:
+  - planning resumes safely
+  - no duplicate local DB mapping corruption
+
+### SHELF-02 Cleanup Safety
+
+- Remove books from synced shelf remotely.
+- Run shelf sync cleanup.
+- Expect:
+  - only GrimmLink-tracked items are touched
+  - `.sdr` deletion respects setting
+
+### SHELF-03 Pending Removals
+
+- Force temporary remove failure (network/offline), then recover.
+- Re-run sync.
+- Expect:
+  - pending removals retry and clear on success
+
+### SHELF-04 Magic Shelf Directory Moves
+
+- Enable separate magic directory.
+- Sync and validate moved files.
+- Disable separate magic directory and sync again.
+- Expect:
+  - files move to correct target path both directions
+  - local DB `local_path` stays consistent
+
+## 7) Progress/Session/Metadata Regression
+
+- Open -> pull progress path works.
+- Read -> close/suspend -> pending/session created.
+- `Sync Pending Now` replays once without duplicates.
+- Metadata batch sync still works for rating/highlights/bookmarks.
+
+## 8) Release Gate Checklist
+
+Before `commit push releases`:
+
+1. `CHANGELOG.md` updated for target version.
+2. `README.md` updated for latest behavior/endpoints/workflow.
+3. `docs/TEST_PLAN.md` reflects current runtime behavior.
+4. Commit and push to `origin/main`.
+5. Tag and push `vX.Y.Z` (CI creates release assets automatically).
+
+Quick verify:
+
+- `git ls-remote --tags origin vX.Y.Z`
+- `gh release view vX.Y.Z --repo 0xstillb/GrimmLink`
+
+## 9) Exit Criteria
+
+Release candidate is approved only when:
+
+- automated tests pass
+- all sections in this plan pass (or have documented risk acceptance)
+- no unresolved P1/P2 regressions
+- local and GitHub version/tag state are aligned

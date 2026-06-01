@@ -1,161 +1,115 @@
-<p align="center">
-  <h1 align="center">GrimmLink</h1>
-  <p align="center">KOReader companion plugin for <a href="https://github.com/0xstillb/grimmory">Grimmory (0xstillb fork)</a></p>
-</p>
+﻿# GrimmLink
 
-> GrimmLink is built specifically for Grimmory (not a universal sync plugin).
+A KOReader companion plugin for [Grimmory (0xstillb fork)](https://github.com/0xstillb/grimmory).
 
-<p align="center">
-  <img src="https://img.shields.io/badge/platform-KOReader-blue" alt="Platform">
-  <img src="https://img.shields.io/badge/language-Lua-purple" alt="Language">
-  <img src="https://img.shields.io/github/v/release/0xstillb/GrimmLink?label=release" alt="Release">
-  <img src="https://img.shields.io/github/license/0xstillb/GrimmLink" alt="License">
-</p>
+GrimmLink is designed specifically for Grimmory workflows: reading sync, session sync, metadata upload, shelf download/sync, and recovery tooling.
 
----
+## At A Glance
 
-## What Is GrimmLink?
+- Two-way reading progress sync (push + pull)
+- Reading session sync with retry queues
+- Metadata upload sync (rating/highlights/notes/bookmarks)
+- Shelf sync (Regular + Magic) with safe local file handling
+- Queue/DB maintenance and debug export tools
 
-GrimmLink is a KOReader plugin that connects local reading (EPUB/PDF/CBZ and more) to Grimmory for:
+## Quick Start
 
-- progress push/pull sync
-- reading session sync
-- metadata sync (upload-only: rating/highlight/note/bookmark)
-- shelf sync (regular + magic shelf) with file download
-- maintenance and debug tools for queue visibility and recovery
+1. Download `grimmlink.koplugin.zip` from [Releases](https://github.com/0xstillb/GrimmLink/releases/latest).
+2. Extract into KOReader `plugins/`.
+3. Restart KOReader.
+4. Open `Tools -> GrimmLink -> Connection`.
+5. Set Local URL, optional Remote URL, username, password.
+6. Run `Test Connection with Diagnostics`.
 
----
+## Connection Model
 
-## Core Capabilities
+GrimmLink uses a local-first routing strategy:
 
-### 1) Progress Sync
+- Prefer Local URL when available
+- Temporarily fallback to Remote URL after recent local transport failure/cooldown
+- `Test Connection` uses a single-attempt test path (no sticky fallback side effects)
 
-- Pull remote progress when opening a book.
-- Push local progress when closing/suspending/manual sync.
-- Show a conflict prompt before jumping to another location.
-- Support Grimmory read status flow (`UNREAD`, `READING`, `READ`, plus backend-supported custom statuses).
-- For EPUB/reflowable formats, sync uses KOReader-native location/progress as the source of truth (percentage is not authoritative).
-- For fixed-page formats (PDF/CBZ), page/percentage sync remains available.
-- PDF web reader bridge remains PDF-only; no EPUB CFI/web bridge conversion.
+Authentication headers:
 
-### 2) Reading Session Sync
+- `x-auth-user`
+- `x-auth-key`
 
-- Track local reading sessions.
-- Upload when online.
-- Keep sessions in queue and retry when connection returns.
+No Bearer token is required.
 
-### 3) Metadata Sync (Upload-only)
+## Core Features
 
-- Collect rating/highlight/note/bookmark from KOReader.
-- Send in batch to:
-  - `/api/koreader/syncs/metadata`
-- Auth headers:
-  - `x-auth-user`
-  - `x-auth-key`
-- No Bearer token.
-- No metadata pull-back into KOReader in current phase.
-- No annotation/bookmark deletion sync in current phase.
+### Progress Sync
 
-### 4) Shelf Sync (Regular + Magic)
+- Pull remote progress for the current open book
+- Push local progress on close/suspend/manual sync
+- Conflict prompt when local and remote progress diverge
+- Reflowable formats use KOReader-native location model as source of truth
 
-- Sync regular shelf and magic shelf.
-- Support private shelf ID with validation.
-- Download files with progress dialog/cancel.
-- Use async path with blocking fallback based on device capability.
-- Refresh KOReader book info/cover cache automatically after download.
-- Use local tombstone/queue for safe local deletion handling.
-- Never delete server/library files in Grimmory.
+### Reading Session Sync
 
-### 5) Maintenance / Debug / Recovery
+- Session events are queued locally
+- Automatic retry when network/API becomes available
 
-- clear logs
-- export debug info (redacted)
-- clear pending queues (progress/session/metadata)
-- clear local metadata synced history
-- clear shelf tombstones/pending removals
-- rebuild SimpleUI metadata cache
-- rebuild/force metadata resync per book
-- re-match current book
-- show DB status/pending counts
+### Metadata Sync (Upload-Only)
 
-All local destructive actions are confirmation-gated.
+- Upload rating, highlights/notes, bookmarks
+- Local queue + retry policy
+- No metadata pull-back from Grimmory in current phase
 
----
+### Shelf Sync
 
-## Main Menu Overview
+- Regular shelf and Magic shelf sync
+- Optional separate Magic folder with safe move flow
+- Shared books (Regular + Magic) remain in shared/main folder
+- Local deletion safety with mapping/tombstone/retry tracking
 
-`Tools -> GrimmLink`
+### Maintenance & Recovery
+
+- Queue cleanup tools
+- Book info cache rebuild
+- Current-book repair actions
+- Redacted debug export
+- DB/pending counters summary
+
+## Menu Behavior
+
+### Reader Top Menu (GrimmLink tab)
+
+- GrimmLink tab is injected in Reader menu
+- Current default icon: `book.opened`
+
+### GrimmLink Top-Level Menu (context aware)
+
+When **no book is open**:
 
 - Enable GrimmLink
 - Connection
-- Sync Progress Now
+- Sync Pending Now
 - Sync Shelf Now
-- Sync Metadata Now
-- Pull Remote Progress
-- Manual Reading Status
-- Toggle Tracking (Current Book)
 - Advanced Setting
 - Status / About
 
-Notes:
+When **a book is open**:
 
-- `Preview Metadata` is under `Advanced Setting -> Metadata Sync`.
+- Enable GrimmLink
+- Sync Pending Now
+- Pull Remote Progress
+- Manual Reading Status
+- Sync Summary
 
----
+## Important Settings
 
-## GrimmLink vs KoSync
-
-KoSync is KOReader's baseline progress sync between devices.
-GrimmLink is an end-to-end Grimmory integration.
-
-| Topic | GrimmLink | KoSync |
+| Setting | Default | Description |
 |---|---|---|
-| Goal | Direct Grimmory integration | General KOReader progress sync |
-| Auth | `x-auth-user` + `x-auth-key` | KoSync auth model |
-| Progress push/pull | Yes | Yes |
-| Reading sessions | Yes | Usually no |
-| Metadata (rating/highlight/note/bookmark) | Yes (upload-only) | Usually no |
-| Shelf sync + file download | Yes (regular/magic/private ID) | No |
-| Manual reading status menu | Yes (backend capability aware) | No |
-| Maintenance queues/debug export | Yes | More limited |
-| Grimmory-specific API | Native | Not designed for Grimmory |
-
-Short version:
-
-- If you only need KOReader-to-KOReader position sync, KoSync may be enough.
-- If you need full Grimmory workflow (shelf + metadata + sessions + maintenance), use GrimmLink.
-
----
-
-## Installation
-
-1. Download `grimmlink.koplugin.zip` from the [latest release](https://github.com/0xstillb/GrimmLink/releases/latest).
-2. Extract it into KOReader `plugins/`.
-3. Restart KOReader.
-4. Open `Tools -> GrimmLink -> Connection`.
-5. Enter:
-   - Grimmory Local URL
-   - Home URL Nickname (optional)
-   - Grimmory Remote URL (optional)
-   - Remote URL Nickname (optional)
-   - Username
-   - Password
-6. Tap `Test Connection with Diagnostics`.
-
-Notes:
-
-- The plugin computes `x-auth-key` internally from your password.
-- Users do not need to provide token/bearer keys manually.
-- URL selection policy:
-  - Local-first policy (does not require SSID detection).
-  - Temporary remote fallback when recent local transport failure/cooldown is active.
-  - `Test Connection` disables fallback retry for the single test attempt to avoid long double waits.
-
----
+| `metadata_sync_enabled` | `false` | Enable metadata sync pipeline |
+| `sync_regular_shelf_enabled` | `false` | Enable Regular shelf sync |
+| `sync_magic_shelf_enabled` | `false` | Enable Magic shelf sync |
+| `use_separate_magic_download_dir` | `false` | Use a separate directory for Magic-only files |
+| `network_sync_cooldown_seconds` | `300` | Cooldown before next auto network sync |
+| `pending_shelf_removal_retry_cooldown_seconds` | `30` | Retry cooldown for pending shelf removals |
+| `auto_update_enabled` | `false` | Enable plugin auto-update checks |
 
 ## Required Grimmory API Endpoints
-
-GrimmLink expects these endpoints on the Grimmory backend:
 
 - `GET /api/koreader/users/auth`
 - `GET /api/koreader/books/by-hash/{hash}`
@@ -166,78 +120,20 @@ GrimmLink expects these endpoints on the Grimmory backend:
 - `POST /api/koreader/syncs/metadata`
 - `GET /api/koreader/shelves`
 - `GET /api/koreader/shelves/{type}/{id}/books`
-- `GET /api/koreader/shelves/{id}/books` (fallback path)
 - `POST /api/koreader/shelves/{type}/{id}/books/{bookId}/remove`
-- `POST /api/koreader/shelves/{id}/books/{bookId}/remove` (fallback path)
 - `GET /api/koreader/books/read-statuses`
 - `PUT /api/koreader/books/{bookId}/status`
 - `GET /api/koreader/books/{bookId}/pdf-progress`
 - `PUT /api/koreader/books/{bookId}/pdf-progress`
 
-Required request headers for authenticated endpoints:
+## Safety & Privacy
 
-- `x-auth-user`
-- `x-auth-key`
+- No password or raw `x-auth-key` in logs
+- No full payload dumps for sensitive content
+- Local destructive operations are confirmation-gated
+- GrimmLink does not delete files outside its managed local scope
 
----
-
-## Important Settings
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `metadata_sync_enabled` | `false` | Enable metadata sync |
-| `rating_sync_enabled` | `true` | Upload rating |
-| `annotations_sync_enabled` | `true` | Upload highlights/notes |
-| `bookmarks_sync_enabled` | `true` | Upload bookmarks |
-| `sync_regular_shelf_enabled` | `false` | Enable regular shelf sync |
-| `sync_magic_shelf_enabled` | `false` | Enable magic shelf sync |
-| `ask_wifi_before_sync` | `true` | Ask before Wi-Fi sync when currently offline |
-| `sync_on_network_connected` | `false` | Auto sync when network returns |
-| `network_sync_cooldown_seconds` | `300` | Prevent over-frequent sync |
-| `server_url` | `""` | Local URL (LAN / home network) |
-| `remote_url` | `""` | Remote URL (internet / proxy / VPN) |
-| `local_url_nickname` | `""` | Friendly name shown for Local target in connection test dialogs |
-| `remote_url_nickname` | `""` | Friendly name shown for Remote target in connection test dialogs |
-| `home_ssid` | `""` | Legacy field (no longer required for URL routing policy) |
-| `send_reflowable_percentage` | `true` | Internal guard: send reflowable percentage for display only (authoritative sync still uses KOReader-native location) |
-| `auto_update_enabled` | `false` | Enable auto updates |
-| `check_update_on_startup` | `false` | Check updates at KOReader startup |
-
----
-
-## Privacy / Logging Policy
-
-GrimmLink avoids writing sensitive data or full content into logs/debug export:
-
-- no password logs
-- no `x-auth-key` logs
-- no bearer/authorization token logs
-- no full `payload_json` dump
-- no full highlight/note content export
-
-Debug export focuses on counters, queue status, and safe diagnostic metadata.
-
----
-
-## Delete Policy
-
-- Only local files downloaded and tracked by GrimmLink can be deleted by GrimmLink.
-- If a book is still tracked by another shelf, GrimmLink will not delete that file.
-- Grimmory server/library files and records are never deleted.
-
----
-
-## Known Limitations
-
-- Metadata sync is upload-only.
-- Annotation/bookmark pull-back from Grimmory is not implemented yet.
-- Annotation/bookmark deletion sync is not implemented yet.
-- Some manual read statuses depend on backend capability.
-- EPUB web bridge / CFI conversion remains out of scope.
-
----
-
-## Project Structure
+## Plugin Structure
 
 ```text
 grimmlink.koplugin/
@@ -245,21 +141,30 @@ grimmlink.koplugin/
   grimmlink_api_client.lua
   grimmlink_database.lua
   grimmlink_shelf_sync.lua
+  grimmlink_pending_sync.lua
+  grimmlink_progress_sync.lua
+  grimmlink_matching.lua
+  grimmlink_deletion.lua
+  grimmlink_menu_actions.lua
+  grimmlink_util.lua
   grimmlink_updater.lua
+  grimmlink_metadata_extractor.lua
   plugin_version.lua
   _meta.lua
   test/
 ```
 
----
+## CI Expectations
 
-## Credits
+CI must pass before release:
 
-GrimmLink started from ideas in the BookLoreSync plugin and was extended to fit Grimmory workflows.
-
----
+- Lua syntax checks
+- Full test suite
+- Updater repo guard (`0xstillb/grimmlink`)
+- Legacy endpoint/naming guards
+- Secret logging guard
+- Plugin structure and packaging guards
 
 ## License
 
-See [LICENSE](LICENSE).
-
+MIT

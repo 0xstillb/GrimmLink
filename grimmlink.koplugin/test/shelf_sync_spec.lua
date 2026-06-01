@@ -134,7 +134,7 @@ describe("GrimmLink shelf sync download directory", function()
         assert.is_true(created_dirs["/storage/emulated/0/koreader/Book"])
     end)
 
-    it("prefers KOReader home_dir when auto download dir is used", function()
+    it("keeps DataStorage directory priority even when home_dir is set", function()
         _G.G_reader_settings = {
             readSetting = function(_, key)
                 if key == "home_dir" then
@@ -148,7 +148,7 @@ describe("GrimmLink shelf sync download directory", function()
         local sync = ShelfSync:new({}, {})
         local dir = sync:resolveDownloadDir("")
 
-        assert.are.equal("/storage/emulated/0/ReaderHome", dir)
+        assert.are.equal("/storage/emulated/0/koreader/Book", dir)
     end)
 
     it("keeps an explicit download directory unchanged", function()
@@ -329,6 +329,7 @@ describe("GrimmLink shelf sync download directory", function()
 
     it("moves only magic-only files into the separate magic directory", function()
         local updated_paths = {}
+        local deleted_cache_paths = {}
         local sync = ShelfSync:new({
             getMagicOnlyShelfMappings = function()
                 return {
@@ -373,6 +374,10 @@ describe("GrimmLink shelf sync download directory", function()
                 return true
             end,
         }, {})
+        sync.deleteFromBookInfoCache = function(_, local_path)
+            deleted_cache_paths[#deleted_cache_paths + 1] = local_path
+            return true
+        end
 
         mock_attrs["/shared"] = { mode = "directory" }
         mock_attrs["/magic"] = { mode = "directory" }
@@ -393,6 +398,8 @@ describe("GrimmLink shelf sync download directory", function()
         assert.is_nil(updated_paths[202])
         assert.is_not_nil(mock_attrs["/magic/Alpha.epub"])
         assert.is_not_nil(mock_attrs["/shared/Beta.epub"])
+        assert.are.equal(1, #deleted_cache_paths)
+        assert.are.equal("/shared/Alpha.epub", deleted_cache_paths[1])
     end)
 
     it("uses snapshot fast-path for unchanged large shelves (100/500/1000)", function()
