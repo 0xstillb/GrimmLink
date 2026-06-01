@@ -5,6 +5,18 @@
 ### Notes
 - Ongoing development branch.
 
+# [v1.4.7]
+
+### Features
+- Added `E-reader Friendly Mode` under `Advanced Setting > Tracking & Network` as a conservative network preset for e-reader sleep/resume workflows.
+
+### Improvements
+- Added network mode status to debug export and Tracking & Network menu.
+
+### Tests
+- Added menu and preset coverage for E-reader Friendly Mode.
+- Confirmed focused helper specs and full Lua spec suite pass locally.
+
 # [v1.4.6]
 
 ### Features

@@ -561,6 +561,7 @@ local function newPlugin(overrides)
         auto_pull_on_open = true,
         auto_push_on_close = true,
         offline_queue_enabled = true,
+        e_reader_friendly_mode = false,
         threshold_percent = 1.0,
         threshold_minutes = 5,
         threshold_pages = 5,
@@ -2056,6 +2057,10 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(device_menu)
         assert.is_not_nil(findMenuItemByContains(device_menu.sub_item_table, "Device Name:"))
         assert.is_not_nil(findMenuItemByContains(device_menu.sub_item_table, "Device ID:"))
+        local network_menu = findMenuItem(advanced_menu.sub_item_table, "Tracking & Network")
+        assert.is_not_nil(network_menu)
+        assert.is_not_nil(findMenuItemByContains(network_menu.sub_item_table, "Network Mode:"))
+        assert.is_not_nil(findMenuItem(network_menu.sub_item_table, "E-reader Friendly Mode"))
 
         local shelf_menu = findMenuItem(advanced_menu.sub_item_table, "Shelf Sync Settings")
         assert.is_not_nil(shelf_menu)
@@ -2104,6 +2109,45 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("Kindle PW5", plugin.db.settings.device_name)
         assert.are.equal("kindle-pw5-main", plugin.db.settings.device_id)
         assert.are.equal(2, message_count)
+    end)
+
+    it("applies E-reader Friendly Mode as a conservative network preset", function()
+        local plugin = newPlugin({
+            offline_queue_enabled = false,
+            ask_wifi_before_sync = false,
+            sync_on_network_connected = false,
+            network_sync_cooldown_seconds = 10,
+            auto_sync_shelf_on_resume = true,
+            auto_pull_on_open = false,
+            auto_push_on_close = false,
+        })
+        local messages = {}
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+
+        assert.are.equal("Custom", plugin:getNetworkModeLabel())
+        plugin:applyEreaderFriendlyMode()
+
+        assert.is_true(plugin.offline_queue_enabled)
+        assert.is_true(plugin.ask_wifi_before_sync)
+        assert.is_true(plugin.sync_on_network_connected)
+        assert.are.equal(300, plugin.network_sync_cooldown_seconds)
+        assert.is_false(plugin.auto_sync_shelf_on_resume)
+        assert.is_true(plugin.auto_pull_on_open)
+        assert.is_true(plugin.auto_push_on_close)
+        assert.is_true(plugin:isEreaderFriendlyModeActive())
+        assert.are.equal("E-reader Friendly", plugin:getNetworkModeLabel())
+        assert.are.equal(true, plugin.db.settings.e_reader_friendly_mode)
+        assert.are.equal("E-reader Friendly Mode enabled", messages[1])
+
+        plugin:disableEreaderFriendlyMode()
+
+        assert.is_false(plugin.e_reader_friendly_mode)
+        assert.is_false(plugin:isEreaderFriendlyModeActive())
+        assert.are.equal("Custom", plugin:getNetworkModeLabel())
+        assert.is_true(plugin.sync_on_network_connected)
+        assert.are.equal(false, plugin.db.settings.e_reader_friendly_mode)
     end)
 
     it("asks to move files back when disabling separate magic folder", function()

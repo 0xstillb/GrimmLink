@@ -77,6 +77,7 @@ local DEFAULTS = {
     auto_pull_on_open = true,
     auto_push_on_close = true,
     offline_queue_enabled = true,
+    e_reader_friendly_mode = false,
     auto_sync_cooldown_seconds = 300,
     ask_wifi_before_sync = true,
     sync_on_network_connected = false,
@@ -122,6 +123,16 @@ local DEFAULTS = {
     bookmarks_sync_enabled = true,
     metadata_retry_max = 5,
     send_reflowable_percentage = true,
+}
+
+local E_READER_FRIENDLY_PRESET = {
+    offline_queue_enabled = true,
+    ask_wifi_before_sync = true,
+    sync_on_network_connected = true,
+    network_sync_cooldown_seconds = 300,
+    auto_sync_shelf_on_resume = false,
+    auto_pull_on_open = true,
+    auto_push_on_close = true,
 }
 
 local DISK_SPACE_SAFETY_MARGIN_BYTES = 20 * 1024 * 1024
@@ -1381,6 +1392,38 @@ function Grimmlink:configureDeviceId()
         self:saveSetting("device_id", normalized)
         self:showMessage(_("Device ID saved"), 2)
     end)
+end
+
+function Grimmlink:isEreaderFriendlyModeActive()
+    if self.e_reader_friendly_mode ~= true then
+        return false
+    end
+    for key, value in pairs(E_READER_FRIENDLY_PRESET) do
+        if self[key] ~= value then
+            return false
+        end
+    end
+    return true
+end
+
+function Grimmlink:getNetworkModeLabel()
+    if self:isEreaderFriendlyModeActive() then
+        return _("E-reader Friendly")
+    end
+    return _("Custom")
+end
+
+function Grimmlink:applyEreaderFriendlyMode()
+    for key, value in pairs(E_READER_FRIENDLY_PRESET) do
+        self:saveSetting(key, value)
+    end
+    self:saveSetting("e_reader_friendly_mode", true)
+    self:showMessage(_("E-reader Friendly Mode enabled"), 3)
+end
+
+function Grimmlink:disableEreaderFriendlyMode()
+    self:saveSetting("e_reader_friendly_mode", false)
+    self:showMessage(_("E-reader Friendly Mode disabled"), 3)
 end
 
 function Grimmlink:isOnline()
@@ -2688,6 +2731,7 @@ function Grimmlink:buildDebugInfo(context)
         T(_("last_connection_error_message_safe: %1"), safeToString(self.last_connection_error_message_safe)),
         T(_("last_connection_test_at: %1"), formatTimestamp(self.last_connection_test_at)),
         T(_("last_connection_test_result: %1"), safeToString(self.last_connection_test_result)),
+        T(_("network_mode: %1"), self:getNetworkModeLabel()),
         T(_("network_sync_cooldown_seconds: %1"), tonumber(self.network_sync_cooldown_seconds) or DEFAULTS.network_sync_cooldown_seconds),
         T(
             _("pending_shelf_removal_retry_cooldown_seconds: %1"),
@@ -7434,6 +7478,7 @@ function Grimmlink:init()
     self.auto_pull_on_open = self:readSetting("auto_pull_on_open", DEFAULTS.auto_pull_on_open)
     self.auto_push_on_close = self:readSetting("auto_push_on_close", DEFAULTS.auto_push_on_close)
     self.offline_queue_enabled = self:readSetting("offline_queue_enabled", DEFAULTS.offline_queue_enabled)
+    self.e_reader_friendly_mode = self:readSetting("e_reader_friendly_mode", DEFAULTS.e_reader_friendly_mode)
     self.auto_sync_cooldown_seconds = DEFAULTS.auto_sync_cooldown_seconds
     self.ask_wifi_before_sync = self:readSetting("ask_wifi_before_sync", DEFAULTS.ask_wifi_before_sync)
     self.sync_on_network_connected = self:readSetting("sync_on_network_connected", DEFAULTS.sync_on_network_connected)
@@ -8076,6 +8121,26 @@ function Grimmlink:addToMainMenu(menu_items)
                     {
                         text = _("Tracking & Network"),
                         sub_item_table = {
+                            {
+                                text_func = function()
+                                    return T(_("Network Mode: %1"), self:getNetworkModeLabel())
+                                end,
+                                keep_menu_open = true,
+                                callback = function() end,
+                            },
+                            {
+                                text = _("E-reader Friendly Mode"),
+                                help_text = _("Queue offline progress, ask before enabling Wi-Fi, and sync pending items only when network/resume timing is safe."),
+                                keep_menu_open = true,
+                                checked_func = function() return self:isEreaderFriendlyModeActive() end,
+                                callback = function()
+                                    if self:isEreaderFriendlyModeActive() then
+                                        self:disableEreaderFriendlyMode()
+                                    else
+                                        self:applyEreaderFriendlyMode()
+                                    end
+                                end,
+                            },
                             {
                                 text = _("Ask Wi-Fi Before Manual Sync"),
                                 keep_menu_open = true,
