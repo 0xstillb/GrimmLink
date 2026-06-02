@@ -61,6 +61,7 @@ local function newDb()
         pending_sessions = {},
         pending_metadata_items = {},
         synced_metadata_items = {},
+        historical_import_sessions = {},
         book_cache_calls = {},
     }
 
@@ -237,6 +238,35 @@ local function newDb()
             end
         end
         return false
+    end
+
+    function db:markHistoricalSessionImported(book_hash, start_time, end_time, device_id)
+        local key = table.concat({
+            tostring(book_hash or ""),
+            tostring(start_time or ""),
+            tostring(end_time or ""),
+            tostring(device_id or ""),
+        }, "|")
+        self.historical_import_sessions[key] = true
+        return true
+    end
+
+    function db:isHistoricalSessionImported(book_hash, start_time, end_time, device_id)
+        local key = table.concat({
+            tostring(book_hash or ""),
+            tostring(start_time or ""),
+            tostring(end_time or ""),
+            tostring(device_id or ""),
+        }, "|")
+        return self.historical_import_sessions[key] == true
+    end
+
+    function db:getHistoricalImportCount()
+        local count = 0
+        for _ in pairs(self.historical_import_sessions) do
+            count = count + 1
+        end
+        return count
     end
 
     function db:upsertPendingMetadataItem(item)
@@ -625,6 +655,23 @@ local function newPlugin(overrides)
     end
 
     return setmetatable(plugin, { __index = Grimmlink })
+end
+
+local function newDocSettings(initial)
+    local store = initial or {}
+    return {
+        readSetting = function(self, key)
+            return self._store[key]
+        end,
+        saveSetting = function(self, key, value)
+            self._store[key] = value
+            return true
+        end,
+        flush = function(self)
+            self.flushed = true
+        end,
+        _store = store,
+    }
 end
 
 describe("GrimmLink helper methods", function()
@@ -1625,6 +1672,224 @@ describe("GrimmLink helper methods", function()
         assert.is_true(dialog.text:find("last_connection_error_category:", 1, true) ~= nil)
     end)
 
+    it("builds a settings backup payload from current plugin settings", function()
+        local plugin = newPlugin({
+            remote_url = "https://example.com",
+            local_url_nickname = "Home API",
+            metadata_sync_enabled = true,
+            first_run_setup_completed = true,
+        })
+
+        local payload = plugin:buildSettingsBackupPayload()
+
+        assert.are.equal(1, payload.schemaVersion)
+        assert.are.equal("GrimmLink", payload.plugin)
+        assert.are.equal("http://example.com", payload.settings.server_url)
+        assert.are.equal("https://example.com", payload.settings.remote_url)
+        assert.are.equal("Home API", payload.settings.local_url_nickname)
+        assert.are.equal(true, payload.settings.metadata_sync_enabled)
+        assert.are.equal(true, payload.settings.first_run_setup_completed)
+    end)
+
+    it("uses the KOReader settings backup folder as the default export and restore path", function()
+        local plugin = newPlugin()
+
+        assert.are.equal(
+            "/tmp/Grimmlink-setting-backup",
+            plugin:getSettingsBackupDirectory()
+        )
+        assert.are.equal(
+            "/tmp/Grimmlink-setting-backup/grimmlink-settings-backup.json",
+            plugin:getSettingsBackupPath()
+        )
+    end)
+
+    it("uses a dedicated KOReader diagnostics folder and redacts sensitive values in the bundle", function()
+        local plugin = newPlugin({
+            remote_url = "https://grimmory.example.com",
+            home_ssid = "HomeWifi",
+            current_session = {
+                file_path = "/books/demo.epub",
+                file_hash = "hash-1234567890",
+                book_id = 44,
+                book_file_id = 55,
+            },
+        })
+        plugin.file_logger = {
+            getLogPath = function()
+                return "/tmp/grimmlink.log"
+            end,
+        }
+        NetworkMgr.getCurrentNetwork = function()
+            return { ssid = "CafeWifi" }
+        end
+        plugin.db.pending_progress = {
+            { id = 1, file_hash = "hash-1234567890", kind = "native" },
+        }
+        plugin.db.pending_sessions = {
+            { id = 1, bookHash = "hash-1234567890" },
+        }
+        plugin.db.pending_metadata_items = {
+            { id = 1, file_hash = "hash-1234567890", item_type = "rating", dedupe_key = "r1" },
+        }
+
+        assert.are.equal("/tmp/Grimmlink-diagnostics", plugin:getLocalDiagnosticsBundleDirectory())
+        assert.are.equal(
+            "/tmp/Grimmlink-diagnostics/grimmlink-diagnostics-bundle.json",
+            plugin:getLocalDiagnosticsBundlePath()
+        )
+
+        local bundle = plugin:buildLocalDiagnosticsBundle()
+
+        assert.are.equal(1, bundle.schemaVersion)
+        assert.are.equal("GrimmLink", bundle.plugin)
+        assert.are.equal("(redacted)", bundle.settings.password)
+        assert.are.equal("re...", bundle.settings.username)
+        assert.is_true(type(bundle.connection.home_ssid) == "string" and bundle.connection.home_ssid ~= "HomeWifi")
+        assert.is_true(type(bundle.connection.current_ssid) == "string" and bundle.connection.current_ssid ~= "CafeWifi")
+        assert.are.equal(1, bundle.database.pending_progress)
+        assert.are.equal(1, bundle.database.pending_sessions)
+        assert.are.equal(1, bundle.database.pending_metadata)
+        assert.are.equal("/tmp/grimmlink.log", bundle.files.log_path)
+    end)
+
+    it("applies a settings backup payload and marks setup complete", function()
+        local plugin = newPlugin({
+            server_url = "",
+            username = "",
+            password = "",
+            first_run_setup_completed = false,
+        })
+
+        local ok, restored = plugin:applySettingsBackupPayload({
+            settings = {
+                server_url = "http://192.168.1.55:6060",
+                username = "new-reader",
+                password = "new-secret",
+                device_name = "Kindle PW5",
+                e_reader_friendly_mode = true,
+            },
+        })
+
+        assert.is_true(ok)
+        assert.are.equal(5, restored)
+        assert.are.equal("http://192.168.1.55:6060", plugin.server_url)
+        assert.are.equal("new-reader", plugin.username)
+        assert.are.equal("new-secret", plugin.password)
+        assert.are.equal("Kindle PW5", plugin.device_name)
+        assert.are.equal(true, plugin.db.settings.first_run_setup_completed)
+        assert.are.equal(false, plugin.db.settings.first_run_setup_dismissed)
+    end)
+
+    it("shows the first-run setup prompt when connection is not configured", function()
+        local plugin = newPlugin({
+            server_url = "",
+            username = "",
+            password = "",
+            first_run_setup_completed = false,
+            first_run_setup_dismissed = false,
+        })
+
+        local shown = plugin:maybePromptFirstRunSetup()
+
+        assert.is_true(shown)
+        local dialog = UIManager.getLastShown()
+        assert.is_not_nil(dialog)
+        assert.is_true(dialog.text:find("first%-time setup wizard", 1) ~= nil)
+    end)
+
+    it("runs the first-run setup wizard and saves core settings", function()
+        local plugin = newPlugin({
+            server_url = "",
+            username = "",
+            password = "",
+            first_run_setup_completed = false,
+        })
+        local prompts = {
+            ["Local URL (home network)"] = "http://192.168.1.20:6060",
+            ["KOReader Username"] = "reader-one",
+            ["Password"] = "secret-one",
+            ["Device Name"] = "Bedroom Kindle",
+        }
+        local tested_connection = false
+        plugin.showTextInput = function(_, title, current_value, _, _, on_save)
+            assert.is_not_nil(prompts[title], "unexpected prompt: " .. tostring(title))
+            on_save(prompts[title])
+        end
+        plugin.showChoiceAction = function(_, _, ok_text, cancel_text, on_confirm, _)
+            assert.are.equal("Enable", ok_text)
+            assert.are.equal("Skip", cancel_text)
+            on_confirm()
+        end
+        plugin.promptTestConnectionAfterSetup = function()
+            tested_connection = true
+        end
+
+        plugin:runFirstRunSetupWizard()
+
+        assert.are.equal("http://192.168.1.20:6060", plugin.server_url)
+        assert.are.equal("reader-one", plugin.username)
+        assert.are.equal("secret-one", plugin.password)
+        assert.are.equal("Bedroom Kindle", plugin.device_name)
+        assert.is_true(plugin.e_reader_friendly_mode)
+        assert.is_true(plugin.first_run_setup_completed)
+        assert.is_true(tested_connection)
+    end)
+
+    it("groups KOReader page_stat rows into historical reading sessions using the idle gap threshold", function()
+        local plugin = newPlugin()
+
+        local groups = plugin:groupHistoricalPageStats({
+            { file_hash = "hash-1", title = "Book A", page = 10, start_time = 1000, duration = 120, total_pages = 100 },
+            { file_hash = "hash-1", title = "Book A", page = 12, start_time = 1120, duration = 180, total_pages = 100 },
+            { file_hash = "hash-1", title = "Book A", page = 20, start_time = 1800, duration = 60, total_pages = 100 },
+            { file_hash = "hash-2", title = "Book B", page = 5, start_time = 2000, duration = 90, total_pages = 50 },
+        }, 300)
+
+        assert.are.equal(3, #groups)
+        assert.are.equal("hash-1", groups[1].file_hash)
+        assert.are.equal(10, groups[1].start_page)
+        assert.are.equal(12, groups[1].end_page)
+        assert.are.equal(300, groups[1].duration_seconds)
+        assert.are.equal(20, groups[2].start_page)
+        assert.are.equal("hash-2", groups[3].file_hash)
+    end)
+
+    it("imports historical sessions into the existing pending queue and skips duplicates on rerun", function()
+        local plugin = newPlugin()
+        plugin.resolveBookByHash = function(_, _, file_hash)
+            if file_hash == "hash-1" then
+                return { book_id = 123 }
+            end
+            return nil
+        end
+        plugin.loadHistoricalPageStatsFromPath = function()
+            return {
+                { file_hash = "hash-1", title = "Book A", page = 10, start_time = 1000, duration = 120, total_pages = 100 },
+                { file_hash = "hash-1", title = "Book A", page = 12, start_time = 1120, duration = 180, total_pages = 100 },
+                { file_hash = "hash-2", title = "Book B", page = 20, start_time = 2000, duration = 240, total_pages = 200 },
+            }
+        end
+        local messages = {}
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+
+        local ok_first = plugin:importHistoricalSessionsFromPath("/tmp/statistics.sqlite3")
+        local first_count = #plugin.db.pending_sessions
+        local first_markers = plugin.db:getHistoricalImportCount()
+        local ok_second = plugin:importHistoricalSessionsFromPath("/tmp/statistics.sqlite3")
+
+        assert.is_true(ok_first)
+        assert.is_true(ok_second)
+        assert.are.equal(2, first_count)
+        assert.are.equal(2, first_markers)
+        assert.are.equal(2, #plugin.db.pending_sessions)
+        assert.is_true(plugin.db.pending_sessions[1].bookId == 123)
+        assert.is_true(plugin.db.pending_sessions[2].bookId == nil)
+        assert.is_true(messages[#messages]:find("Skipped duplicates: 2", 1, true) ~= nil)
+    end)
+
     it("keeps local URL regardless of SSID when local is configured", function()
         local plugin = newPlugin()
         plugin.server_url = "http://192.168.1.100:6060"
@@ -2035,6 +2300,8 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(status_menu)
         local connection_menu = findMenuItem(top, "Connection")
         assert.is_not_nil(connection_menu)
+        local wizard_item = findMenuItem(connection_menu.sub_item_table, "First Run Setup Wizard")
+        assert.is_not_nil(wizard_item)
         local setup_item = findMenuItem(connection_menu.sub_item_table, "Setup Connection")
         assert.is_not_nil(setup_item)
         local local_nickname_item = findMenuItem(connection_menu.sub_item_table, "Home URL Nickname")
@@ -2049,6 +2316,11 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(password_item)
         local advanced_menu = findMenuItem(top, "Advanced Setting")
         assert.is_not_nil(advanced_menu)
+        local setup_backup_menu = findMenuItem(advanced_menu.sub_item_table, "Setup & Backup")
+        assert.is_not_nil(setup_backup_menu)
+        assert.is_not_nil(findMenuItem(setup_backup_menu.sub_item_table, "Run First Setup Wizard"))
+        assert.is_not_nil(findMenuItem(setup_backup_menu.sub_item_table, "Export Settings Backup"))
+        assert.is_not_nil(findMenuItem(setup_backup_menu.sub_item_table, "Restore Settings Backup"))
         local metadata_menu = findMenuItem(advanced_menu.sub_item_table, "Metadata Sync")
         assert.is_not_nil(metadata_menu)
         local preview_item = findMenuItem(metadata_menu.sub_item_table, "Preview Metadata")
@@ -2212,9 +2484,11 @@ describe("GrimmLink helper methods", function()
         local menu = {}
         plugin:addToMainMenu(menu)
         local top = menu.grimmlink.sub_item_table
+        local completion_item = findMenuItem(top, "Reading Completion")
         local pull_item = findMenuItem(top, "Pull Remote Progress")
         local manual_status_item = findMenuItem(top, "Manual Reading Status")
         local toggle_item = findMenuItem(top, "Toggle Tracking (Current Book)")
+        assert.is_nil(completion_item)
         assert.is_nil(pull_item)
         assert.is_nil(manual_status_item)
         assert.is_nil(toggle_item)
@@ -2229,10 +2503,291 @@ describe("GrimmLink helper methods", function()
         local menu = {}
         plugin:addToMainMenu(menu)
         local top = menu.grimmlink.sub_item_table
+        local completion_item = findMenuItem(top, "Reading Completion")
         local pull_item = findMenuItem(top, "Pull Remote Progress")
         local manual_status_item = findMenuItem(top, "Manual Reading Status")
+        assert.is_not_nil(completion_item)
         assert.is_not_nil(pull_item)
         assert.is_not_nil(manual_status_item)
+    end)
+
+    it("saves an exact 1-10 rating into doc settings and queues metadata for the current book", function()
+        local plugin = newPlugin()
+        plugin.ui.doc_settings = newDocSettings({
+            summary = { rating = 2 },
+        })
+        local messages = {}
+        plugin.showMessage = function(_, text)
+            messages[#messages + 1] = text
+        end
+        plugin.extractAndQueueCurrentMetadata = function(_, reason, context)
+            assert.are.equal("reading-completion-rating", reason)
+            assert.are.equal("/books/demo.epub", context.file_path)
+            return {
+                queued = { queued = 1, failed = 0 },
+            }
+        end
+
+        local ok = plugin:setCurrentBookRating(7)
+
+        assert.is_true(ok)
+        assert.are.equal(4, plugin.ui.doc_settings._store.summary.rating)
+        assert.are.same({
+            value = 7,
+            scale = 10,
+            summary_rating = 4,
+        }, plugin.ui.doc_settings._store.grimmlink_rating_state)
+        assert.is_true(plugin.ui.doc_settings.flushed == true)
+        assert.is_true(messages[1]:find("Rating saved", 1, true) ~= nil)
+        assert.is_true(messages[1]:find("7/10", 1, true) ~= nil)
+    end)
+
+    it("builds a 10-scale metadata payload for exact Reading Completion ratings", function()
+        local plugin = newPlugin()
+        local payload = plugin:buildMetadataRatingPayload({
+            dedupe_key = "hash-1:rating:7",
+        }, {
+            rating = 7,
+            ratingScale = 10,
+            datetime = "2026-06-02T10:00:00Z",
+        })
+
+        assert.are.same({
+            dedupeKey = "hash-1:rating:7",
+            value = 7,
+            scale = 10,
+            source = "koreader",
+            updatedAt = "2026-06-02T10:00:00Z",
+        }, payload)
+    end)
+
+    it("changes the rating dedupe key when the exact 1-10 score changes", function()
+        local plugin = newPlugin()
+        local dedupe_a = plugin:buildMetadataDedupeKey("hash-1", "rating", {
+            rating = 7,
+            ratingScale = 10,
+        })
+        local dedupe_b = plugin:buildMetadataDedupeKey("hash-1", "rating", {
+            rating = 8,
+            ratingScale = 10,
+        })
+
+        assert.are.equal("hash-1:rating:7", dedupe_a)
+        assert.are.equal("hash-1:rating:8", dedupe_b)
+        assert.are_not.equal(dedupe_a, dedupe_b)
+    end)
+
+    it("shows Reading Completion menu with finish, mark as read, rating, and cancel actions", function()
+        local plugin = newPlugin()
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            book_id = 123,
+        }
+        plugin.buildManualReadStatusActions = function()
+            return {
+                { backend = "READ", label = "Mark as Read" },
+                { backend = "READING", label = "Mark as Reading" },
+            }
+        end
+
+        plugin:showReadingCompletionMenu()
+
+        local dialog = UIManager.getLastShown()
+        assert.is_not_nil(dialog)
+        assert.are.equal("Reading Completion", dialog.title)
+        assert.are.equal("Finish & Sync Now", dialog.buttons[1][1].text)
+        assert.are.equal("Mark as Read", dialog.buttons[2][1].text)
+        assert.are.equal("Set Rating", dialog.buttons[3][1].text)
+        assert.are.equal("Cancel", dialog.buttons[4][1].text)
+    end)
+
+    it("shows Reading Completion from a close-book context even after the session is cleared", function()
+        local plugin = newPlugin()
+        plugin.current_session = nil
+        plugin.buildManualReadStatusActions = function()
+            return {
+                { backend = "READ", label = "Mark as Read" },
+            }
+        end
+
+        plugin:showReadingCompletionMenu({
+            context = {
+                file_path = "/books/demo.epub",
+                file_hash = "hash-1",
+                book_id = 123,
+            },
+        })
+
+        local dialog = UIManager.getLastShown()
+        assert.is_not_nil(dialog)
+        assert.are.equal("Reading Completion", dialog.title)
+        assert.are.equal("Finish & Sync Now", dialog.buttons[1][1].text)
+    end)
+
+    it("prompts for Reading Completion once per completion cycle after closing a near-finished book", function()
+        local plugin = newPlugin()
+        plugin.ui.doc_settings = newDocSettings({})
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-1",
+            book_id = 123,
+            book_file_id = 456,
+            start_time = os.time() - 60,
+            start_snapshot = { percentage = 94.0, currentPage = 94 },
+            book_type = "EPUB",
+            tracking_enabled = true,
+        }
+        plugin.buildManualReadStatusActions = function()
+            return {
+                { backend = "READ", label = "Mark as Read" },
+            }
+        end
+        plugin.validateSession = function()
+            return true
+        end
+        plugin.getCurrentProgressSnapshot = function()
+            return {
+                file_path = "/books/demo.epub",
+                bookHash = "hash-1",
+                bookId = 123,
+                bookFileId = 456,
+                fileFormat = "EPUB",
+                percentage = 99.2,
+                currentPage = 99,
+                totalPages = 100,
+                progress = "/99",
+                location = "/99",
+                timestamp = os.time(),
+            }
+        end
+        plugin.shouldPushProgress = function()
+            return false
+        end
+        plugin.isOnline = function()
+            return false
+        end
+        plugin.extractAndQueueCurrentMetadata = function()
+            return { queued = { queued = 0, failed = 0 } }
+        end
+
+        plugin:endSession({ reason = "close" })
+
+        local dialog = UIManager.getLastShown()
+        assert.is_not_nil(dialog)
+        assert.are.equal("Reading Completion", dialog.title)
+        assert.is_true(plugin.ui.doc_settings._store.grimmlink_reading_completion_prompt.prompted)
+
+        UIManager:reset()
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-1",
+            book_id = 123,
+            book_file_id = 456,
+            start_time = os.time() - 60,
+            start_snapshot = { percentage = 98.0, currentPage = 98 },
+            book_type = "EPUB",
+            tracking_enabled = true,
+        }
+
+        plugin:endSession({ reason = "close" })
+
+        assert.is_nil(UIManager.getLastShown())
+    end)
+
+    it("prompts for Reading Completion after KOReader end-of-book dialog is dismissed", function()
+        local plugin = newPlugin()
+        plugin.ui.doc_settings = newDocSettings({})
+        plugin.current_session = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-1",
+            book_id = 123,
+            book_file_id = 456,
+            start_time = os.time() - 60,
+            start_snapshot = { percentage = 94.0, currentPage = 94 },
+            book_type = "EPUB",
+            tracking_enabled = true,
+        }
+        plugin.buildManualReadStatusActions = function()
+            return {
+                { backend = "READ", label = "Mark as Read" },
+            }
+        end
+        local top_widget_checks = 0
+        plugin.getCurrentProgressSnapshot = function()
+            return {
+                file_path = "/books/demo.epub",
+                bookHash = "hash-1",
+                bookId = 123,
+                bookFileId = 456,
+                fileFormat = "EPUB",
+                percentage = 100,
+                currentPage = 100,
+                totalPages = 100,
+                progress = "/100",
+                location = "/100",
+                timestamp = os.time(),
+            }
+        end
+        local original_get_topmost = UIManager.getTopmostVisibleWidget
+        UIManager.getTopmostVisibleWidget = function()
+            top_widget_checks = top_widget_checks + 1
+            if top_widget_checks == 1 then
+                return { name = "end_document" }
+            end
+            return nil
+        end
+
+        plugin:onEndOfBook()
+
+        UIManager.getTopmostVisibleWidget = original_get_topmost
+
+        local dialog = UIManager.getLastShown()
+        assert.is_not_nil(dialog)
+        assert.are.equal("Reading Completion", dialog.title)
+        assert.is_true(plugin.ui.doc_settings._store.grimmlink_reading_completion_prompt.prompted)
+        assert.is_true(top_widget_checks >= 2)
+    end)
+
+    it("waits for KOReader end-of-book dialog to disappear before showing Reading Completion", function()
+        local plugin = newPlugin()
+        local original_get_topmost = UIManager.getTopmostVisibleWidget
+        local seen = 0
+        UIManager.getTopmostVisibleWidget = function()
+            seen = seen + 1
+            if seen <= 3 then
+                return { name = "end_document" }
+            end
+            return nil
+        end
+        local called = 0
+
+        plugin:waitForKoreaderEndOfBookUi(function()
+            called = called + 1
+        end, 0)
+
+        UIManager.getTopmostVisibleWidget = original_get_topmost
+
+        assert.are.equal(1, called)
+        assert.are.equal(4, seen)
+    end)
+
+    it("resets the completion prompt state after progress drops below the reread threshold", function()
+        local plugin = newPlugin()
+        plugin.ui.doc_settings = newDocSettings({
+            grimmlink_reading_completion_prompt = {
+                prompted = true,
+                progress_percentage = 99.2,
+            },
+        })
+
+        local should_prompt = plugin:shouldShowReadingCompletionPrompt({
+            file_path = "/books/demo.epub",
+            file_hash = "hash-1",
+            book_id = 123,
+        }, 80)
+
+        assert.is_false(should_prompt)
+        assert.is_false(plugin.ui.doc_settings._store.grimmlink_reading_completion_prompt.prompted)
     end)
 
     it("registers long-press file actions via FileManager file dialog buttons API", function()

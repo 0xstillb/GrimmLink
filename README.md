@@ -10,6 +10,10 @@ GrimmLink is designed specifically for Grimmory workflows: reading sync, session
 - Reading session sync with retry queues
 - Metadata upload sync (rating/highlights/notes/bookmarks)
 - Shelf sync (Regular + Magic) with safe local file handling
+- First-run setup wizard for core connection/device onboarding
+- Settings backup/restore for GrimmLink configuration
+- Historical import from KOReader `statistics.sqlite3`
+- Local diagnostics bundle export with redacted secrets
 - Queue/DB maintenance and debug export tools
 
 ## Quick Start
@@ -69,6 +73,8 @@ No Bearer token is required.
 - Book info cache rebuild
 - Current-book repair actions
 - Redacted debug export
+- Historical KOReader session import
+- Local diagnostics bundle export
 - DB/pending counters summary
 
 ## Menu Behavior
@@ -92,10 +98,48 @@ When **no book is open**:
 When **a book is open**:
 
 - Enable GrimmLink
+- Reading Completion
 - Sync Pending Now
 - Pull Remote Progress
 - Manual Reading Status
 - Sync Summary
+
+### First-Time Setup
+
+- `Connection > First Run Setup Wizard` guides the minimum recommended setup
+- Covers local Grimmory URL, KOReader username, password, device name, and optional `E-reader Friendly Mode`
+- GrimmLink prompts once on fresh installs that do not have a working connection configured yet
+
+### Settings Backup
+
+- `Advanced Setting > Setup & Backup > Export Settings Backup` writes a snapshot to `KOReader/settings/Grimmlink-setting-backup/grimmlink-settings-backup.json`
+- `Advanced Setting > Setup & Backup > Restore Settings Backup` defaults to the same `KOReader/settings/Grimmlink-setting-backup` location
+- The backup includes connection credentials, so treat the file as sensitive
+
+### Historical Import
+
+- `Maintenance > Quick Actions > Import KOReader Reading History` reads KOReader's `statistics.sqlite3`
+- Default path is `KOReader/settings/statistics.sqlite3`, but you can edit the path before import
+- Imported history is grouped into reading sessions and queued through GrimmLink's normal `pending_sessions` pipeline
+- GrimmLink keeps a local import-history dedupe record so rerunning the same import does not requeue the same sessions again
+- Import does not overwrite the current live reading position; it only prepares past sessions for later sync
+
+### Local Diagnostics Bundle
+
+- `Status / About > Export Local Diagnostics Bundle` writes a JSON support bundle to `KOReader/settings/Grimmlink-diagnostics/grimmlink-diagnostics-bundle.json`
+- The same export is also available from `Maintenance > Quick Actions`
+- Includes plugin version, redacted settings snapshot, queue/database counters, connection state, and current-book context
+- Passwords are redacted; usernames, URLs, SSIDs, and device IDs are reduced to safe previews
+
+### Reading Completion Flow
+
+- `Reading Completion` opens a current-book action menu while reading
+- When KOReader fires its end-of-book flow, GrimmLink waits for KOReader's own `end of document` dialog to close before showing its completion menu
+- When a book closes at `99%+` without going through that end-of-book flow, GrimmLink keeps a close-book fallback prompt
+- Includes `Finish & Sync Now`, `Mark as Read`, `Set Rating`, and `Cancel`
+- `Set Rating` uses a `1-10` completion score and mirrors it back into KOReader's local `1-5` star summary so the local reading UI still stays in sync
+- Uses existing manual read-status support when the backend exposes `READ`
+- The close-book prompt is `once per completion cycle` on the device and resets automatically if progress later drops below `95%` during a reread
 
 ## Important Settings
 
@@ -142,16 +186,26 @@ When **a book is open**:
 grimmlink.koplugin/
   main.lua
   grimmlink_api_client.lua
+  grimmlink_connection_controller.lua
+  grimmlink_constants.lua
   grimmlink_database.lua
-  grimmlink_shelf_sync.lua
+  grimmlink_deletion.lua
+  grimmlink_diagnostics_controller.lua
+  grimmlink_file_logger.lua
+  grimmlink_filemanager_actions.lua
+  grimmlink_magic_shelf_controller.lua
+  grimmlink_matching.lua
+  grimmlink_menu_actions.lua
+  grimmlink_menu_builder.lua
+  grimmlink_metadata_controller.lua
+  grimmlink_metadata_extractor.lua
   grimmlink_pending_sync.lua
   grimmlink_progress_sync.lua
-  grimmlink_matching.lua
-  grimmlink_deletion.lua
-  grimmlink_menu_actions.lua
-  grimmlink_util.lua
+  grimmlink_reading_completion_controller.lua
+  grimmlink_settings_controller.lua
+  grimmlink_shelf_sync.lua
   grimmlink_updater.lua
-  grimmlink_metadata_extractor.lua
+  grimmlink_util.lua
   plugin_version.lua
   _meta.lua
   test/

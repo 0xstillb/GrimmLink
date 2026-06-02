@@ -95,6 +95,7 @@ describe("GrimmLink database helpers", function()
         assert.is_true(joined:find("pending_metadata_items", 1, true) ~= nil)
         assert.is_true(joined:find("synced_metadata_items", 1, true) ~= nil)
         assert.is_true(joined:find("book_tracking_state", 1, true) ~= nil)
+        assert.is_true(joined:find("historical_import_sessions", 1, true) ~= nil)
     end)
 
     it("supports metadata queue helpers", function()
@@ -192,21 +193,21 @@ describe("GrimmLink database helpers", function()
             book_id = 12,
             book_file_id = 34,
             item_type = "rating",
-            dedupe_key = "hash-1:rating",
+            dedupe_key = "hash-1:rating:5",
             payload_json = "{\"rating\":5}",
         }))
         local rows = db:getPendingMetadataItems(10)
         assert.are.equal(1, #rows)
-        assert.are.equal("hash-1:rating", rows[1].dedupe_key)
+        assert.are.equal("hash-1:rating:5", rows[1].dedupe_key)
         assert.are.equal(1, db:getPendingMetadataCount())
 
         assert.is_true(db:markMetadataItemSynced({
             file_hash = "hash-1",
             book_id = 12,
             item_type = "rating",
-            dedupe_key = "hash-1:rating",
+            dedupe_key = "hash-1:rating:5",
         }))
-        assert.is_true(db:isMetadataItemSynced("hash-1", "rating", "hash-1:rating"))
+        assert.is_true(db:isMetadataItemSynced("hash-1", "rating", "hash-1:rating:5"))
         assert.is_true(db:deletePendingMetadataItem(1))
         assert.is_true(db:deleteAllPendingMetadata())
         assert.is_true(db:deletePendingMetadataByFileHash("hash-1"))
@@ -328,6 +329,79 @@ describe("GrimmLink database helpers", function()
         local toggled = db:toggleTracking("hash-1", "/book.epub")
         assert.is_true(toggled)
         assert.is_true(db:isTrackingEnabled("hash-1", "/book.epub"))
+    end)
+
+    it("tracks imported historical sessions for local dedupe", function()
+        local historical_rows = {}
+        local last_bind = {}
+
+        local function makeKey(args)
+            return table.concat({
+                tostring(args[1] or ""),
+                tostring(args[2] or ""),
+                tostring(args[3] or ""),
+                tostring(args[4] or ""),
+            }, "|")
+        end
+
+        local function stmtFor(sql)
+            local stmt = {}
+            function stmt:bind(...)
+                last_bind[sql] = { ... }
+            end
+            function stmt:step()
+                if sql:find("INSERT INTO historical_import_sessions", 1, true) then
+                    historical_rows[makeKey(last_bind[sql] or {})] = true
+                elseif sql:find("DELETE FROM historical_import_sessions", 1, true) then
+                    historical_rows = {}
+                end
+                return 101
+            end
+            function stmt:rows()
+                local emitted = false
+                return function()
+                    if emitted then return nil end
+                    emitted = true
+                    if sql:find("SELECT 1", 1, true) and sql:find("historical_import_sessions", 1, true) then
+                        if historical_rows[makeKey(last_bind[sql] or {})] then
+                            return { 1 }
+                        end
+                        return nil
+                    end
+                    if sql:find("COUNT%(%*%) FROM historical_import_sessions") then
+                        local count = 0
+                        for _ in pairs(historical_rows) do
+                            count = count + 1
+                        end
+                        return { count }
+                    end
+                    return nil
+                end
+            end
+            function stmt:close() end
+            return stmt
+        end
+
+        local db = setmetatable({
+            conn = {
+                prepare = function(_, sql)
+                    return stmtFor(sql)
+                end,
+                exec = function(_, sql)
+                    if type(sql) == "string" and sql:find("DELETE FROM historical_import_sessions", 1, true) then
+                        historical_rows = {}
+                    end
+                    return 0
+                end,
+            },
+        }, { __index = Database })
+
+        assert.is_false(db:isHistoricalSessionImported("hash-1", "2026-06-02T00:00:00Z", "2026-06-02T00:10:00Z", "device-1"))
+        assert.is_true(db:markHistoricalSessionImported("hash-1", "2026-06-02T00:00:00Z", "2026-06-02T00:10:00Z", "device-1"))
+        assert.is_true(db:isHistoricalSessionImported("hash-1", "2026-06-02T00:00:00Z", "2026-06-02T00:10:00Z", "device-1"))
+        assert.are.equal(1, db:getHistoricalImportCount())
+        assert.is_true(db:clearHistoricalImportHistory())
+        assert.are.equal(0, db:getHistoricalImportCount())
     end)
 
     it("supports magic-only shelf classification and local_path updates", function()

@@ -117,6 +117,12 @@ function M:buildStatusItems(plugin, options)
             end,
         },
         {
+            text = _("Export Local Diagnostics Bundle"),
+            callback = function()
+                plugin:exportLocalDiagnosticsBundle()
+            end,
+        },
+        {
             text = _("Sync Summary"),
             callback = sync_summary_callback,
         },
@@ -160,6 +166,13 @@ function M:applyReaderBookTopLevelOverrides(plugin, sub_items, options)
     end
 
     local injected = {
+        {
+            id = "reading_completion",
+            text = _("Reading Completion"),
+            callback = function()
+                plugin:showReadingCompletionMenu()
+            end,
+        },
         {
             id = "pull_remote_progress",
             text = _("Pull Remote Progress"),
@@ -211,6 +224,14 @@ function M:buildMaintenanceItem(plugin)
                     {
                         text = _("Show DB Status / Pending Counts"),
                         callback = function() plugin:showDatabaseStatus() end,
+                    },
+                    {
+                        text = _("Import KOReader Reading History"),
+                        callback = function() plugin:promptHistoricalImport() end,
+                    },
+                    {
+                        text = _("Export Local Diagnostics Bundle"),
+                        callback = function() plugin:exportLocalDiagnosticsBundle() end,
                     },
                     {
                         text = _("Export GrimmLink Debug Info"),

@@ -14,6 +14,15 @@ end
 package.loaded["grimmlink_menu_actions"] = nil
 local menu_actions = require("grimmlink_menu_actions").new()
 
+local function findMenuItem(items, expected_text)
+    for _, item in ipairs(items or {}) do
+        if item.text == expected_text then
+            return item
+        end
+    end
+    return nil
+end
+
 describe("grimmlink_menu_actions", function()
     it("builds file manager actions with unchanged labels", function()
         local plugin = {
@@ -50,6 +59,7 @@ describe("grimmlink_menu_actions", function()
             },
             showAbout = function() end,
             exportDebugInfo = function() end,
+            exportLocalDiagnosticsBundle = function() end,
             showMessage = function(_, text)
                 messages[#messages + 1] = text
             end,
@@ -59,14 +69,15 @@ describe("grimmlink_menu_actions", function()
             load_errors = { "a", "b" },
         })
 
-        assert.are.equal(4, #items)
+        assert.are.equal(5, #items)
         assert.are.equal("Show About", items[1].text)
         assert.are.equal("Export GrimmLink Debug Info", items[2].text)
-        assert.are.equal("Sync Summary", items[3].text)
-        assert.are.equal("Load Errors", items[4].text)
+        assert.are.equal("Export Local Diagnostics Bundle", items[3].text)
+        assert.are.equal("Sync Summary", items[4].text)
+        assert.are.equal("Load Errors", items[5].text)
 
-        items[3].callback()
         items[4].callback()
+        items[5].callback()
         assert.is_true(#messages >= 2)
     end)
 
@@ -81,6 +92,7 @@ describe("grimmlink_menu_actions", function()
     it("applies reader-book top-level overrides by id", function()
         local called = {}
         local plugin = {
+            showReadingCompletionMenu = function() called.completion = true end,
             manualPullProgress = function() called.pull = true end,
             showManualReadStatusMenu = function() called.status = true end,
             showMessage = function() called.summary = true end,
@@ -108,6 +120,7 @@ describe("grimmlink_menu_actions", function()
         assert.are.same({
             "enable_grimmlink",
             "sync_pending_now",
+            "reading_completion",
             "pull_remote_progress",
             "manual_reading_status",
             "sync_summary",
@@ -116,6 +129,8 @@ describe("grimmlink_menu_actions", function()
         sub_items[3].callback()
         sub_items[4].callback()
         sub_items[5].callback()
+        sub_items[6].callback()
+        assert.is_true(called.completion == true)
         assert.is_true(called.pull == true)
         assert.is_true(called.status == true)
         assert.is_true(called.summary == true)
@@ -128,6 +143,8 @@ describe("grimmlink_menu_actions", function()
             syncMetadataNow = function() end,
             syncPdfWebProgress = function() end,
             showDatabaseStatus = function() end,
+            promptHistoricalImport = function() end,
+            exportLocalDiagnosticsBundle = function() end,
             exportDebugInfo = function() end,
             rebuildMetadataQueueForCurrentBook = function() end,
             forceMetadataResyncForCurrentBook = function() end,
@@ -163,5 +180,7 @@ describe("grimmlink_menu_actions", function()
         assert.are.equal("Cleanup", item.sub_item_table[3].text)
         assert.are.equal("Rebuild Caches", item.sub_item_table[4].text)
         assert.are.equal("Advanced Cleanup", item.sub_item_table[5].text)
+        assert.is_not_nil(findMenuItem(item.sub_item_table[1].sub_item_table, "Import KOReader Reading History"))
+        assert.is_not_nil(findMenuItem(item.sub_item_table[1].sub_item_table, "Export Local Diagnostics Bundle"))
     end)
 end)

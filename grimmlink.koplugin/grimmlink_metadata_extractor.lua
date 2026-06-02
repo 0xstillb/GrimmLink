@@ -4,6 +4,7 @@ local Extractor = {}
 
 -- Adapted metadata parsing ideas from an upstream KOReader companion plugin.
 -- Reworked for GrimmLink naming and local-only queue preparation.
+local EXACT_RATING_STATE_KEY = "grimmlink_rating_state"
 
 local function safeToString(value)
     if value == nil then
@@ -76,6 +77,28 @@ local function loadDocSettingsByPath(file_path)
     return nil
 end
 
+local function normalizeExactRatingState(state, summary_rating)
+    if type(state) ~= "table" then
+        return nil
+    end
+
+    local value = math.floor(tonumber(state.value) or 0)
+    local scale = math.floor(tonumber(state.scale) or 0)
+    local stored_summary_rating = math.floor(tonumber(state.summary_rating or state.raw or state.koreader_rating) or 0)
+    if scale ~= 10 or value < 1 or value > 10 or stored_summary_rating < 1 or stored_summary_rating > 5 then
+        return nil
+    end
+    if summary_rating and stored_summary_rating ~= summary_rating then
+        return nil
+    end
+
+    return {
+        value = value,
+        scale = 10,
+        summary_rating = stored_summary_rating,
+    }
+end
+
 local function extractRating(doc_settings)
     local summary = safeReadSetting(doc_settings, "summary")
     if type(summary) ~= "table" then
@@ -83,16 +106,31 @@ local function extractRating(doc_settings)
     end
 
     local raw_rating = summary and tonumber(summary.rating) or nil
-    if not raw_rating then
-        return nil
+    if raw_rating then
+        raw_rating = math.floor(raw_rating)
+        if raw_rating < 1 or raw_rating > 5 then
+            raw_rating = nil
+        end
     end
-    raw_rating = math.floor(raw_rating)
-    if raw_rating < 1 or raw_rating > 5 then
+
+    local exact_state = normalizeExactRatingState(safeReadSetting(doc_settings, EXACT_RATING_STATE_KEY), raw_rating)
+    if exact_state then
+        return {
+            raw = raw_rating or exact_state.summary_rating,
+            value = exact_state.value,
+            scale = exact_state.scale,
+            normalized = exact_state.value,
+        }
+    end
+
+    if not raw_rating then
         return nil
     end
 
     return {
         raw = raw_rating,
+        value = raw_rating,
+        scale = 5,
         normalized = raw_rating * 2,
     }
 end

@@ -228,6 +228,21 @@ Database.schema_sql = {
         CREATE INDEX IF NOT EXISTS idx_pending_sessions_book_id ON pending_sessions(book_id)
     ]],
     [[
+        CREATE TABLE IF NOT EXISTS historical_import_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_hash TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            device_id TEXT NOT NULL DEFAULT '',
+            created_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(book_hash, start_time, end_time, device_id)
+        )
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_historical_import_sessions_book_hash
+        ON historical_import_sessions(book_hash)
+    ]],
+    [[
         CREATE TABLE IF NOT EXISTS pending_metadata_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_hash TEXT NOT NULL,
@@ -2143,6 +2158,56 @@ function Database:updatePendingSessionBookId(id, book_id)
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
+end
+
+function Database:markHistoricalSessionImported(book_hash, start_time, end_time, device_id)
+    local stmt = self.conn and self.conn:prepare(
+        [[
+            INSERT INTO historical_import_sessions (book_hash, start_time, end_time, device_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(book_hash, start_time, end_time, device_id) DO NOTHING
+        ]]
+    )
+    if not stmt then
+        return false
+    end
+    stmt:bind(book_hash, start_time, end_time, device_id or "", nowEpoch())
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:isHistoricalSessionImported(book_hash, start_time, end_time, device_id)
+    local stmt = self.conn and self.conn:prepare(
+        [[
+            SELECT 1
+            FROM historical_import_sessions
+            WHERE book_hash = ? AND start_time = ? AND end_time = ? AND device_id = ?
+        ]]
+    )
+    if not stmt then
+        return false
+    end
+    stmt:bind(book_hash, start_time, end_time, device_id or "")
+    local value = firstRow(stmt, function(row)
+        return tonumber(row[1]) == 1
+    end)
+    return value == true
+end
+
+function Database:getHistoricalImportCount()
+    local stmt = self.conn and self.conn:prepare("SELECT COUNT(*) FROM historical_import_sessions")
+    if not stmt then
+        return 0
+    end
+    local value = firstRow(stmt, function(row)
+        return tonumber(row[1]) or 0
+    end)
+    return value or 0
+end
+
+function Database:clearHistoricalImportHistory()
+    return self:_exec("DELETE FROM historical_import_sessions")
 end
 
 return Database

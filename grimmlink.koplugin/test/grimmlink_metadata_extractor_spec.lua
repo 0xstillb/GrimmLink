@@ -58,6 +58,8 @@ describe("GrimmLink metadata extractor", function()
         })
         assert.is_not_nil(extracted.rating)
         assert.are.equal(4, extracted.rating.raw)
+        assert.are.equal(4, extracted.rating.value)
+        assert.are.equal(5, extracted.rating.scale)
         assert.are.equal(8, extracted.rating.normalized)
         assert.are.equal(1, #extracted.highlights)
         assert.are.equal(1, #extracted.bookmarks)
@@ -91,8 +93,68 @@ describe("GrimmLink metadata extractor", function()
         })
         assert.is_not_nil(extracted.rating)
         assert.are.equal(5, extracted.rating.raw)
+        assert.are.equal(5, extracted.rating.value)
+        assert.are.equal(5, extracted.rating.scale)
         assert.are.equal(10, extracted.rating.normalized)
         assert.are.equal(0, extracted.counts.highlights_count)
         assert.are.equal(0, extracted.counts.bookmarks_count)
+    end)
+
+    it("prefers an exact Grimmlink 1-10 rating when it matches KOReader stars", function()
+        local Extractor = require("grimmlink_metadata_extractor")
+        local doc_settings = {
+            readSetting = function(_, key)
+                if key == "summary" then
+                    return { rating = 4 }
+                end
+                if key == "grimmlink_rating_state" then
+                    return { value = 7, scale = 10, summary_rating = 4 }
+                end
+                if key == "annotations" then
+                    return {}
+                end
+                return nil
+            end,
+        }
+
+        local extracted = Extractor.extract({
+            file_path = "/books/demo.epub",
+            doc_settings = doc_settings,
+        })
+
+        assert.is_not_nil(extracted.rating)
+        assert.are.equal(4, extracted.rating.raw)
+        assert.are.equal(7, extracted.rating.value)
+        assert.are.equal(10, extracted.rating.scale)
+        assert.are.equal(7, extracted.rating.normalized)
+    end)
+
+    it("falls back to KOReader stars when the stored exact rating no longer matches", function()
+        local Extractor = require("grimmlink_metadata_extractor")
+        local doc_settings = {
+            readSetting = function(_, key)
+                if key == "summary" then
+                    return { rating = 3 }
+                end
+                if key == "grimmlink_rating_state" then
+                    return { value = 7, scale = 10, summary_rating = 4 }
+                end
+                if key == "annotations" then
+                    return {}
+                end
+                return nil
+            end,
+        }
+
+        local extracted = Extractor.extract({
+            file_path = "/books/demo.epub",
+            doc_settings = doc_settings,
+        })
+
+        assert.is_not_nil(extracted.rating)
+        assert.are.equal(3, extracted.rating.raw)
+        assert.are.equal(3, extracted.rating.value)
+        assert.are.equal(5, extracted.rating.scale)
+        assert.are.equal(6, extracted.rating.normalized)
     end)
 end)

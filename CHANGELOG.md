@@ -5,6 +5,42 @@
 ### Notes
 - Ongoing development branch.
 
+# [v1.4.8]
+
+### Features
+- Added `Reading Completion` to the reader top-level GrimmLink menu for current-book finish actions in one place.
+- Added a reading completion action flow with `Finish & Sync Now`, `Mark as Read`, `Set Rating`, and `Cancel`.
+- Added an automatic close-book Reading Completion prompt for books finished at `99%+`.
+- Added a KOReader end-of-book Reading Completion prompt that waits for KOReader's own end-of-document dialog to close first.
+- Added a `First Run Setup Wizard` for core connection, credentials, device name, and recommended e-reader mode onboarding.
+- Added GrimmLink settings backup/restore actions with a portable JSON backup file stored under `KOReader/settings/Grimmlink-setting-backup`.
+- Added `Historical Import` from KOReader `statistics.sqlite3`, grouped into GrimmLink pending reading sessions.
+- Added `Local Diagnostics Bundle` export with a redacted JSON snapshot for support/debug workflows.
+
+### Improvements
+- Reused backend-supported `READ` status actions inside the completion flow when available.
+- Reused the same Reading Completion actions for the in-book menu, the KOReader end-of-book prompt, and the delayed close-book fallback prompt.
+- Made the Reading Completion prompt Kindle-friendly by waiting on KOReader's `end_document` widget instead of relying only on a timing delay, while keeping local once-per-completion-cycle dedupe.
+- Upgraded Reading Completion `Set Rating` to a WorldTeacher-style `1-10` score while still mirroring KOReader's local `1-5` stars for device-native display consistency.
+- Auto-marked older already-configured installs as setup-complete so the first-run prompt only targets genuinely unconfigured devices.
+- Added local historical-import dedupe tracking so rerunning the same KOReader history import does not requeue the same sessions repeatedly.
+- Refactored major GrimmLink flows into focused controller/helper modules while preserving the existing KOReader lifecycle entrypoints.
+
+### Fixes
+- Updated metadata rating dedupe keys so changing a rating can queue a fresh metadata sync instead of being skipped as already-synced history.
+- Prevented delayed Reading Completion prompts from reusing the live DocSettings object for the wrong book if another document opens immediately after close.
+- Preserved exact odd completion ratings like `7/10` in metadata sync payloads instead of collapsing them to KOReader-only `1-5` star values.
+
+### Tests
+- Added Reading Completion menu coverage and current-book rating persistence tests.
+- Added close-book Reading Completion prompt coverage, prompt dedupe coverage, and reread reset coverage.
+- Added KOReader end-of-book prompt coverage and end-dialog wait coverage.
+- Added exact `1-10` rating extraction, payload, and dedupe coverage.
+- Added helper/menu coverage for first-run setup prompting, setup wizard save flow, and settings backup payload restore.
+- Added diagnostics bundle path/redaction coverage, historical page-stat grouping coverage, and historical import dedupe coverage.
+- Added database coverage for historical import dedupe storage helpers.
+- Added helper coverage for the extracted controllers and menu builder paths.
+
 # [v1.4.7]
 
 ### Features
