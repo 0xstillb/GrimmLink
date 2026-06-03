@@ -44,7 +44,6 @@ EOF
 cat > "$META_FILE" <<EOF
 local _ = require("gettext")
 return {
-    name = "grimmlink",
     fullname = _("GrimmLink"),
     description = _("KOReader Companion for Grimmory"),
     version = "$VERSION",

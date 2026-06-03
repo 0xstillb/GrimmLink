@@ -2,6 +2,11 @@
 
 # [Unreleased]
 
+# [v1.4.11]
+
+### Improvements
+- Updated `generate-version.sh` so release sync no longer regenerates the deprecated `_meta.lua.name` field.
+
 # [v1.4.10]
 
 ### Improvements

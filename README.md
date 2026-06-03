@@ -238,6 +238,8 @@ CI must pass before release:
 - Secret logging guard
 - Plugin structure and packaging guards
 
+Release automation also regenerates `grimmlink.koplugin/plugin_version.lua` and `grimmlink.koplugin/_meta.lua` from `generate-version.sh`, so format changes for those files must be made in the generator first.
+
 ## License
 
 MIT
