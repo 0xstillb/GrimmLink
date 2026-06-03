@@ -2,6 +2,11 @@
 
 # [Unreleased]
 
+# [v1.5.0]
+
+### Improvements
+- Ignored `.agents/` in `.gitignore` so local agent workflow files stay out of normal git status and release commits.
+
 # [v1.4.11]
 
 ### Improvements
