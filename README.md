@@ -131,6 +131,14 @@ When **a book is open**:
 - Includes plugin version, redacted settings snapshot, queue/database counters, connection state, and current-book context
 - Passwords are redacted; usernames, URLs, SSIDs, and device IDs are reduced to safe previews
 
+### Device Debug Hook
+
+- GrimmLink can process a whitelist-based device debug command file for real-device QA workflows
+- Command file path: `KOReader/settings/grimmlink-device-command.json`
+- Result file path: `KOReader/grimmlink-device-result.json`
+- Trace file path: `KOReader/grimmlink-device-trace.txt`
+- Supported commands: `ping`, `queue_summary`, `current_context`, `diagnostics_bundle`, `sync_pending`
+
 ### Reading Completion Flow
 
 - `Reading Completion` opens a current-book action menu while reading
@@ -194,18 +202,24 @@ grimmlink.koplugin/
   grimmlink_file_logger.lua
   grimmlink_filemanager_actions.lua
   grimmlink_lifecycle_controller.lua
+  grimmlink_maintenance_controller.lua
   grimmlink_magic_shelf_controller.lua
   grimmlink_matching.lua
+  grimmlink_pending_sync_controller.lua
   grimmlink_menu_actions.lua
   grimmlink_menu_builder.lua
   grimmlink_metadata_controller.lua
   grimmlink_metadata_extractor.lua
   grimmlink_pending_sync.lua
+  grimmlink_progress_controller.lua
   grimmlink_progress_sync.lua
   grimmlink_reading_completion_controller.lua
+  grimmlink_runtime_controller.lua
   grimmlink_settings_controller.lua
+  grimmlink_session_controller.lua
   grimmlink_shelf_controller.lua
   grimmlink_shelf_sync.lua
+  grimmlink_tracking_controller.lua
   grimmlink_updater.lua
   grimmlink_util.lua
   plugin_version.lua

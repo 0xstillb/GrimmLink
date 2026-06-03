@@ -9,6 +9,12 @@ package.loaded["grimmlink_api_client"] = nil
 package.loaded["grimmlink_file_logger"] = nil
 package.loaded["grimmlink_lifecycle_controller"] = nil
 package.loaded["grimmlink_shelf_controller"] = nil
+package.loaded["grimmlink_progress_controller"] = nil
+package.loaded["grimmlink_session_controller"] = nil
+package.loaded["grimmlink_maintenance_controller"] = nil
+package.loaded["grimmlink_pending_sync_controller"] = nil
+package.loaded["grimmlink_runtime_controller"] = nil
+package.loaded["grimmlink_tracking_controller"] = nil
 package.loaded["datastorage"] = nil
 package.loaded["json"] = nil
 package.loaded["logger"] = nil
@@ -1675,6 +1681,71 @@ describe("GrimmLink helper methods", function()
         assert.is_true(dialog.text:find("last_connection_error_category:", 1, true) ~= nil)
     end)
 
+    it("executes whitelisted device debug commands and returns structured results", function()
+        local plugin = newPlugin()
+        plugin.active_url_source = "local"
+        plugin.getQueueSummaryCounters = function()
+            return {
+                pending_progress = 1,
+                pending_sessions = 2,
+                pending_metadata = 3,
+                pending_shelf_removals = 4,
+            }
+        end
+
+        local ping_result = plugin:executeDeviceDebugCommand({
+            command = "ping",
+            request_id = "req-1",
+        })
+        assert.is_true(ping_result.success)
+        assert.are.equal("req-1", ping_result.request_id)
+        assert.are.equal("local", ping_result.active_url_source)
+        assert.are.equal(1, ping_result.queue.pending_progress)
+
+        local context_result = plugin:executeDeviceDebugCommand({
+            command = "current_context",
+        })
+        assert.is_true(context_result.success)
+        assert.are.equal("/books/demo.epub", context_result.context.file_path)
+
+        local unknown_result = plugin:executeDeviceDebugCommand({
+            command = "not_real",
+        })
+        assert.is_false(unknown_result.success)
+        assert.are.equal("unknown command", unknown_result.error)
+    end)
+
+    it("processes a device debug command file and writes a result file", function()
+        local plugin = newPlugin()
+        local written_path = nil
+        local written_payload = nil
+        local deleted_path = nil
+        plugin.readJsonFile = function(_, path)
+            assert.are.equal("/tmp/grimmlink-device-command.json", path)
+            return {
+                command = "queue_summary",
+                request_id = "dev-1",
+            }
+        end
+        plugin.writeJsonFile = function(_, path, payload)
+            written_path = path
+            written_payload = payload
+            return true
+        end
+        plugin.deleteFile = function(_, path)
+            deleted_path = path
+            return true
+        end
+
+        local result, err = plugin:processDeviceDebugCommandFile("init")
+        assert.is_nil(err)
+        assert.is_true(result.success)
+        assert.are.equal("/tmp/grimmlink-device-result.json", written_path)
+        assert.are.equal("queue_summary", written_payload.command)
+        assert.are.equal("init", written_payload.trigger)
+        assert.are.equal("/tmp/grimmlink-device-command.json", deleted_path)
+    end)
+
     it("builds a settings backup payload from current plugin settings", function()
         local plugin = newPlugin({
             remote_url = "https://example.com",
@@ -2071,6 +2142,7 @@ describe("GrimmLink helper methods", function()
         local menu_registered = 0
         local settled_calls = 0
         local start_calls = 0
+        local debug_triggers = {}
 
         plugin.ensureMainMenuRegistered = function()
             menu_registered = menu_registered + 1
@@ -2083,12 +2155,16 @@ describe("GrimmLink helper methods", function()
         plugin.startSession = function()
             start_calls = start_calls + 1
         end
+        plugin.processDeviceDebugCommandFile = function(_, trigger)
+            debug_triggers[#debug_triggers + 1] = trigger
+        end
 
         plugin:onReaderReady()
 
         assert.are.equal(1, menu_registered)
         assert.are.equal(1, settled_calls)
         assert.are.equal(1, start_calls)
+        assert.are.same({ "reader_ready" }, debug_triggers)
     end)
 
     it("ends sessions with close and suspend lifecycle reasons", function()
@@ -2149,6 +2225,7 @@ describe("GrimmLink helper methods", function()
         local delays = {}
         local refresh_calls = 0
         local shelf_silent = nil
+        local debug_triggers = {}
         plugin.ensureMainMenuRegistered = function() return true end
         plugin.refreshApiClient = function()
             refresh_calls = refresh_calls + 1
@@ -2156,6 +2233,9 @@ describe("GrimmLink helper methods", function()
         end
         plugin.syncShelfNow = function(_, silent)
             shelf_silent = silent
+        end
+        plugin.processDeviceDebugCommandFile = function(_, trigger)
+            debug_triggers[#debug_triggers + 1] = trigger
         end
 
         local original_schedule = UIManager.scheduleIn
@@ -2169,6 +2249,25 @@ describe("GrimmLink helper methods", function()
         assert.are.same({ 1.0, 4.0 }, delays)
         assert.are.equal(1, refresh_calls)
         assert.is_true(shelf_silent)
+        assert.are.same({ "resume" }, debug_triggers)
+    end)
+
+    it("processes device debug commands at the end of init", function()
+        local plugin = newPlugin()
+        local debug_triggers = {}
+        plugin.ensureMainMenuRegistered = function() return true end
+        plugin.installSettingsTab = function() end
+        plugin.registerFileManagerHoldActions = function() end
+        plugin.refreshApiClient = function() return true end
+        plugin.syncFirstRunSetupState = function() end
+        plugin.maybeCheckForUpdatesOnStartup = function() end
+        plugin.maybePromptFirstRunSetup = function() end
+        plugin.processDeviceDebugCommandFile = function(_, trigger)
+            debug_triggers[#debug_triggers + 1] = trigger
+        end
+
+        plugin:init()
+        assert.are.same({ "init" }, debug_triggers)
     end)
 
     it("clears cached tab items on teardown", function()

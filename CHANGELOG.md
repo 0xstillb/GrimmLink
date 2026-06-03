@@ -2,8 +2,22 @@
 
 # [Unreleased]
 
-### Notes
-- Ongoing development branch.
+# [v1.4.10]
+
+### Improvements
+- Extracted progress snapshot, push/pull, pending-progress replay, and PDF bridge helpers into `grimmlink_progress_controller.lua`.
+- Extracted reading session lifecycle and pending-session replay helpers into `grimmlink_session_controller.lua`.
+- Extracted updater, queue cleanup, database status, and maintenance menu actions into `grimmlink_maintenance_controller.lua`.
+- Extracted runtime shell, tracking/context helpers, and pending-sync orchestration so `main.lua` now acts as a composition root.
+- Added a whitelist-based device debug command hook so GrimmLink functions can be exercised from ADB via command/result files.
+- Removed the deprecated `_meta.lua.name` field so KOReader no longer warns about GrimmLink plugin metadata during startup.
+
+### Tests
+- Confirmed progress payload, conflict/apply, offline queue, and PDF bridge coverage after controller extraction.
+- Confirmed session open/close, pending-session replay, and lifecycle callback coverage after controller extraction.
+- Confirmed updater flow, queue cleanup prompts, quick cleanup, and startup update-check coverage after maintenance extraction.
+- Re-ran helper specs and full plugin suite after the final main.lua cleanup.
+- Added coverage for device debug command execution, result-file processing, and lifecycle-triggered command checks.
 
 # [v1.4.9]
 

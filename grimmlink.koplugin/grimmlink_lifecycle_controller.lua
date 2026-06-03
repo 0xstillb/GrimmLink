@@ -229,6 +229,7 @@ function Grimmlink:init()
     self:registerDispatcherActions()
     self:maybeCheckForUpdatesOnStartup()
     self:maybePromptFirstRunSetup()
+    self:processDeviceDebugCommandFile("init")
     return true
 end
 
@@ -239,6 +240,7 @@ function Grimmlink:onReaderReady()
     end
     self:runAfterUiSettles(function()
         self:startSession()
+        self:processDeviceDebugCommandFile("reader_ready")
     end)
 end
 
@@ -311,6 +313,8 @@ function Grimmlink:onResume()
             run_shelf_sync()
         end
     end
+
+    self:processDeviceDebugCommandFile("resume")
 end
 
 function Grimmlink:onNetworkConnected()

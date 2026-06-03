@@ -743,6 +743,215 @@ function Grimmlink:exportDebugInfo()
     self:showMessage(text, 8)
 end
 
+function Grimmlink:getDeviceDebugCommandPath()
+    return normalizeDirectoryPath(DataStorage:getSettingsDir()) .. "/grimmlink-device-command.json"
+end
+
+function Grimmlink:getDeviceDebugResultPath()
+    return normalizeDirectoryPath(DataStorage:getDataDir()) .. "/grimmlink-device-result.json"
+end
+
+function Grimmlink:getDeviceDebugTracePath()
+    return normalizeDirectoryPath(DataStorage:getDataDir()) .. "/grimmlink-device-trace.txt"
+end
+
+function Grimmlink:readJsonFile(path)
+    local target_path = safeToString(path)
+    if target_path == "" then
+        return nil, "path required"
+    end
+
+    local content = nil
+    local ok_read = pcall(function()
+        local handle = io.open(target_path, "r")
+        if handle then
+            content = handle:read("*a")
+            handle:close()
+        end
+    end)
+    if not ok_read or safeToString(content) == "" then
+        return nil, "read failed"
+    end
+
+    local ok_decode, payload = pcall(json.decode, content)
+    if not ok_decode or type(payload) ~= "table" then
+        return nil, "decode failed"
+    end
+    return payload
+end
+
+function Grimmlink:writeJsonFile(path, payload)
+    local target_path = safeToString(path)
+    if target_path == "" then
+        return false, "path required"
+    end
+
+    local target_dir = parentDirectoryPath(target_path)
+    if target_dir and target_dir ~= "" and not self:isDirectory(target_dir) then
+        if not self:ensureDirectoryExists(target_dir) then
+            return false, "create dir failed"
+        end
+    end
+
+    local ok_encode, encoded = pcall(json.encode, payload)
+    if not ok_encode or type(encoded) ~= "string" then
+        return false, "encode failed"
+    end
+
+    local ok_write = pcall(function()
+        local handle = io.open(target_path, "w")
+        if handle then
+            handle:write(encoded)
+            handle:close()
+        else
+            error("open failed")
+        end
+    end)
+    if not ok_write then
+        return false, "write failed"
+    end
+    return true
+end
+
+function Grimmlink:deleteFile(path)
+    local target_path = safeToString(path)
+    if target_path == "" then
+        return false
+    end
+    return pcall(os.remove, target_path)
+end
+
+function Grimmlink:writeTextFile(path, content)
+    local target_path = safeToString(path)
+    if target_path == "" then
+        return false, "path required"
+    end
+
+    local target_dir = parentDirectoryPath(target_path)
+    if target_dir and target_dir ~= "" and not self:isDirectory(target_dir) then
+        if not self:ensureDirectoryExists(target_dir) then
+            return false, "create dir failed"
+        end
+    end
+
+    local ok_write = pcall(function()
+        local handle = io.open(target_path, "w")
+        if handle then
+            handle:write(safeToString(content))
+            handle:close()
+        else
+            error("open failed")
+        end
+    end)
+    if not ok_write then
+        return false, "write failed"
+    end
+    return true
+end
+
+function Grimmlink:executeDeviceDebugCommand(command)
+    local request_id = safeToString(command and (command.request_id or command.requestId))
+    local command_name = safeToString(command and (command.command or command.name or command.action))
+    local result = {
+        success = false,
+        request_id = request_id,
+        command = command_name,
+        executed_at = nowUtc(),
+        plugin_version = self:getPluginVersionLabel(),
+    }
+
+    local handlers = {
+        ping = function()
+            result.success = true
+            result.enabled = self.enabled == true
+            result.online = self:isOnline()
+            result.active_url_source = safeToString(self.active_url_source)
+            result.queue = self:getQueueSummaryCounters()
+        end,
+        queue_summary = function()
+            result.success = true
+            result.queue = self:getQueueSummaryCounters()
+        end,
+        current_context = function()
+            result.success = true
+            result.context = cloneTable(self:getCurrentDocumentContext() or {})
+        end,
+        diagnostics_bundle = function()
+            result.success = true
+            result.bundle = self:buildLocalDiagnosticsBundle()
+        end,
+        sync_pending = function()
+            local options = type(command.options) == "table" and cloneTable(command.options) or {}
+            result.before_queue = self:getQueueSummaryCounters()
+            result.online = self:isOnline()
+            self:syncPendingNow(true, options)
+            result.after_queue = self:getQueueSummaryCounters()
+            result.success = true
+        end,
+    }
+
+    local handler = handlers[command_name]
+    if type(handler) ~= "function" then
+        result.error = "unknown command"
+        return result
+    end
+
+    local ok, err = pcall(handler)
+    if not ok then
+        result.success = false
+        result.error = safeToString(err)
+    end
+    return result
+end
+
+function Grimmlink:processDeviceDebugCommandFile(trigger)
+    local command_path = self:getDeviceDebugCommandPath()
+    local result_path = self:getDeviceDebugResultPath()
+    local trace_path = self:getDeviceDebugTracePath()
+    local command, read_error = self:readJsonFile(command_path)
+    if type(command) ~= "table" then
+        if read_error and read_error ~= "read failed" then
+            self:logWarn("GrimmLink device debug read failed:", safeToString(read_error))
+        end
+        return nil, read_error
+    end
+
+    local result = self:executeDeviceDebugCommand(command)
+    result.trigger = safeToString(trigger)
+    result.command_path = command_path
+    result.result_path = result_path
+    self:writeTextFile(trace_path, table.concat({
+        "trigger=" .. safeToString(trigger),
+        "command=" .. safeToString(result.command),
+        "request_id=" .. safeToString(result.request_id),
+        "command_path=" .. command_path,
+        "result_path=" .. result_path,
+    }, "\n"))
+
+    local ok_write, write_error = self:writeJsonFile(result_path, result)
+    if not ok_write then
+        result.success = false
+        result.error = write_error or "result write failed"
+        self:logWarn("GrimmLink device debug result write failed:", safeToString(result.error))
+        self:writeTextFile(trace_path, table.concat({
+            "trigger=" .. safeToString(trigger),
+            "command=" .. safeToString(result.command),
+            "request_id=" .. safeToString(result.request_id),
+            "result_write_error=" .. safeToString(result.error),
+        }, "\n"))
+        return result, write_error
+    end
+
+    self:deleteFile(command_path)
+    local ok_encoded, encoded = pcall(json.encode, result)
+    if ok_encoded and type(encoded) == "string" then
+        self:logInfo("GrimmLink device debug result:", encoded)
+    else
+        self:logInfo("GrimmLink device debug result:", safeToString(result.command), safeToString(result.request_id))
+    end
+    return result
+end
+
 function Grimmlink:clearLogsWithConfirm()
     if not self.file_logger or type(self.file_logger.clearLogs) ~= "function" then
         self:showMessage(_("Log file manager unavailable"), 3)
