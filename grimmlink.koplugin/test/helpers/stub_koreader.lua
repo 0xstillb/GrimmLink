@@ -9,6 +9,7 @@ local STUB_KEYS = {
     "ui/widget/buttondialog",
     "ui/network/manager",
     "ui/event",
+    "dispatcher",
     "gettext",
     "ffi/util",
     "json",
@@ -140,6 +141,15 @@ local function install()
             return o
         end
         return Event
+    end
+
+    package.preload["dispatcher"] = function()
+        return {
+            registered_actions = {},
+            registerAction = function(self, name, action)
+                self.registered_actions[name] = action
+            end,
+        }
     end
 
     package.preload["gettext"] = function()

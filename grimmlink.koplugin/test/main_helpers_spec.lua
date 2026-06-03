@@ -7,6 +7,8 @@ package.loaded["grimmlink_database"] = nil
 package.loaded["grimmlink_shelf_sync"] = nil
 package.loaded["grimmlink_api_client"] = nil
 package.loaded["grimmlink_file_logger"] = nil
+package.loaded["grimmlink_lifecycle_controller"] = nil
+package.loaded["grimmlink_shelf_controller"] = nil
 package.loaded["datastorage"] = nil
 package.loaded["json"] = nil
 package.loaded["logger"] = nil
@@ -14,6 +16,7 @@ local Grimmlink = require("main")
 local UIManager = require("ui/uimanager")
 local json = require("json")
 local NetworkMgr = require("ui/network/manager")
+local Dispatcher = require("dispatcher")
 restore_stubs()
 
 local function getMenuItemText(item)
@@ -2019,6 +2022,165 @@ describe("GrimmLink helper methods", function()
         plugin._last_resume_at = os.time() - 20
         plugin:onNetworkConnected()
         assert.are.equal(2, scheduled_calls)
+    end)
+
+    it("routes dispatcher action callbacks to pending sync, connection test, and shelf sync", function()
+        local plugin = newPlugin()
+        local pending_silent = nil
+        local test_connection_calls = 0
+        local shelf_silent = nil
+        local settled_calls = 0
+
+        plugin.syncPendingNow = function(_, silent)
+            pending_silent = silent
+        end
+        plugin.testConnection = function()
+            test_connection_calls = test_connection_calls + 1
+        end
+        plugin.syncShelfNow = function(_, silent)
+            shelf_silent = silent
+        end
+        plugin.runAfterUiSettles = function(_, callback)
+            settled_calls = settled_calls + 1
+            callback()
+        end
+
+        plugin:onGrimmLinkSyncPending()
+        plugin:onGrimmLinkTestConnection()
+        plugin:onGrimmLinkSyncShelf()
+
+        assert.is_false(pending_silent)
+        assert.are.equal(1, test_connection_calls)
+        assert.are.equal(1, settled_calls)
+        assert.is_false(shelf_silent)
+    end)
+
+    it("registers dispatcher actions when the dispatcher is available", function()
+        Dispatcher.registered_actions = {}
+        local plugin = newPlugin()
+
+        plugin:registerDispatcherActions()
+
+        assert.are.equal("GrimmLink Sync Pending", Dispatcher.registered_actions.GrimmLinkSyncPending.title)
+        assert.are.equal("GrimmLink Test Connection", Dispatcher.registered_actions.GrimmLinkTestConnection.title)
+        assert.are.equal("GrimmLink Sync Shelf", Dispatcher.registered_actions.GrimmLinkSyncShelf.title)
+    end)
+
+    it("starts a session after reader UI settles when a document is ready", function()
+        local plugin = newPlugin()
+        local menu_registered = 0
+        local settled_calls = 0
+        local start_calls = 0
+
+        plugin.ensureMainMenuRegistered = function()
+            menu_registered = menu_registered + 1
+            return true
+        end
+        plugin.runAfterUiSettles = function(_, callback)
+            settled_calls = settled_calls + 1
+            callback()
+        end
+        plugin.startSession = function()
+            start_calls = start_calls + 1
+        end
+
+        plugin:onReaderReady()
+
+        assert.are.equal(1, menu_registered)
+        assert.are.equal(1, settled_calls)
+        assert.are.equal(1, start_calls)
+    end)
+
+    it("ends sessions with close and suspend lifecycle reasons", function()
+        local plugin = newPlugin()
+        local reasons = {}
+        plugin.endSession = function(_, opts)
+            reasons[#reasons + 1] = opts and opts.reason or nil
+        end
+
+        plugin:onCloseDocument()
+        plugin:onSuspend()
+
+        assert.are.same({ "close", "suspend" }, reasons)
+    end)
+
+    it("schedules the end-of-book Reading Completion prompt from the current session context", function()
+        local plugin = newPlugin()
+        local context = {
+            file_hash = "hash-end",
+            file_path = "/books/end.epub",
+            book_id = 11,
+            book_file_id = 12,
+        }
+        local snapshot = { percentage = 100, currentPage = 100, totalPages = 100 }
+        local captured = nil
+        plugin.current_session = { file_hash = context.file_hash }
+        plugin.getReadingCompletionContext = function()
+            return context
+        end
+        plugin.getCurrentProgressSnapshot = function(_, file_hash, file_path, book_id, book_file_id)
+            assert.are.equal(context.file_hash, file_hash)
+            assert.are.equal(context.file_path, file_path)
+            assert.are.equal(context.book_id, book_id)
+            assert.are.equal(context.book_file_id, book_file_id)
+            return snapshot
+        end
+        plugin.scheduleReadingCompletionPrompt = function(_, prompt_context, prompt_snapshot, opts)
+            captured = {
+                context = prompt_context,
+                snapshot = prompt_snapshot,
+                opts = opts,
+            }
+        end
+
+        plugin:onEndOfBook()
+
+        assert.are.same(context, captured.context)
+        assert.are.same(snapshot, captured.snapshot)
+        assert.are.equal("end_of_book", captured.opts.prompt_source)
+        assert.is_true(captured.opts.wait_for_koreader_end_dialog)
+    end)
+
+    it("runs resume network work and optional shelf sync after configured delays", function()
+        local plugin = newPlugin({
+            auto_sync_shelf_on_resume = true,
+            sync_on_network_connected = false,
+        })
+        local delays = {}
+        local refresh_calls = 0
+        local shelf_silent = nil
+        plugin.ensureMainMenuRegistered = function() return true end
+        plugin.refreshApiClient = function()
+            refresh_calls = refresh_calls + 1
+            return true
+        end
+        plugin.syncShelfNow = function(_, silent)
+            shelf_silent = silent
+        end
+
+        local original_schedule = UIManager.scheduleIn
+        UIManager.scheduleIn = function(_, delay, callback)
+            delays[#delays + 1] = delay
+            callback()
+        end
+        plugin:onResume()
+        UIManager.scheduleIn = original_schedule
+
+        assert.are.same({ 1.0, 4.0 }, delays)
+        assert.are.equal(1, refresh_calls)
+        assert.is_true(shelf_silent)
+    end)
+
+    it("clears cached tab items on teardown", function()
+        local plugin = newPlugin()
+        local clear_calls = 0
+        plugin.clearTabItemsCache = function()
+            clear_calls = clear_calls + 1
+        end
+
+        plugin:onTeardown()
+
+        assert.are.equal(1, clear_calls)
     end)
 
     it("shows metadata preview with counts and pending metadata total", function()

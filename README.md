@@ -193,6 +193,7 @@ grimmlink.koplugin/
   grimmlink_diagnostics_controller.lua
   grimmlink_file_logger.lua
   grimmlink_filemanager_actions.lua
+  grimmlink_lifecycle_controller.lua
   grimmlink_magic_shelf_controller.lua
   grimmlink_matching.lua
   grimmlink_menu_actions.lua
@@ -203,6 +204,7 @@ grimmlink.koplugin/
   grimmlink_progress_sync.lua
   grimmlink_reading_completion_controller.lua
   grimmlink_settings_controller.lua
+  grimmlink_shelf_controller.lua
   grimmlink_shelf_sync.lua
   grimmlink_updater.lua
   grimmlink_util.lua

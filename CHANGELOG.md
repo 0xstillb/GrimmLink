@@ -5,6 +5,16 @@
 ### Notes
 - Ongoing development branch.
 
+# [v1.4.9]
+
+### Improvements
+- Extracted lifecycle and dispatcher wiring into `grimmlink_lifecycle_controller.lua` without changing sync core behavior.
+- Extracted shelf sync orchestration, progress UI, shelf cache, and shelf picker helpers into `grimmlink_shelf_controller.lua`.
+
+### Tests
+- Added lifecycle callback coverage for reader ready, close/suspend, end-of-book prompts, resume sync scheduling, teardown, and dispatcher actions.
+- Confirmed shelf sync orchestration remains covered by focused helper and shelf sync specs after controller extraction.
+
 # [v1.4.8]
 
 ### Features
