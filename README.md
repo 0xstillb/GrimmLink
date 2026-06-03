@@ -1,58 +1,73 @@
-<div align="center">
+<h1 align="center">📚 GrimmLink</h1>
 
-# GrimmLink
+<h3 align="center">✨ KOReader Companion for the 0xstillb Grimmory Fork</h3>
 
-### KOReader Companion for Grimmory
+<p align="center">
+  <strong>🔄 Sync reading progress, ⏱️ sessions, 🗂️ shelves, 📝 metadata, and 📥 downloaded books between KOReader and <a href="https://github.com/0xstillb/grimmory">0xstillb/grimmory</a> — without breaking your reading flow.</strong>
+</p>
 
-**Sync reading progress, sessions, shelves, metadata, and downloaded books between KOReader and Grimmory — without breaking your reading flow.**
+<p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/version-v1.4.11-111111?style=for-the-badge" />
+  <img alt="KOReader" src="https://img.shields.io/badge/KOReader-plugin-3A3A3A?style=for-the-badge" />
+  <img alt="Grimmory Fork" src="https://img.shields.io/badge/Grimmory-0xstillb%20fork-6B46C1?style=for-the-badge" />
+  <img alt="Status" src="https://img.shields.io/badge/status-active%20development-0E9F6E?style=for-the-badge" />
+</p>
 
-<br />
+<p align="center">
+  <a href="#features">✨ Features</a> ·
+  <a href="#installation">🚀 Installation</a> ·
+  <a href="#configuration">⚙️ Configuration</a> ·
+  <a href="#how-it-works">🔄 How It Works</a> ·
+  <a href="#development">🛠️ Development</a> ·
+  <a href="#roadmap">🧭 Roadmap</a>
+</p>
 
-![Version](https://img.shields.io/badge/version-v1.4.11-111111?style=for-the-badge)
-![KOReader](https://img.shields.io/badge/KOReader-plugin-3A3A3A?style=for-the-badge)
-![Grimmory](https://img.shields.io/badge/Grimmory-companion-6B46C1?style=for-the-badge)
-![Status](https://img.shields.io/badge/status-active%20development-0E9F6E?style=for-the-badge)
-
-<br />
-
-[Features](#features) • [Installation](#installation) • [Configuration](#configuration) • [How It Works](#how-it-works) • [Development](#development) • [Roadmap](#roadmap)
-
-</div>
+<p align="center">
+  <strong>📍 Progress Sync</strong> ·
+  <strong>🗂️ Shelf Sync</strong> ·
+  <strong>🪄 Magic Shelf</strong> ·
+  <strong>📦 Offline Queue</strong> ·
+  <strong>🧰 Diagnostics</strong>
+</p>
 
 ---
 
-## What is GrimmLink?
+> ✅ **GitHub-ready:** this README intentionally uses Unicode emoji in headings, navigation, feature cards, notes, and flow sections for a more polished project landing page.
 
-**GrimmLink** is a KOReader plugin built for readers who use **Grimmory** as their personal library server.
+## 👋 What is GrimmLink?
+
+**GrimmLink** is a KOReader plugin built for readers who use the **[`0xstillb/grimmory`](https://github.com/0xstillb/grimmory) fork** as their personal library server.
 
 It connects your e-reader to Grimmory so your reading progress, reading sessions, shelves, downloaded books, and selected metadata can move with you across devices.
 
 Open a book in KOReader. Read offline. Close the book. Reconnect later. GrimmLink quietly handles the sync work in the background.
 
-> GrimmLink is designed for real e-reader usage: unstable Wi-Fi, long reading sessions, large libraries, local servers, remote servers, and devices that are not always online.
+> 💡 GrimmLink is designed for real e-reader usage: unstable Wi-Fi, long reading sessions, large libraries, local servers, remote servers, and devices that are not always online.
 
 ---
 
-## Why GrimmLink?
+## 🎯 Why GrimmLink?
 
 Most reading sync tools solve only one part of the problem: progress.
 
 GrimmLink aims to become the full KOReader companion layer for Grimmory:
 
-- **Progress sync** for KOReader-native reading positions
-- **Reading session sync** for reading history and stats
-- **Shelf sync** for selected Grimmory shelves
-- **Magic Shelf support** for dynamic server-side collections
-- **Offline queue** for unreliable network conditions
-- **Local book downloads** directly from Grimmory
-- **Metadata sync** for ratings, annotations, and bookmarks
-- **Diagnostics and backup tools** for real-world debugging
+- 📍 **Progress sync** for KOReader-native reading positions
+- ⏱️ **Reading session sync** for reading history and stats
+- 🗂️ **Shelf sync** for selected Grimmory shelves
+- 🪄 **Magic Shelf support** for dynamic server-side collections
+- 📦 **Offline queue** for unreliable network conditions
+- 📥 **Local book downloads** directly from Grimmory
+- 📝 **Metadata sync** for ratings, annotations, and bookmarks
+- 🧰 **Diagnostics and backup tools** for real-world debugging
 
 ---
 
-## Features
+<a id="features"></a>
 
-### Reading Progress Sync
+## ✨ Features
+
+### 📍 Reading Progress Sync
 
 GrimmLink can push and pull reading progress between KOReader and Grimmory.
 
@@ -80,24 +95,24 @@ EPUB, MOBI, AZW, AZW3, FB2, HTML, TXT, DOCX
 
 ---
 
-### Reading Sessions
+### ⏱️ Reading Sessions
 
 GrimmLink tracks reading activity and sends reading sessions to Grimmory.
 
 It supports:
 
-- session start / end tracking
-- duration calculation
-- start and end progress
-- minimum session duration threshold
-- batch upload for pending sessions
-- historical import from KOReader statistics data
+- 🟢 session start / end tracking
+- ⏳ duration calculation
+- 📊 start and end progress
+- 🧮 minimum session duration threshold
+- 📦 batch upload for pending sessions
+- 🕰️ historical import from KOReader statistics data
 
 This allows Grimmory to understand not only **where** you are in a book, but also **how** you read.
 
 ---
 
-### Shelf Sync
+### 🗂️ Shelf Sync
 
 Bring selected Grimmory shelves into KOReader.
 
@@ -120,51 +135,52 @@ Shelf sync is designed to keep Grimmory as the source of truth while making sele
 
 ---
 
-### Safe Delete Policy
+### 🗑️ Safe Delete Policy
 
-GrimmLink is designed to be conservative with deletion.
+GrimmLink is intentionally conservative with deletion.
 
 | Action | Result |
 |---|---|
-| Remove a book from a KOReader synced shelf | Removes local shelf mapping and the local downloaded copy managed by GrimmLink |
-| Remove a book from a Grimmory shelf | Removes it from the synced KOReader shelf on the next sync |
-| Delete from Grimmory library | Not performed by GrimmLink |
-| Delete arbitrary user files | Not performed by GrimmLink |
+| 🗂️ Book removed from a Grimmory shelf | Removed from the synced KOReader shelf on the next sync |
+| 🧹 Local cleanup after shelf removal | Removes only GrimmLink-managed local copies inside managed download roots |
+| 🚫 Delete from Grimmory library | Not performed by GrimmLink |
+| 🚫 Delete arbitrary user files | Not performed by GrimmLink |
+| ⚠️ User manually deletes/removes a local KOReader file | Not documented as guaranteed server-side shelf removal unless the device hook is implemented and tested |
 
-GrimmLink should only clean up local files that were downloaded and managed by GrimmLink.
+> ⚠️ Code review note for **v1.4.11**: the plugin includes a `pending_shelf_removals` table, `removeBookFromShelf()` API call, and pending-removal retry processor. However, this review did **not** confirm an active KOReader file-manager delete hook that automatically converts a user-initiated local delete into a queued Grimmory shelf removal. Do not document local-delete → Grimmory shelf removal as guaranteed until that hook is implemented and tested.
 
 ---
 
-### Offline Queue
+### 📦 Offline Queue
 
 E-readers are not always online. GrimmLink expects that.
 
 When the network is unavailable, GrimmLink can queue:
 
-- progress updates
-- reading sessions
-- metadata changes
-- shelf removal events
+- 📍 progress updates
+- ⏱️ reading sessions
+- 📝 metadata changes
+- 🗂️ supported shelf-removal API retries
 
 Pending items can be retried later when the device reconnects.
 
 ---
 
-### Metadata Sync
+### 📝 Metadata Sync
 
 GrimmLink includes a metadata sync layer for richer reading data.
 
 Supported metadata areas:
 
-- ratings
-- annotations
-- bookmarks
+- ⭐ ratings
+- ✍️ annotations
+- 🔖 bookmarks
 
 Metadata sync can be enabled separately from core progress and shelf sync.
 
 ---
 
-### Local + Remote Server URLs
+### 🌐 Local + Remote Server URLs
 
 GrimmLink supports both a local Grimmory URL and a remote Grimmory URL.
 
@@ -177,34 +193,36 @@ Remote URL → https://your-domain.example.com
 
 This is useful when Grimmory is hosted at home but also exposed through a remote tunnel, reverse proxy, or public endpoint.
 
-> Note: KOReader does not reliably expose Wi-Fi SSID information across all devices. `home_ssid` should be treated as an optional note / diagnostic hint, not as a reliable automatic routing mechanism.
+> 📡 Note: KOReader does not reliably expose Wi-Fi SSID information across all devices. `home_ssid` should be treated as an optional note / diagnostic hint, not as a reliable automatic routing mechanism.
 
 ---
 
-### Diagnostics, Backup, and Maintenance
+### 🧰 Diagnostics, Backup, and Maintenance
 
 GrimmLink includes maintenance tools for development and real-device testing:
 
-- connection diagnostics
-- local settings backup
-- diagnostics bundle export
-- debug logging
-- file logging
-- pending queue inspection
-- historical reading session import
-- update checks
+- 🔌 connection diagnostics
+- 💾 local settings backup
+- 🧪 diagnostics bundle export
+- 🐞 debug logging
+- 📄 file logging
+- 📦 pending queue inspection
+- 🕰️ historical reading session import
+- ⬆️ update checks
 
 These tools are especially useful when testing on Android-based e-readers, iReader devices, Kobo devices, or desktop KOReader builds.
 
 ---
 
-## Installation
+<a id="installation"></a>
 
-### 1. Download the plugin
+## 🚀 Installation
+
+### 1. 📥 Download the plugin
 
 Download the latest `grimmlink.koplugin.zip` from the release page.
 
-### 2. Extract the plugin
+### 2. 📂 Extract the plugin
 
 After extraction, the folder should look like this:
 
@@ -219,7 +237,7 @@ grimmlink.koplugin/
 └── ...
 ```
 
-### 3. Copy to KOReader plugins folder
+### 3. 📲 Copy to KOReader plugins folder
 
 Copy the entire folder into KOReader's `plugins` directory.
 
@@ -236,7 +254,7 @@ Linux desktop:
 ~/.config/koreader/plugins/grimmlink.koplugin
 ```
 
-### 4. Restart KOReader
+### 4. 🔄 Restart KOReader
 
 Restart KOReader completely.
 
@@ -248,20 +266,24 @@ KOReader → Tools / Plugins → GrimmLink
 
 ---
 
-## Configuration
+<a id="configuration"></a>
+
+## ⚙️ Configuration
 
 Open the GrimmLink settings menu and configure the connection to your Grimmory server.
 
-### Required settings
+> 🔗 GrimmLink targets the **[`0xstillb/grimmory`](https://github.com/0xstillb/grimmory) fork** and its KOReader companion endpoints.
+
+### 🔐 Required settings
 
 | Setting | Description |
 |---|---|
-| Server URL / Local URL | Your Grimmory server URL |
+| Server URL / Local URL | Your `0xstillb/grimmory` server URL |
 | Username | Grimmory / KOReader companion username |
 | Password / Auth key | Grimmory / KOReader companion password or key |
 | Device name | Display name for this KOReader device |
 
-### Recommended settings
+### ✅ Recommended settings
 
 | Setting | Recommended |
 |---|---:|
@@ -272,7 +294,7 @@ Open the GrimmLink settings menu and configure the connection to your Grimmory s
 | Shelf fast sync | Enabled |
 | Refresh SimpleUI bookinfo after shelf sync | Enabled if using SimpleUI |
 
-### Optional shelf settings
+### 🗂️ Optional shelf settings
 
 | Setting | Description |
 |---|---|
@@ -280,13 +302,15 @@ Open the GrimmLink settings menu and configure the connection to your Grimmory s
 | Magic shelf sync | Sync one selected Magic Shelf |
 | Separate Magic download directory | Store Magic Shelf downloads separately |
 | Use original filename | Keep server-provided filenames when possible |
-| Two-way shelf delete sync | Sync local shelf removals back to Grimmory shelf membership |
+| Two-way shelf delete sync | Experimental / implementation-dependent; do not rely on local-delete → server shelf removal unless verified on device |
 
 ---
 
-## How It Works
+<a id="how-it-works"></a>
 
-### Progress flow
+## 🔄 How It Works
+
+### 📍 Progress flow
 
 ```mermaid
 sequenceDiagram
@@ -303,7 +327,7 @@ sequenceDiagram
     G->>S: Push latest progress
 ```
 
-### Offline flow
+### 📦 Offline flow
 
 ```mermaid
 sequenceDiagram
@@ -321,7 +345,7 @@ sequenceDiagram
     G->>Q: Clear completed items
 ```
 
-### Shelf sync flow
+### 🗂️ Shelf sync flow
 
 ```mermaid
 sequenceDiagram
@@ -330,18 +354,35 @@ sequenceDiagram
     participant D as Device Storage
     participant U as KOReader UI
 
-    G->>S: Fetch selected shelf books
-    G->>D: Reuse existing local files
-    G->>S: Download missing books
-    G->>D: Save managed files
+    G->>S: Fetch selected shelf / Magic Shelf books
+    S-->>G: Return current shelf membership
+    G->>D: Compare server shelf with local shelf map
+
+    alt Book already exists locally
+        G->>D: Reuse existing GrimmLink-managed file
+    else Book is missing locally
+        G->>S: Download book file
+        G->>D: Save as GrimmLink-managed file
+    end
+
+    alt Book was removed from Grimmory shelf
+        G->>U: Remove from synced KOReader shelf
+        G->>D: Clean up local copy if managed by GrimmLink
+    else User manually deletes local KOReader file
+        G->>D: Local file is gone
+        Note over G,S: Server-side shelf removal is not documented as guaranteed in v1.4.11
+    end
+
     G->>U: Refresh local library / SimpleUI cache
 ```
 
+Shelf deletion is scoped to **shelf membership** and **GrimmLink-managed local files**. GrimmLink does not delete books from the Grimmory library and does not delete arbitrary user files outside its managed download roots.
+
 ---
 
-## Grimmory API Usage
+## 🧩 Grimmory API Usage
 
-GrimmLink communicates with Grimmory through KOReader companion endpoints.
+GrimmLink communicates with the **[`0xstillb/grimmory`](https://github.com/0xstillb/grimmory) fork** through KOReader companion endpoints.
 
 Core endpoint groups include:
 
@@ -370,7 +411,7 @@ x-auth-key
 
 ---
 
-## Project Structure
+## 🧱 Project Structure
 
 ```text
 grimmlink.koplugin/
@@ -399,9 +440,11 @@ grimmlink.koplugin/
 
 ---
 
-## Development
+<a id="development"></a>
 
-### Run tests
+## 🛠️ Development
+
+### 🧪 Run tests
 
 This project includes Lua test specs under `test/`.
 
@@ -425,50 +468,54 @@ test/shelf_sync_spec.lua
 test/updater_spec.lua
 ```
 
-### Real-device testing checklist
+### 📱 Real-device testing checklist
 
 Before tagging a stable release, test on at least one real KOReader device:
 
-- install plugin from a clean KOReader profile
-- connect to Grimmory server
-- authenticate successfully
-- open a matched book
-- pull remote progress
-- read and push local progress
-- read offline and confirm queue retry
-- sync a small shelf
-- sync a large shelf
-- cancel a long shelf sync
-- remove a book from a synced shelf
-- confirm server library files are not deleted
-- restart KOReader and verify state is preserved
+- ✅ install plugin from a clean KOReader profile
+- ✅ connect to the `0xstillb/grimmory` server
+- ✅ authenticate successfully
+- ✅ open a matched book
+- ✅ pull remote progress
+- ✅ read and push local progress
+- ✅ read offline and confirm queue retry
+- ✅ sync a small shelf
+- ✅ sync a large shelf
+- ✅ cancel a long shelf sync
+- ✅ remove a book from a Grimmory shelf and verify local cleanup
+- ✅ verify local/manual delete behavior before documenting it as two-way delete
+- ✅ confirm server library files are not deleted
+- ✅ restart KOReader and verify state is preserved
 
 ---
 
-## Roadmap
+<a id="roadmap"></a>
+
+## 🧭 Roadmap
 
 GrimmLink is actively evolving. Current focus areas:
 
-- harden large shelf sync on low-power e-readers
-- improve async download behavior across Android/e-ink devices
-- strengthen pending queue handling for edge cases
-- improve stale-file detection when server book files change
-- expand metadata sync reliability across formats
-- polish diagnostics and credential redaction
-- refine release/update workflow
+- 🏋️ harden large shelf sync on low-power e-readers
+- 📥 improve async download behavior across Android/e-ink devices
+- 📦 strengthen pending queue handling for edge cases
+- 🔁 improve stale-file detection when server book files change
+- 📝 expand metadata sync reliability across formats
+- 🔐 polish diagnostics and credential redaction
+- 🚀 refine release/update workflow
 
 ---
 
-## Known Notes
+## ⚠️ Known Notes
 
-- KOReader may not expose Wi-Fi SSID reliably on every device, so network routing should not depend on SSID detection.
-- Some devices may not include `curl` or `wget`; download behavior should be tested on target hardware.
-- Large shelves should be tested on real devices, not only desktop KOReader.
-- Metadata and annotation behavior can vary by book format.
+- 📡 KOReader may not expose Wi-Fi SSID reliably on every device, so network routing should not depend on SSID detection.
+- 🧰 Some devices may not include `curl` or `wget`; download behavior should be tested on target hardware.
+- 🗂️ Large shelves should be tested on real devices, not only desktop KOReader.
+- 📝 Metadata and annotation behavior can vary by book format.
+- 🗑️ Local-delete → Grimmory shelf removal should not be advertised as guaranteed until verified with an active KOReader hook and real-device testing.
 
 ---
 
-## Version
+## 🏷️ Version
 
 ```text
 Version: v1.4.11
@@ -479,7 +526,7 @@ Build: 2026-06-03T10:44:24+07:00
 
 ---
 
-## License
+## 📜 License
 
 Add your project license here.
 
@@ -493,7 +540,7 @@ Recommended options:
 
 <div align="center">
 
-**GrimmLink**  
+**📚 GrimmLink**  
 _Read in KOReader. Sync with Grimmory. Keep your library moving._
 
 </div>
