@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v1.5.0-111111?style=for-the-badge" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v1.5.1-111111?style=for-the-badge" />
   <img alt="KOReader" src="https://img.shields.io/badge/KOReader-plugin-3A3A3A?style=for-the-badge" />
   <img alt="Grimmory Fork" src="https://img.shields.io/badge/Grimmory-0xstillb%20fork-6B46C1?style=for-the-badge" />
   <img alt="Status" src="https://img.shields.io/badge/status-active%20development-0E9F6E?style=for-the-badge" />
@@ -525,10 +525,10 @@ Recently completed stability work:
 ## 🏷️ Version
 
 ```text
-Version: v1.5.0
+Version: v1.5.1
 Type: release
-Commit: 3595dc4
-Build: 2026-06-03T14:14:18+07:00
+Commit: e795840
+Build: 2026-06-04T22:13:27+07:00
 ```
 
 ---
