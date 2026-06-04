@@ -79,7 +79,7 @@ describe("grimmlink_pending_sync", function()
             end,
         }
 
-        pending_sync:syncPendingNow(plugin, false, {
+        local summary = pending_sync:syncPendingNow(plugin, false, {
             progress_limit = 10,
             session_limit = 20,
             metadata_limit = 30,
@@ -95,6 +95,13 @@ describe("grimmlink_pending_sync", function()
         assert.are.equal(20, calls.session_limit)
         assert.are.equal(30, calls.metadata_limit)
         assert.are.equal(1, calls.show)
+        assert.are.equal(11, summary.processed_total)
+        assert.are.same({
+            pending_progress = 0,
+            pending_sessions = 0,
+            pending_metadata = 0,
+            pending_shelf_removals = 0,
+        }, summary.queue_remaining)
     end)
 
     it("prompts for wifi and skips queue processing when offline in manual mode", function()
@@ -257,6 +264,42 @@ describe("grimmlink_pending_sync", function()
         })
 
         assert.are.equal(0, remove_called)
+    end)
+
+    it("keeps syncing other queues when one queue handler crashes", function()
+        local calls = { sessions = 0, metadata = 0 }
+        local plugin = {
+            getCurrentDocumentContext = function() return nil end,
+            isOnline = function() return true end,
+            requireReady = function() return true end,
+            syncPendingProgress = function()
+                error("progress boom")
+            end,
+            syncPendingSessions = function()
+                calls.sessions = calls.sessions + 1
+                return 2, 0
+            end,
+            syncPendingMetadata = function()
+                calls.metadata = calls.metadata + 1
+                return 1, 0
+            end,
+            db = {
+                getPendingProgressCount = function() return 5 end,
+                getPendingSessionCount = function() return 1 end,
+                getPendingMetadataCount = function() return 0 end,
+                getPendingShelfRemovalCount = function() return 0 end,
+            },
+        }
+
+        local summary = pending_sync:syncPendingNow(plugin, true, {})
+
+        assert.are.equal(1, calls.sessions)
+        assert.are.equal(1, calls.metadata)
+        assert.are.equal(4, summary.processed_total)
+        assert.are.equal(1, summary.progress_failed)
+        assert.are.equal(2, summary.sessions_synced)
+        assert.are.equal(1, summary.metadata_synced)
+        assert.are.equal(1, #summary.step_errors)
     end)
 
     it("deletes pending shelf removal and local mapping when remote delete succeeds", function()

@@ -81,6 +81,11 @@ local function install()
                     callback()
                 end
             end,
+            nextTick = function(_, callback)
+                if type(callback) == "function" then
+                    callback()
+                end
+            end,
             askForRestart = function() end,
             getLastShown = function()
                 return UIManager.last_shown

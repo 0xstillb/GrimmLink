@@ -9,6 +9,21 @@ function M.install(Grimmlink, deps)
     local nowUtc = deps.nowUtc
     local safeDbValueCall = deps.safeDbValueCall
 
+local function hasQueueBacklog(counters)
+    counters = type(counters) == "table" and counters or {}
+    return (tonumber(counters.pending_progress) or 0) > 0
+        or (tonumber(counters.pending_sessions) or 0) > 0
+        or (tonumber(counters.pending_metadata) or 0) > 0
+end
+
+local function cloneTable(input)
+    local copy = {}
+    for key, value in pairs(input or {}) do
+        copy[key] = value
+    end
+    return copy
+end
+
 function Grimmlink:syncPendingNow(silent, opts)
     if self.pending_sync and type(self.pending_sync.syncPendingNow) == "function" then
         return self.pending_sync:syncPendingNow(self, silent, opts)
@@ -91,9 +106,29 @@ function Grimmlink:schedulePendingSync(label, delay_seconds, opts)
         if not self:isOnline() then
             return
         end
+        local summary = nil
         self:invokeSafely(label or "pending sync", function()
-            self:syncPendingNow(true, opts)
+            summary = self:syncPendingNow(true, opts)
         end, {}, { silent = true })
+
+        local followup_rounds_left = math.max(0, math.floor(tonumber(
+            opts._followup_rounds_left or opts.followup_rounds or 0
+        ) or 0))
+        local processed_total = type(summary) == "table" and (tonumber(summary.processed_total) or 0) or 0
+        local queue_remaining = type(summary) == "table" and summary.queue_remaining or self:getQueueSummaryCounters()
+        if followup_rounds_left > 0
+            and processed_total > 0
+            and hasQueueBacklog(queue_remaining)
+            and self:isOnline() then
+            local next_opts = cloneTable(opts)
+            next_opts._followup_rounds_left = followup_rounds_left - 1
+            next_opts.respect_cooldown = false
+            self:schedulePendingSync(
+                label or "pending sync follow-up",
+                tonumber(opts.followup_delay_seconds) or 1.0,
+                next_opts
+            )
+        end
     end
 
     if UIManager and type(UIManager.scheduleIn) == "function" then

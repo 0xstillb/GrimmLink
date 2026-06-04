@@ -1231,6 +1231,63 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(1, sync_calls)
     end)
 
+    it("schedules short follow-up pending sync rounds while backlog remains", function()
+        local plugin = newPlugin()
+        local seen_followup_rounds = {}
+        local seen_respect_cooldown = {}
+        local sync_calls = 0
+        plugin.syncPendingNow = function(_, _, opts)
+            sync_calls = sync_calls + 1
+            seen_followup_rounds[sync_calls] = opts and opts._followup_rounds_left
+            if seen_followup_rounds[sync_calls] == nil then
+                seen_followup_rounds[sync_calls] = "initial"
+            end
+            if opts ~= nil then
+                seen_respect_cooldown[sync_calls] = opts.respect_cooldown
+            else
+                seen_respect_cooldown[sync_calls] = nil
+            end
+            if sync_calls == 1 then
+                return {
+                    processed_total = 5,
+                    queue_remaining = {
+                        pending_progress = 2,
+                        pending_sessions = 0,
+                        pending_metadata = 0,
+                    },
+                }
+            elseif sync_calls == 2 then
+                return {
+                    processed_total = 4,
+                    queue_remaining = {
+                        pending_progress = 0,
+                        pending_sessions = 1,
+                        pending_metadata = 0,
+                    },
+                }
+            end
+            return {
+                processed_total = 1,
+                queue_remaining = {
+                    pending_progress = 0,
+                    pending_sessions = 0,
+                    pending_metadata = 0,
+                },
+            }
+        end
+
+        plugin:schedulePendingSync("batched pending sync", 0, {
+            followup_rounds = 2,
+            followup_delay_seconds = 0,
+            respect_cooldown = true,
+            cooldown_seconds = 300,
+        })
+
+        assert.are.equal(3, sync_calls)
+        assert.are.same({ "initial", 1, 0 }, seen_followup_rounds)
+        assert.are.same({ true, false, false }, seen_respect_cooldown)
+    end)
+
     it("queues exit progress without running a full pending sync on exit", function()
         local plugin = newPlugin()
         local full_sync_calls = 0
@@ -3127,6 +3184,7 @@ describe("GrimmLink helper methods", function()
 
     it("uses configured shelf_plan_batch_size when preparing shelf sync plan", function()
         local captured_plan_batch_size = nil
+        local captured_selected_shelf_ids = nil
         local plugin = newPlugin({
             shelf_sync_enabled = true,
             sync_regular_shelf_enabled = true,
@@ -3142,6 +3200,7 @@ describe("GrimmLink helper methods", function()
         plugin.shelf_sync = {
             prepareSyncPlan = function(_, opts)
                 captured_plan_batch_size = opts.plan_batch_size
+                captured_selected_shelf_ids = opts.selected_shelf_ids_by_type
                 return {
                     result = {
                         synced = 0,
@@ -3164,6 +3223,7 @@ describe("GrimmLink helper methods", function()
 
         plugin:syncShelfNow(true)
         assert.are.equal(123, captured_plan_batch_size)
+        assert.is_true(captured_selected_shelf_ids.regular["7"])
     end)
 
     it("uses live release checks for manual update checks", function()
@@ -3280,5 +3340,99 @@ describe("GrimmLink helper methods", function()
         assert.is_nil(result)
         assert.are.equal(0, write_index_called)
         assert.are.equal(0, upsert_cache_called)
+    end)
+
+    it("falls back to blocking downloads when async start becomes unavailable", function()
+        local execute_download_calls = 0
+        local write_index_called = 0
+        local upsert_cache_called = 0
+        local completion_result = nil
+        local plugin = newPlugin({
+            shelf_sync_enabled = true,
+            sync_regular_shelf_enabled = true,
+            selected_regular_shelf_id = 1,
+            selected_regular_shelf_name = "Regular Shelf",
+            sync_magic_shelf_enabled = false,
+            two_way_shelf_delete_sync = false,
+            shelf_fast_sync_enabled = false,
+            refresh_bookinfo_after_shelf_sync = false,
+            download_dir = "/storage/emulated/0/koreader/books/Book",
+            refreshApiClient = function() return true end,
+            requireReady = function() return true end,
+            isOnline = function() return true end,
+        })
+        plugin.api.isAsyncDownloadAvailable = function()
+            return true
+        end
+        plugin.api.cancelAsyncDownload = function() end
+        plugin.shelf_sync = {
+            prepareSyncPlan = function()
+                return {
+                    result = {
+                        synced = 0,
+                        skipped = 0,
+                        failed = 0,
+                        deleted = 0,
+                        errors = {},
+                        snapshot_token = "snapshot-token",
+                    },
+                    download_queue = {
+                        {
+                            book_id = 11,
+                            title = "Fallback Book",
+                            book = {
+                                fileSizeKb = 128,
+                            },
+                        },
+                    },
+                    cleanup = {
+                        shelf_id = 1,
+                        shelf_type = "regular",
+                        download_dir = "/storage/emulated/0/koreader/books/Book",
+                        delete_sdr = false,
+                        remote_delete_sync = false,
+                        sync_start = os.time(),
+                        downloaded_files_to_refresh = {},
+                        downloaded_files_to_refresh_set = {},
+                    },
+                }
+            end,
+            startAsyncDownload = function()
+                return nil, "tool missing"
+            end,
+            executeDownload = function()
+                execute_download_calls = execute_download_calls + 1
+                return true
+            end,
+            resolveDownloadDir = function(_, dir) return dir end,
+            writeMetadataIndex = function()
+                write_index_called = write_index_called + 1
+                return "/tmp/index.json"
+            end,
+            upsertBookInfoCache = function()
+                upsert_cache_called = upsert_cache_called + 1
+                return { inserted = 0, updated = 0, skipped = 0 }
+            end,
+        }
+
+        local result = plugin:syncShelfNow(true, {
+            on_complete = function(sync_result)
+                completion_result = sync_result
+            end,
+        })
+
+        assert.is_nil(result)
+        assert.are.equal(1, execute_download_calls)
+        assert.are.equal(1, write_index_called)
+        assert.are.equal(1, upsert_cache_called)
+        assert.is_not_nil(completion_result)
+        assert.are.equal(1, completion_result.synced)
+        assert.are.equal(0, completion_result.failed)
+        assert.are.same({
+            used = true,
+            reason = "async_start_failed bookId=11: tool missing",
+        }, completion_result.async_fallback)
+        assert.is_false(plugin._shelf_sync_running)
+        assert.are.equal(false, plugin.api._async_available)
     end)
 end)

@@ -455,6 +455,23 @@ local function normalizeManagedRoots(roots)
     return normalized
 end
 
+local function buildManagedDeleteRoots(sync, download_dir)
+    local managed_roots = {
+        download_dir,
+    }
+
+    if sync and type(sync.resolveDownloadDir) == "function" then
+        local ok_resolve, resolved_dir = pcall(sync.resolveDownloadDir, sync, download_dir)
+        if ok_resolve and resolved_dir and resolved_dir ~= "" then
+            managed_roots[#managed_roots + 1] = resolved_dir
+        end
+    end
+
+    managed_roots[#managed_roots + 1] = DataStorage:getDataDir()
+    managed_roots[#managed_roots + 1] = DataStorage:getSettingsDir()
+    return normalizeManagedRoots(managed_roots)
+end
+
 local function chooseSdrTargetPath(source_sdr_path, source_book_path, target_book_path)
     if source_sdr_path == source_book_path .. ".sdr" then
         return target_book_path .. ".sdr"
@@ -502,11 +519,7 @@ end
 -- Safely delete a tracked book and optionally its .sdr sidecar.
 -- Only deletes files where downloaded_by_grimmlink == 1.
 function ShelfSync:deleteLocalBook(entry, delete_sdr, download_dir)
-    local managed_roots = {
-        download_dir,
-        DataStorage:getDataDir(),
-        DataStorage:getSettingsDir(),
-    }
+    local managed_roots = buildManagedDeleteRoots(self, download_dir)
     if self.deletion and type(self.deletion.evaluateLocalDeletePolicy) == "function" then
         local allow_delete, reason = self.deletion:evaluateLocalDeletePolicy(entry, {
             managed_roots = managed_roots,
@@ -908,6 +921,8 @@ local function computeShelfSnapshotToken(remote_books)
     return tostring(#lines) .. ":" .. tostring(a) .. ":" .. tostring(b)
 end
 
+local buildShelfIdSet
+
 -- ============================================================
 -- Async-friendly sync architecture.
 -- The monolithic syncShelf is split into:
@@ -1034,6 +1049,7 @@ function ShelfSync:prepareSyncPlan(opts)
             delete_sdr          = delete_sdr,
             remote_delete_sync  = remote_delete_sync,
             sync_start          = sync_start,
+            selected_shelf_ids_by_type = opts.selected_shelf_ids_by_type,
             downloaded_files_to_refresh = {},
             downloaded_files_to_refresh_set = {},
         }
@@ -1109,6 +1125,38 @@ function ShelfSync:prepareSyncPlan(opts)
         if opts.previous_snapshot_token
             and snapshot_token
             and tostring(opts.previous_snapshot_token) == tostring(snapshot_token) then
+            local remote_book_ids = {}
+            for _, book in ipairs(remote_books) do
+                local bid = tonumber(book.bookId or book.id or book.book_id)
+                if bid then
+                    remote_book_ids[tostring(bid)] = true
+                end
+            end
+
+            local has_stale_tracked_entries = false
+            for _, entry in ipairs(shelf_entries) do
+                local entry_book_id = tonumber(entry.book_id)
+                if entry_book_id and not remote_book_ids[tostring(entry_book_id)] then
+                    has_stale_tracked_entries = true
+                    break
+                end
+            end
+
+            if not has_stale_tracked_entries
+                and type(opts.selected_shelf_ids_by_type) == "table"
+                and type(self.db.getAllShelfSyncEntries) == "function" then
+                local selected_ids = buildShelfIdSet(opts.selected_shelf_ids_by_type[shelf_type])
+                if next(selected_ids) ~= nil then
+                    for _, entry in ipairs(self.db:getAllShelfSyncEntries() or {}) do
+                        if normalizeShelfType(entry.shelf_type) == shelf_type
+                            and not selected_ids[tostring(entry.shelf_id)] then
+                            has_stale_tracked_entries = true
+                            break
+                        end
+                    end
+                end
+            end
+
             local all_present = true
             for _, book in ipairs(remote_books) do
                 local bid = tonumber(book.bookId or book.id or book.book_id)
@@ -1122,7 +1170,7 @@ function ShelfSync:prepareSyncPlan(opts)
                     end
                 end
             end
-            if all_present then
+            if all_present and not has_stale_tracked_entries then
                 result.skipped = result.skipped + #remote_books
                 result.snapshot_unchanged = true
                 if plan.cleanup then
@@ -1575,6 +1623,71 @@ function ShelfSync:refreshBookInfoForDownloadedFiles(file_paths, opts)
     return counts
 end
 
+function buildShelfIdSet(input)
+    local set = {}
+    if type(input) ~= "table" then
+        return set
+    end
+    for key, value in pairs(input) do
+        if value == true then
+            set[tostring(key)] = true
+        elseif value ~= nil and value ~= false then
+            set[tostring(value)] = true
+        end
+    end
+    return set
+end
+
+local function addCleanupEntry(entries, seen, entry, orphaned)
+    if type(entry) ~= "table" then
+        return
+    end
+    local key = table.concat({
+        tostring(entry.book_id or ""),
+        tostring(entry.shelf_id or ""),
+        normalizeShelfType(entry.shelf_type),
+    }, "|")
+    if seen[key] then
+        return
+    end
+    seen[key] = true
+    if not orphaned then
+        entries[#entries + 1] = entry
+        return
+    end
+
+    local copy = {}
+    for copy_key, copy_value in pairs(entry) do
+        copy[copy_key] = copy_value
+    end
+    copy._grimmlink_orphaned_shelf_mapping = true
+    entries[#entries + 1] = copy
+end
+
+local function buildCleanupEntries(sync, cleanup, shelf_type)
+    local entries = {}
+    local seen = {}
+    for _, entry in ipairs(sync.db:getAllShelfSyncEntries(cleanup.shelf_id, shelf_type) or {}) do
+        addCleanupEntry(entries, seen, entry, false)
+    end
+
+    local selected_by_type = type(cleanup.selected_shelf_ids_by_type) == "table"
+        and cleanup.selected_shelf_ids_by_type
+        or nil
+    local selected_ids = buildShelfIdSet(selected_by_type and selected_by_type[shelf_type])
+    if next(selected_ids) == nil then
+        return entries
+    end
+
+    for _, entry in ipairs(sync.db:getAllShelfSyncEntries() or {}) do
+        if normalizeShelfType(entry.shelf_type) == shelf_type
+            and not selected_ids[tostring(entry.shelf_id)] then
+            addCleanupEntry(entries, seen, entry, true)
+        end
+    end
+    return entries
+end
+
 --- Phase 3: Delete local files for books removed from the remote shelf.
 -- cleanup table comes from prepareSyncPlan().cleanup.
 -- result  table is the running result accumulator.
@@ -1599,10 +1712,11 @@ function ShelfSync:runCleanupPhaseBatch(cleanup, result, cleanup_state, max_item
     result.errors = type(result.errors) == "table" and result.errors or {}
 
     if not cleanup_state then
+        local shelf_type = normalizeShelfType(cleanup.shelf_type)
         cleanup_state = {
             index = 1,
-            shelf_type = normalizeShelfType(cleanup.shelf_type),
-            entries = self.db:getAllShelfSyncEntries(cleanup.shelf_id, normalizeShelfType(cleanup.shelf_type)) or {},
+            shelf_type = shelf_type,
+            entries = buildCleanupEntries(self, cleanup, shelf_type),
             done = false,
         }
     end
@@ -1624,7 +1738,8 @@ function ShelfSync:runCleanupPhaseBatch(cleanup, result, cleanup_state, max_item
         cleanup_state.index = cleanup_state.index + 1
         processed = processed + 1
 
-        if entry.last_seen_in_shelf_at == nil or entry.last_seen_in_shelf_at < cleanup.sync_start then
+        local orphaned_mapping = entry._grimmlink_orphaned_shelf_mapping == true
+        if orphaned_mapping or entry.last_seen_in_shelf_at == nil or entry.last_seen_in_shelf_at < cleanup.sync_start then
             local tracked_elsewhere = self.db.isBookTrackedInOtherShelf
                 and self.db:isBookTrackedInOtherShelf(entry.book_id, entry.shelf_id, entry.shelf_type)
             if tracked_elsewhere then
@@ -1634,7 +1749,11 @@ function ShelfSync:runCleanupPhaseBatch(cleanup, result, cleanup_state, max_item
                     self.db:deleteShelfSyncEntry(entry.book_id)
                 end
                 if progress_fn then
-                    progress_fn("Book kept locally because it is still tracked by another shelf")
+                    if orphaned_mapping then
+                        progress_fn("Removed stale shelf mapping; book kept locally because another shelf still tracks it")
+                    else
+                        progress_fn("Book kept locally because it is still tracked by another shelf")
+                    end
                 end
             elseif entry.downloaded_by_grimmlink == 1 then
                 if progress_fn then

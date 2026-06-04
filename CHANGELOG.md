@@ -2,6 +2,25 @@
 
 # [Unreleased]
 
+# [v1.5.1]
+
+### Fixes
+- Fixed Kindle/legacy-database shelf sync failures where `pending_shelf_removals` could still be on the pre-`shelf_type` schema and crash with `no such column: shelf_type`.
+- Made schema repair fail fast when shelf sync table migrations do not complete, instead of silently continuing with an incompatible database schema.
+- Made pending queue replay resilient to single-step crashes so one broken queue no longer blocks the rest of the pending sync pass.
+- Added async shelf-download fallback to blocking downloads when curl/wget startup or monitoring fails on-device.
+- Fixed shelf-sync snapshot fast-path so stale local shelf mappings still run cleanup instead of being skipped when the snapshot token is unchanged.
+- Fixed two-way regular-shelf deletions when `download_dir` is blank by resolving the auto-managed `/Book` directory before applying local delete safety checks.
+- Fixed stale orphan shelf mappings from previously selected shelves so they no longer block local cleanup for the currently selected Regular/Magic shelves.
+
+### Improvements
+- Added short follow-up pending-sync rounds after resume/network reconnect so large offline backlogs can drain in smaller slices on e-readers.
+- Increased pending shelf-removal drain throughput during shelf sync so large shelves clear queued removals faster on low-power devices.
+
+### Tests
+- Added coverage for pending-sync step isolation and summary reporting.
+- Added helper-spec coverage for batched pending-sync follow-ups and async-download fallback to blocking shelf downloads.
+
 # [v1.5.0]
 
 ### Improvements

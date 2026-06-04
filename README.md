@@ -129,6 +129,8 @@ GrimmLink supports both regular shelves and Magic Shelves:
 | Cancel long sync jobs | ✅ |
 | Free-space safety checks | ✅ |
 | Local cleanup for removed shelf books | ✅ |
+| Async → blocking download fallback | ✅ |
+| Batched pending-removal drain for large shelves | ✅ |
 | SimpleUI bookinfo refresh | ✅ |
 
 Shelf sync is designed to keep Grimmory as the source of truth while making selected books available locally on the device.
@@ -161,6 +163,8 @@ When the network is unavailable, GrimmLink can queue:
 - ⏱️ reading sessions
 - 📝 metadata changes
 - 🗂️ supported shelf-removal API retries
+
+Pending sync replays these queues in smaller follow-up rounds after resume or reconnect, and a failure in one queue no longer prevents the others from retrying.
 
 Pending items can be retried later when the device reconnects.
 
@@ -495,13 +499,16 @@ Before tagging a stable release, test on at least one real KOReader device:
 
 GrimmLink is actively evolving. Current focus areas:
 
-- 🏋️ harden large shelf sync on low-power e-readers
-- 📥 improve async download behavior across Android/e-ink devices
-- 📦 strengthen pending queue handling for edge cases
 - 🔁 improve stale-file detection when server book files change
 - 📝 expand metadata sync reliability across formats
 - 🔐 polish diagnostics and credential redaction
 - 🚀 refine release/update workflow
+
+Recently completed stability work:
+
+- ✅ harden large shelf sync on low-power e-readers
+- ✅ improve async download behavior across Android/e-ink devices
+- ✅ strengthen pending queue handling for edge cases
 
 ---
 
@@ -518,10 +525,10 @@ GrimmLink is actively evolving. Current focus areas:
 ## 🏷️ Version
 
 ```text
-Version: v1.4.11
+Version: v1.5.0
 Type: release
-Commit: 461dc9e
-Build: 2026-06-03T10:44:24+07:00
+Commit: 3595dc4
+Build: 2026-06-03T14:14:18+07:00
 ```
 
 ---

@@ -253,6 +253,27 @@ function Grimmlink:saveShelfSnapshotToken(shelf_id, shelf_type, token)
     return self:saveSetting(self:getShelfSnapshotSettingKey(shelf_id, shelf_type), token)
 end
 
+local function addShelfIdToSet(set, shelf_id)
+    local normalized_id = maybeNumber(shelf_id) or shelf_id
+    if normalized_id ~= nil then
+        set[tostring(normalized_id)] = true
+    end
+end
+
+function Grimmlink:getSelectedShelfIdsByType(active_selection)
+    local selected = { regular = {}, magic = {} }
+    if self.sync_regular_shelf_enabled == true then
+        addShelfIdToSet(selected.regular, self.selected_regular_shelf_id)
+    end
+    if self.sync_magic_shelf_enabled == true then
+        addShelfIdToSet(selected.magic, self.selected_magic_shelf_id)
+    end
+    if type(active_selection) == "table" and active_selection.id ~= nil then
+        addShelfIdToSet(selected[normalizeShelfType(active_selection.type)], active_selection.id)
+    end
+    return selected
+end
+
 function Grimmlink:getActiveShelfSelection()
     local regular_enabled = self.sync_regular_shelf_enabled == true and self.selected_regular_shelf_id ~= nil
     local magic_enabled = self.sync_magic_shelf_enabled == true and self.selected_magic_shelf_id ~= nil
@@ -494,6 +515,7 @@ function Grimmlink:syncShelfNow(silent, opts)
                 end
             end,
             process_pending_shelf_removals = process_pending_shelf_removals,
+            selected_shelf_ids_by_type = self:getSelectedShelfIdsByType(selection),
             plan_state = planning_state,
             plan_batch_size = math.max(
                 10,
@@ -590,7 +612,11 @@ function Grimmlink:syncShelfNow(silent, opts)
             return
         end
 
-        local rounds_left = math.max(1, tonumber(opts.pending_removal_drain_max_rounds) or 8)
+        local drain_batch_size = math.max(1, math.floor(tonumber(opts.pending_removal_drain_batch_size) or 4))
+        if drain_batch_size > 25 then
+            drain_batch_size = 25
+        end
+        local rounds_left = math.max(1, tonumber(opts.pending_removal_drain_max_rounds) or 24)
         local function drainStep()
             if grimmlink_self._shelf_sync_cancelled then
                 done_callback()
@@ -606,7 +632,7 @@ function Grimmlink:syncShelfNow(silent, opts)
                 download_dir = active_download_dir,
                 delete_sdr = grimmlink_self.delete_sdr_on_book_delete,
                 retry_cooldown_seconds = grimmlink_self.pending_shelf_removal_retry_cooldown_seconds,
-                max_entries = 1,
+                max_entries = drain_batch_size,
                 counters = counters,
                 result = drain_result,
             })
@@ -779,6 +805,8 @@ function Grimmlink:syncShelfNow(silent, opts)
     -- Phase 2: Download loop.
     local idx = 0
     local active_handle  = nil  -- current curl download handle (async mode)
+    local startNextDownload
+    local handleCancel
 
     -- Helper: build progress info table from byte counts.
     local function fmtProgress(bytes_so_far, total_bytes)
@@ -815,6 +843,27 @@ function Grimmlink:syncShelfNow(silent, opts)
         end
         if on_complete then
             pcall(on_complete, result)
+        end
+    end
+
+    local function disableAsyncForThisSync(reason, persist_for_session)
+        if not use_async then
+            return
+        end
+        use_async = false
+        result.async_fallback = {
+            used = true,
+            reason = safeToString(reason or "async_disabled"),
+        }
+        if persist_for_session and grimmlink_self.api then
+            grimmlink_self.api._async_available = false
+        end
+        logger.warn("GrimmLink: disabling async downloader for this sync:", result.async_fallback.reason)
+        if not silent then
+            grimmlink_self:showShelfSyncMessage(
+                _("Async download became unavailable; falling back to blocking downloads."),
+                4
+            )
         end
     end
 
@@ -927,6 +976,55 @@ function Grimmlink:syncShelfNow(silent, opts)
         UIManager:scheduleIn(0.05, processNextBatch)
     end
 
+    local function runBlockingDownloadForItem(item, post_delay_seconds)
+        UIManager:nextTick(function()
+            local book = item.book or {}
+            local dl_opts = {
+                expected_size_kb = book.fileSizeKb,
+                downloaded_files_to_refresh = downloaded_files_to_refresh,
+                downloaded_files_to_refresh_set = downloaded_files_to_refresh_set,
+                on_progress = function(bytes_so_far, total_bytes_est)
+                    if grimmlink_self._shelf_sync_cancelled then
+                        return true
+                    end
+                    if not silent then
+                        grimmlink_self:_updateSyncProgressPct(
+                            idx, total, item.title,
+                            fmtProgress(bytes_so_far, total_bytes_est))
+                    end
+                end,
+                is_cancelled = function()
+                    return grimmlink_self._shelf_sync_cancelled
+                end,
+            }
+            local ok_dl, dl_err = pcall(function()
+                return grimmlink_self.shelf_sync:executeDownload(
+                    item, plan.cleanup.shelf_id, plan.cleanup.sync_start, dl_opts)
+            end)
+
+            if grimmlink_self._shelf_sync_cancelled then
+                handleCancel()
+                return
+            end
+
+            if ok_dl and dl_err then
+                result.synced = result.synced + 1
+                if not silent then
+                    local est = (book.fileSizeKb or 0) * 1024
+                    grimmlink_self:_updateSyncProgressPct(
+                        idx, total, item.title, fmtProgress(est, est))
+                end
+            else
+                result.failed = result.failed + 1
+                local err = "Download failed bookId=" .. tostring(item.book_id)
+                    .. ": " .. safeToString(dl_err)
+                result.errors[#result.errors + 1] = err
+                logger.warn("GrimmLink:", err)
+            end
+            UIManager:scheduleIn(post_delay_seconds or 0.1, startNextDownload)
+        end)
+    end
+
     -- Helper: finish sync (cleanup + summary + broadcast).
     local function finishSync()
         if not silent then
@@ -943,7 +1041,7 @@ function Grimmlink:syncShelfNow(silent, opts)
     end
 
     -- Helper: handle cancellation.
-    local function handleCancel()
+    handleCancel = function()
         result.cancelled = true
         if active_handle then
             pcall(grimmlink_self.api.cancelAsyncDownload, grimmlink_self.api, active_handle)
@@ -961,7 +1059,7 @@ function Grimmlink:syncShelfNow(silent, opts)
         end
     end
 
-    local function startNextDownload()
+    startNextDownload = function()
         -- Check cancel.
         if grimmlink_self._shelf_sync_cancelled then
             handleCancel()
@@ -1002,16 +1100,20 @@ function Grimmlink:syncShelfNow(silent, opts)
         if use_async then
             -- === ASYNC PATH: curl/wget subprocess ===
             UIManager:nextTick(function()
-                local ok_start, handle_or_err = pcall(
+                local ok_start, handle_or_err, start_err = pcall(
                     grimmlink_self.shelf_sync.startAsyncDownload,
                     grimmlink_self.shelf_sync, item)
                 if not ok_start or not handle_or_err then
-                    result.failed = result.failed + 1
-                    local err = "Async start failed bookId=" .. tostring(item.book_id)
-                        .. ": " .. safeToString(handle_or_err or ok_start)
-                    result.errors[#result.errors + 1] = err
-                    logger.warn("GrimmLink:", err)
-                    UIManager:scheduleIn(0.1, startNextDownload)
+                    local start_reason = handle_or_err
+                    if ok_start then
+                        start_reason = start_err or handle_or_err
+                    end
+                    disableAsyncForThisSync(
+                        "async_start_failed bookId=" .. tostring(item.book_id)
+                            .. ": " .. safeToString(start_reason or ok_start),
+                        true
+                    )
+                    runBlockingDownloadForItem(item, 0.1)
                     return
                 end
 
@@ -1029,11 +1131,9 @@ function Grimmlink:syncShelfNow(silent, opts)
 
                     if not ok_poll then
                         pcall(grimmlink_self.api.cancelAsyncDownload, grimmlink_self.api, active_handle)
-                        logger.warn("GrimmLink: poll error:", safeToString(status))
-                        result.failed = result.failed + 1
-                        result.errors[#result.errors + 1] = "Download monitoring failed (network/process issue): " .. safeToString(status)
                         active_handle = nil
-                        UIManager:scheduleIn(0.1, startNextDownload)
+                        disableAsyncForThisSync("async_poll_failed: " .. safeToString(status), false)
+                        runBlockingDownloadForItem(item, 0.1)
                         return
                     end
 
@@ -1056,7 +1156,6 @@ function Grimmlink:syncShelfNow(silent, opts)
                         end
                         UIManager:scheduleIn(0.5, startNextDownload)
                     else
-                        result.failed = result.failed + 1
                         local err = "Download failed for bookId=" .. tostring(item.book_id)
                         if status == "timeout" then
                             err = "Download timeout for bookId=" .. tostring(item.book_id) .. ". Check network quality or server speed."
@@ -1076,6 +1175,13 @@ function Grimmlink:syncShelfNow(silent, opts)
                                 err = err .. " (exit " .. tostring(exit_code) .. ")"
                             end
                         end
+                        if status == "timeout" or exit_code == 127 or exit_code == 126 then
+                            active_handle = nil
+                            disableAsyncForThisSync(err, exit_code == 127 or exit_code == 126)
+                            runBlockingDownloadForItem(item, 0.1)
+                            return
+                        end
+                        result.failed = result.failed + 1
                         result.errors[#result.errors + 1] = err
                         logger.warn("GrimmLink:", err)
                         active_handle = nil
@@ -1088,52 +1194,7 @@ function Grimmlink:syncShelfNow(silent, opts)
         else
             -- === BLOCKING PATH: LuaSocket download with progress callback ===
             -- Works on all devices but UI freezes between progress updates.
-            UIManager:nextTick(function()
-                local book = item.book or {}
-                local dl_opts = {
-                    expected_size_kb = book.fileSizeKb,
-                    downloaded_files_to_refresh = downloaded_files_to_refresh,
-                    downloaded_files_to_refresh_set = downloaded_files_to_refresh_set,
-                    on_progress = function(bytes_so_far, total_bytes_est)
-                        if grimmlink_self._shelf_sync_cancelled then
-                            return true  -- signal cancellation
-                        end
-                        if not silent then
-                            grimmlink_self:_updateSyncProgressPct(
-                                idx, total, item.title,
-                                fmtProgress(bytes_so_far, total_bytes_est))
-                        end
-                    end,
-                    is_cancelled = function()
-                        return grimmlink_self._shelf_sync_cancelled
-                    end,
-                }
-                local ok_dl, dl_err = pcall(function()
-                    return grimmlink_self.shelf_sync:executeDownload(
-                        item, plan.cleanup.shelf_id, plan.cleanup.sync_start, dl_opts)
-                end)
-
-                if grimmlink_self._shelf_sync_cancelled then
-                    handleCancel()
-                    return
-                end
-
-                if ok_dl and dl_err then
-                    result.synced = result.synced + 1
-                    if not silent then
-                        local est = (book.fileSizeKb or 0) * 1024
-                        grimmlink_self:_updateSyncProgressPct(
-                            idx, total, item.title, fmtProgress(est, est))
-                    end
-                else
-                    result.failed = result.failed + 1
-                    local err = "Download failed bookId=" .. tostring(item.book_id)
-                        .. ": " .. safeToString(dl_err)
-                    result.errors[#result.errors + 1] = err
-                    logger.warn("GrimmLink:", err)
-                end
-                UIManager:scheduleIn(0.1, startNextDownload)
-            end)
+            runBlockingDownloadForItem(item, 0.1)
         end
     end
 

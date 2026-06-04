@@ -98,6 +98,31 @@ describe("GrimmLink database helpers", function()
         assert.is_true(joined:find("historical_import_sessions", 1, true) ~= nil)
     end)
 
+    it("returns false when shelf sync schema migration fails", function()
+        local series_migration_called = false
+        local db = setmetatable({
+            conn = {
+                exec = function()
+                    return 0
+                end,
+                errmsg = function()
+                    return "migration failed"
+                end,
+            },
+            _migrateMetadataSyncTables = function() end,
+            _migrateBookTrackingState = function() end,
+            _migrateShelfSyncV2 = function()
+                return false
+            end,
+            _migrateShelfSyncSeriesColumns = function()
+                series_migration_called = true
+            end,
+        }, { __index = Database })
+
+        assert.is_false(db:repairSchema())
+        assert.is_false(series_migration_called)
+    end)
+
     it("supports metadata queue helpers", function()
         local pending_rows = {}
         local synced_rows = {}
@@ -265,6 +290,102 @@ describe("GrimmLink database helpers", function()
         assert.is_true(table.concat(executed_sql, "\n"):find("DELETE FROM pending_shelf_removals", 1, true) ~= nil)
         assert.is_true(table.concat(executed_sql, "\n"):find("DELETE FROM shelf_sync_tombstones", 1, true) ~= nil)
         assert.is_true(table.concat(executed_sql, "\n"):find("DELETE FROM pending_sessions", 1, true) ~= nil)
+    end)
+
+    it("supports legacy pending shelf removals tables without shelf_type", function()
+        local bound_values = {}
+        local prepare_calls = {}
+
+        local function stmtFor(sql)
+            local stmt = {}
+            function stmt:bind(...)
+                bound_values[sql] = { ... }
+            end
+            function stmt:step()
+                return 101
+            end
+            function stmt:rows()
+                if sql == "PRAGMA table_info(pending_shelf_removals)" then
+                    local rows = {
+                        { 1, "id" },
+                        { 2, "book_id" },
+                        { 3, "shelf_id" },
+                        { 4, "local_path" },
+                        { 5, "delete_sdr" },
+                        { 6, "retry_count" },
+                        { 7, "last_retry_at" },
+                        { 8, "created_at" },
+                        { 9, "updated_at" },
+                    }
+                    local index = 0
+                    return function()
+                        index = index + 1
+                        return rows[index]
+                    end
+                end
+                if sql:find("SELECT id, book_id, shelf_id, local_path", 1, true) then
+                    local emitted = false
+                    return function()
+                        if emitted then return nil end
+                        emitted = true
+                        return { 7, 42, 9, "/books/legacy.epub", 1, 2, 100, 200, 300 }
+                    end
+                end
+                return function()
+                    return nil
+                end
+            end
+            function stmt:close() end
+            return stmt
+        end
+
+        local db = setmetatable({
+            conn = {
+                prepare = function(_, sql)
+                    prepare_calls[#prepare_calls + 1] = sql
+                    return stmtFor(sql)
+                end,
+                exec = function()
+                    return 0
+                end,
+            },
+        }, { __index = Database })
+
+        local rows = db:getPendingShelfRemovals(9, "regular")
+        assert.are.equal(1, #rows)
+        assert.are.equal("regular", rows[1].shelf_type)
+        assert.are.equal("/books/legacy.epub", rows[1].local_path)
+        assert.same({ 9 }, bound_values["SELECT id, book_id, shelf_id, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at FROM pending_shelf_removals WHERE shelf_id = ? ORDER BY created_at ASC"])
+        assert.same({}, db:getPendingShelfRemovals(9, "magic"))
+
+        assert.is_true(db:upsertPendingShelfRemoval({
+            book_id = 42,
+            shelf_id = 9,
+            shelf_type = "regular",
+            local_path = "/books/legacy.epub",
+            delete_sdr = true,
+        }))
+        local legacy_insert_sql = [[
+            INSERT INTO pending_shelf_removals (book_id, shelf_id, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
+            ON CONFLICT(book_id, shelf_id) DO UPDATE SET
+                local_path = excluded.local_path,
+                delete_sdr = excluded.delete_sdr,
+                retry_count = 0,
+                last_retry_at = NULL,
+                updated_at = excluded.updated_at
+        ]]
+        assert.are.equal(42, bound_values[legacy_insert_sql][1])
+        assert.are.equal(9, bound_values[legacy_insert_sql][2])
+        assert.are.equal("/books/legacy.epub", bound_values[legacy_insert_sql][3])
+        assert.are.equal(1, bound_values[legacy_insert_sql][4])
+
+        assert.is_true(db:incrementPendingShelfRemovalRetryCount(42, 9, "regular"))
+        assert.are.equal(42, bound_values["UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ? AND shelf_id = ?"][3])
+        assert.are.equal(9, bound_values["UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ? AND shelf_id = ?"][4])
+
+        assert.is_true(db:deletePendingShelfRemoval(42, 9, "regular"))
+        assert.same({ 42, 9 }, bound_values["DELETE FROM pending_shelf_removals WHERE book_id = ? AND shelf_id = ?"])
     end)
 
     it("supports per-book tracking helpers", function()

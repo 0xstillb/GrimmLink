@@ -8,10 +8,39 @@ end
 local M = {}
 local DEFAULT_PENDING_SHELF_REMOVAL_RETRY_COOLDOWN_SECONDS = 30
 
+local function safeToString(value)
+    local ok, result = pcall(tostring, value)
+    if ok then
+        return result
+    end
+    return "<tostring_failed>"
+end
+
+local function normalizeCount(value)
+    local number = tonumber(value)
+    if not number then
+        return 0
+    end
+    return math.max(0, math.floor(number))
+end
+
 function M.new()
     local o = {}
     setmetatable(o, { __index = M })
     return o
+end
+
+function M:runQueueStep(plugin, method_name, limit)
+    if not plugin or type(plugin[method_name]) ~= "function" then
+        return 0, 0, method_name .. "_unavailable"
+    end
+
+    local ok, synced, failed = pcall(plugin[method_name], plugin, true, limit)
+    if not ok then
+        return 0, 1, safeToString(synced)
+    end
+
+    return normalizeCount(synced), normalizeCount(failed), nil
 end
 
 function M:syncPendingNow(plugin, silent, opts)
@@ -31,12 +60,60 @@ function M:syncPendingNow(plugin, silent, opts)
     end
 
     if not plugin:requireReady({ require_api = true, silent = silent }) then
-        return
+        return {
+            progress_synced = 0,
+            progress_failed = 0,
+            sessions_synced = 0,
+            sessions_failed = 0,
+            metadata_synced = 0,
+            metadata_failed = 0,
+            queue_remaining = self:getQueueSummaryCounters(plugin),
+            processed_total = 0,
+            step_errors = {},
+        }
     end
 
-    local progress_synced, progress_failed = plugin:syncPendingProgress(true, opts.progress_limit)
-    local sessions_synced, sessions_failed = plugin:syncPendingSessions(true, opts.session_limit)
-    local metadata_synced, metadata_failed = plugin:syncPendingMetadata(true, opts.metadata_limit)
+    local step_errors = {}
+    local progress_synced, progress_failed, progress_err = self:runQueueStep(
+        plugin,
+        "syncPendingProgress",
+        opts.progress_limit
+    )
+    if progress_err then
+        step_errors[#step_errors + 1] = "Progress queue error: " .. progress_err
+    end
+
+    local sessions_synced, sessions_failed, sessions_err = self:runQueueStep(
+        plugin,
+        "syncPendingSessions",
+        opts.session_limit
+    )
+    if sessions_err then
+        step_errors[#step_errors + 1] = "Session queue error: " .. sessions_err
+    end
+
+    local metadata_synced, metadata_failed, metadata_err = self:runQueueStep(
+        plugin,
+        "syncPendingMetadata",
+        opts.metadata_limit
+    )
+    if metadata_err then
+        step_errors[#step_errors + 1] = "Metadata queue error: " .. metadata_err
+    end
+
+    local summary = {
+        progress_synced = progress_synced,
+        progress_failed = progress_failed,
+        sessions_synced = sessions_synced,
+        sessions_failed = sessions_failed,
+        metadata_synced = metadata_synced,
+        metadata_failed = metadata_failed,
+        queue_remaining = self:getQueueSummaryCounters(plugin),
+        processed_total = progress_synced + progress_failed
+            + sessions_synced + sessions_failed
+            + metadata_synced + metadata_failed,
+        step_errors = step_errors,
+    }
 
     if not silent then
         plugin:showMessage(T(
@@ -49,6 +126,8 @@ function M:syncPendingNow(plugin, silent, opts)
             metadata_failed
         ), 4)
     end
+
+    return summary
 end
 
 function M:getQueueSummaryCounters(plugin)

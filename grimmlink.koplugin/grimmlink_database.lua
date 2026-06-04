@@ -104,6 +104,17 @@ local function allRows(stmt, mapper)
     return result
 end
 
+local function safePrepare(conn, sql)
+    if not conn or type(conn.prepare) ~= "function" then
+        return nil, "connection_unavailable"
+    end
+    local ok, stmt_or_err = pcall(conn.prepare, conn, sql)
+    if not ok then
+        return nil, stmt_or_err
+    end
+    return stmt_or_err, nil
+end
+
 local function rowOrNil(row)
     return row and row[1] or nil
 end
@@ -366,10 +377,46 @@ function Database:_exec(sql)
     return self.conn:exec(sql) == SQ3.OK
 end
 
+function Database:_resetSchemaCache()
+    self._table_columns_cache = nil
+end
+
+function Database:_tableColumns(table_name)
+    if not table_name or table_name == "" then
+        return {}
+    end
+
+    self._table_columns_cache = self._table_columns_cache or {}
+    if self._table_columns_cache[table_name] then
+        return self._table_columns_cache[table_name]
+    end
+
+    local cols = {}
+    local stmt = safePrepare(self.conn, "PRAGMA table_info(" .. table_name .. ")")
+    if stmt then
+        for row in stmt:rows() do
+            local name = tostring(row[2] or "")
+            if name ~= "" then
+                cols[name] = true
+            end
+        end
+        stmt:close()
+    end
+
+    self._table_columns_cache[table_name] = cols
+    return cols
+end
+
+function Database:_tableHasColumn(table_name, column_name)
+    return self:_tableColumns(table_name)[column_name] == true
+end
+
 function Database:repairSchema()
     if not self.conn then
         return false
     end
+
+    self:_resetSchemaCache()
 
     for _, sql in ipairs(self.schema_sql) do
         if not self:_exec(sql) then
@@ -380,8 +427,11 @@ function Database:repairSchema()
 
     self:_migrateMetadataSyncTables()
     self:_migrateBookTrackingState()
-    self:_migrateShelfSyncV2()
+    if self:_migrateShelfSyncV2() == false then
+        return false
+    end
     self:_migrateShelfSyncSeriesColumns()
+    self:_resetSchemaCache()
     return true
 end
 
@@ -1825,16 +1875,55 @@ local function mapPendingShelfRemoval(row)
     }
 end
 
+local function mapLegacyPendingShelfRemoval(row)
+    return {
+        id = tonumber(row[1]) or row[1],
+        book_id = tonumber(row[2]) or row[2],
+        shelf_id = tonumber(row[3]) or row[3],
+        shelf_type = "regular",
+        local_path = row[4],
+        delete_sdr = (tonumber(row[5]) or 0) == 1,
+        retry_count = tonumber(row[6]) or row[6],
+        last_retry_at = tonumber(row[7]) or row[7],
+        created_at = tonumber(row[8]) or row[8],
+        updated_at = tonumber(row[9]) or row[9],
+    }
+end
+
+function Database:_pendingShelfRemovalsHasShelfType()
+    return self:_tableHasColumn("pending_shelf_removals", "shelf_type")
+end
+
 function Database:getPendingShelfRemovals(shelf_id, shelf_type)
     local normalized_type = normalizeShelfType(shelf_type)
-    local stmt = self.conn and self.conn:prepare(
-        "SELECT id, book_id, shelf_id, shelf_type, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at FROM pending_shelf_removals WHERE shelf_id = ? AND shelf_type = ? ORDER BY created_at ASC"
-    )
+    local stmt = nil
+    local mapper = mapPendingShelfRemoval
+
+    if self:_pendingShelfRemovalsHasShelfType() then
+        stmt = safePrepare(
+            self.conn,
+            "SELECT id, book_id, shelf_id, shelf_type, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at FROM pending_shelf_removals WHERE shelf_id = ? AND shelf_type = ? ORDER BY created_at ASC"
+        )
+        if stmt then
+            stmt:bind(shelf_id, normalized_type)
+        end
+    elseif normalized_type == "regular" then
+        mapper = mapLegacyPendingShelfRemoval
+        stmt = safePrepare(
+            self.conn,
+            "SELECT id, book_id, shelf_id, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at FROM pending_shelf_removals WHERE shelf_id = ? ORDER BY created_at ASC"
+        )
+        if stmt then
+            stmt:bind(shelf_id)
+        end
+    else
+        return {}
+    end
+
     if not stmt then
         return {}
     end
-    stmt:bind(shelf_id, normalized_type)
-    return allRows(stmt, mapPendingShelfRemoval)
+    return allRows(stmt, mapper)
 end
 
 function Database:getPendingShelfRemovalCount()
@@ -1853,30 +1942,63 @@ function Database:clearPendingShelfRemovals()
 end
 
 function Database:upsertPendingShelfRemoval(entry)
-    local sql = [[
-        INSERT INTO pending_shelf_removals (book_id, shelf_id, shelf_type, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)
-        ON CONFLICT(book_id, shelf_id, shelf_type) DO UPDATE SET
-            local_path = excluded.local_path,
-            delete_sdr = excluded.delete_sdr,
-            retry_count = 0,
-            last_retry_at = NULL,
-            updated_at = excluded.updated_at
-    ]]
-    local stmt = self.conn and self.conn:prepare(sql)
+    local normalized_type = normalizeShelfType(entry and entry.shelf_type)
+    local stmt = nil
+    local ts = nowEpoch()
+
+    if self:_pendingShelfRemovalsHasShelfType() then
+        stmt = safePrepare(self.conn, [[
+            INSERT INTO pending_shelf_removals (book_id, shelf_id, shelf_type, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)
+            ON CONFLICT(book_id, shelf_id, shelf_type) DO UPDATE SET
+                local_path = excluded.local_path,
+                delete_sdr = excluded.delete_sdr,
+                retry_count = 0,
+                last_retry_at = NULL,
+                updated_at = excluded.updated_at
+        ]])
+        if stmt then
+            stmt:bind(
+                entry.book_id,
+                entry.shelf_id,
+                normalized_type,
+                entry.local_path,
+                entry.delete_sdr == true and 1 or 0,
+                ts,
+                ts
+            )
+        end
+    elseif normalized_type == "regular" then
+        stmt = safePrepare(self.conn, [[
+            INSERT INTO pending_shelf_removals (book_id, shelf_id, local_path, delete_sdr, retry_count, last_retry_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
+            ON CONFLICT(book_id, shelf_id) DO UPDATE SET
+                local_path = excluded.local_path,
+                delete_sdr = excluded.delete_sdr,
+                retry_count = 0,
+                last_retry_at = NULL,
+                updated_at = excluded.updated_at
+        ]])
+        if stmt then
+            stmt:bind(
+                entry.book_id,
+                entry.shelf_id,
+                entry.local_path,
+                entry.delete_sdr == true and 1 or 0,
+                ts,
+                ts
+            )
+        end
+    else
+        if not self:repairSchema() then
+            return false
+        end
+        return self:upsertPendingShelfRemoval(entry)
+    end
+
     if not stmt then
         return false
     end
-    local ts = nowEpoch()
-    stmt:bind(
-        entry.book_id,
-        entry.shelf_id,
-        normalizeShelfType(entry.shelf_type),
-        entry.local_path,
-        entry.delete_sdr == true and 1 or 0,
-        ts,
-        ts
-    )
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
@@ -1895,19 +2017,33 @@ end
 function Database:deletePendingShelfRemoval(book_id, shelf_id, shelf_type)
     local stmt
     if shelf_id ~= nil then
-        stmt = self.conn and self.conn:prepare(
-            "DELETE FROM pending_shelf_removals WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?"
-        )
+        if self:_pendingShelfRemovalsHasShelfType() then
+            stmt = safePrepare(
+                self.conn,
+                "DELETE FROM pending_shelf_removals WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?"
+            )
+            if stmt then
+                stmt:bind(book_id, shelf_id, normalizeShelfType(shelf_type))
+            end
+        elseif normalizeShelfType(shelf_type) == "regular" then
+            stmt = safePrepare(
+                self.conn,
+                "DELETE FROM pending_shelf_removals WHERE book_id = ? AND shelf_id = ?"
+            )
+            if stmt then
+                stmt:bind(book_id, shelf_id)
+            end
+        else
+            return false
+        end
     else
-        stmt = self.conn and self.conn:prepare("DELETE FROM pending_shelf_removals WHERE book_id = ?")
+        stmt = safePrepare(self.conn, "DELETE FROM pending_shelf_removals WHERE book_id = ?")
+        if stmt then
+            stmt:bind(book_id)
+        end
     end
     if not stmt then
         return false
-    end
-    if shelf_id ~= nil then
-        stmt:bind(book_id, shelf_id, normalizeShelfType(shelf_type))
-    else
-        stmt:bind(book_id)
     end
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
@@ -1916,23 +2052,38 @@ end
 
 function Database:incrementPendingShelfRemovalRetryCount(book_id, shelf_id, shelf_type)
     local stmt
+    local ts = nowEpoch()
     if shelf_id ~= nil then
-        stmt = self.conn and self.conn:prepare(
-            "UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?"
-        )
+        if self:_pendingShelfRemovalsHasShelfType() then
+            stmt = safePrepare(
+                self.conn,
+                "UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ? AND shelf_id = ? AND shelf_type = ?"
+            )
+            if stmt then
+                stmt:bind(ts, ts, book_id, shelf_id, normalizeShelfType(shelf_type))
+            end
+        elseif normalizeShelfType(shelf_type) == "regular" then
+            stmt = safePrepare(
+                self.conn,
+                "UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ? AND shelf_id = ?"
+            )
+            if stmt then
+                stmt:bind(ts, ts, book_id, shelf_id)
+            end
+        else
+            return false
+        end
     else
-        stmt = self.conn and self.conn:prepare(
+        stmt = safePrepare(
+            self.conn,
             "UPDATE pending_shelf_removals SET retry_count = retry_count + 1, last_retry_at = ?, updated_at = ? WHERE book_id = ?"
         )
+        if stmt then
+            stmt:bind(ts, ts, book_id)
+        end
     end
     if not stmt then
         return false
-    end
-    local ts = nowEpoch()
-    if shelf_id ~= nil then
-        stmt:bind(ts, ts, book_id, shelf_id, normalizeShelfType(shelf_type))
-    else
-        stmt:bind(ts, ts, book_id)
     end
     local ok = stmt:step() == SQ3.DONE
     stmt:close()

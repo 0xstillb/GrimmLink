@@ -289,6 +289,9 @@ function Grimmlink:onResume()
             self:schedulePendingSync("resume pending sync", 0.75, {
                 progress_limit = 10,
                 session_limit = 25,
+                metadata_limit = 20,
+                followup_rounds = 2,
+                followup_delay_seconds = 1.0,
                 respect_cooldown = true,
                 cooldown_seconds = tonumber(self.network_sync_cooldown_seconds) or DEFAULTS.network_sync_cooldown_seconds,
             })
@@ -327,6 +330,9 @@ function Grimmlink:onNetworkConnected()
         self:schedulePendingSync("network connected pending sync", 0.75, {
             progress_limit = 10,
             session_limit = 25,
+            metadata_limit = 20,
+            followup_rounds = 2,
+            followup_delay_seconds = 1.0,
             respect_cooldown = true,
             cooldown_seconds = tonumber(self.network_sync_cooldown_seconds) or DEFAULTS.network_sync_cooldown_seconds,
         })
