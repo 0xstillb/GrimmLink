@@ -40,6 +40,8 @@ Active endpoint families:
 - `/api/grimmlink/v1/books/{bookId}/pdf-progress`
 - `/api/grimmlink/v1/reading-sessions`
 - `/api/grimmlink/v1/reading-sessions/batch`
+- `/api/grimmlink/v1/syncs/metadata`
+- `/api/grimmlink/v1/syncs/metadata/batch`
 - Shelf Sync endpoints
 
 ## Safety Invariants

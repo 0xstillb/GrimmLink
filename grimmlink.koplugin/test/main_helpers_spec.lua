@@ -1584,11 +1584,15 @@ describe("GrimmLink helper methods", function()
             success = true,
             response = {
                 ok = true,
-                results = {
-                    rating = { dedupeKey = "r-1", itemType = "rating", status = "synced", serverId = "11" },
-                    annotations = { { dedupeKey = "a-1", itemType = "annotation", status = "duplicate", serverId = "12" } },
-                    bookmarks = { { dedupeKey = "b-1", itemType = "bookmark", status = "updated", serverId = "13" } },
+                push = {
+                    ok = true,
+                    results = {
+                        rating = { dedupeKey = "r-1", itemType = "rating", status = "synced", serverId = "11" },
+                        annotations = { { dedupeKey = "a-1", itemType = "annotation", status = "duplicate", serverId = "12" } },
+                        bookmarks = { { dedupeKey = "b-1", itemType = "bookmark", status = "updated", serverId = "13" } },
+                    },
                 },
+                pull = { ok = true, items = {} },
             },
             code = 200,
         }

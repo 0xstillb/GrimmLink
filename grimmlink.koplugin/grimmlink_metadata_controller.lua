@@ -476,7 +476,7 @@ function Grimmlink:syncPendingMetadata(silent, limit)
                 end
             else
                 local processed_ids = {}
-                local results = response.results or {}
+                local results = response.results or (type(response.push) == "table" and response.push.results) or {}
                 if type(results.rating) == "table" then
                     handleResult(group, results.rating, "rating", processed_ids)
                 end

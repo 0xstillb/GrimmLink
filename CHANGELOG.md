@@ -4,9 +4,11 @@
 
 ### Improvements
 - Cut normal GrimmLink sync traffic over to the backend v1 API island at `/api/grimmlink/v1`, including auth, progress, sessions, metadata, shelves, downloads, read status, and PDF progress.
+- Moved metadata queue flushes to the GrimmLink v1 push-pull batch endpoint while preserving existing per-item queue result handling.
 
 ### Tests
 - Updated API client coverage to assert the centralized GrimmLink v1 API prefix and migrated endpoint paths.
+- Added API client coverage for metadata push-pull batch response normalization.
 
 # [v1.5.1]
 

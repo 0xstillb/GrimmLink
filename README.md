@@ -398,6 +398,7 @@ Core endpoint groups include:
 /api/grimmlink/v1/reading-sessions
 /api/grimmlink/v1/reading-sessions/batch
 /api/grimmlink/v1/syncs/metadata
+/api/grimmlink/v1/syncs/metadata/batch
 /api/grimmlink/v1/shelves
 /api/grimmlink/v1/shelves/{type}/{shelfId}/books
 /api/grimmlink/v1/shelves/{shelfId}/books

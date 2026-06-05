@@ -86,6 +86,7 @@ Known caveat:
 - `POST /api/grimmlink/v1/reading-sessions`
 - `POST /api/grimmlink/v1/reading-sessions/batch`
 - `POST /api/grimmlink/v1/syncs/metadata`
+- `POST /api/grimmlink/v1/syncs/metadata/batch`
 - `GET /api/grimmlink/v1/shelves`
 - `GET /api/grimmlink/v1/shelves/{type}/{id}/books`
 - `GET /api/grimmlink/v1/shelves/{id}/books` (fallback path)

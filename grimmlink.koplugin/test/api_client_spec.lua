@@ -222,7 +222,13 @@ describe("GrimmLink API client", function()
         assert.are.equal(1, #payload.bookmarks)
     end)
 
-    it("submits metadata batch to the GrimmLink metadata endpoint", function()
+    it("submits metadata batch to the GrimmLink metadata batch endpoint", function()
+        next_http_response = {
+            body = '{"ok":true,"push":{"ok":true,"results":{"annotations":[],"bookmarks":[]}},"pull":{"ok":true,"items":[]}}',
+            code = 200,
+            headers = {},
+            ok = 1,
+        }
         local success, _, _ = client:submitMetadataBatch({
             schemaVersion = 1,
             syncMode = "incremental",
@@ -232,7 +238,7 @@ describe("GrimmLink API client", function()
             bookmarks = {},
         })
         assert.is_true(success)
-        assert.are.equal("/api/grimmlink/v1/syncs/metadata", captured_request.url:match("/api/grimmlink/v1/syncs/metadata$") and "/api/grimmlink/v1/syncs/metadata" or nil)
+        assert.are.equal("/api/grimmlink/v1/syncs/metadata/batch", captured_request.url:match("/api/grimmlink/v1/syncs/metadata/batch$") and "/api/grimmlink/v1/syncs/metadata/batch" or nil)
     end)
 
     it("fetches supported read statuses from GrimmLink endpoint", function()

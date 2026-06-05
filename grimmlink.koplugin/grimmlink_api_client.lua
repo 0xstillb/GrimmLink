@@ -541,7 +541,7 @@ local function normalizeShelfType(value)
     return shelf_type
 end
 
-function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks)
+function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks, pull_since, pull_limit)
     local normalized_annotations = nil
     if type(annotations) == "table" and #annotations > 0 then
         normalized_annotations = annotations
@@ -562,6 +562,8 @@ function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, f
         device = device,
         deviceId = device_id,
         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        since = pull_since,
+        limit = pull_limit,
         rating = rating,
         annotations = normalized_annotations,
         bookmarks = normalized_bookmarks,
@@ -569,8 +571,11 @@ function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, f
 end
 
 function APIClient:submitMetadataBatch(payload)
-    local success, code, response = self:request("POST", self:_apiPath("/syncs/metadata"), payload)
+    local success, code, response = self:request("POST", self:_apiPath("/syncs/metadata/batch"), payload)
     if success then
+        if type(response) == "table" and type(response.push) == "table" and response.results == nil then
+            response.results = response.push.results
+        end
         return true, response, code
     end
     return false, response or ("HTTP " .. tostring(code or "?")), code
