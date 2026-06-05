@@ -342,6 +342,66 @@ function Grimmlink:markMetadataRowSynced(row, server_id)
     safeDbBoolCall(self.db, "deletePendingMetadataItem", row.id)
 end
 
+function Grimmlink:metadataCursorKey(file_hash, book_id, book_file_id)
+    local identity = safeToString(file_hash)
+    if identity == "" then
+        identity = "book:" .. safeToString(book_id)
+    end
+    if identity == "book:" then
+        identity = "book_file:" .. safeToString(book_file_id)
+    end
+    if identity == "book_file:" then
+        return nil
+    end
+    return "metadata_cursor:" .. identity
+end
+
+function Grimmlink:getMetadataCursor(file_hash, book_id, book_file_id)
+    local key = self:metadataCursorKey(file_hash, book_id, book_file_id)
+    if not key then
+        return nil
+    end
+    local cursor = safeDbValueCall(self.db, "getPluginSetting", nil, key)
+    if cursor == nil or cursor == "" then
+        return nil
+    end
+    return safeToString(cursor)
+end
+
+function Grimmlink:saveMetadataCursor(file_hash, book_id, book_file_id, cursor)
+    if cursor == nil or cursor == "" then
+        return false
+    end
+    local key = self:metadataCursorKey(file_hash, book_id, book_file_id)
+    if not key then
+        return false
+    end
+    return safeDbBoolCall(self.db, "savePluginSetting", key, safeToString(cursor))
+end
+
+function Grimmlink:mergePulledMetadataItems(file_hash, book_id, items)
+    local merged = 0
+    if type(items) ~= "table" then
+        return merged
+    end
+
+    for _, item in ipairs(items) do
+        if type(item) == "table" and item.dedupeKey and item.type then
+            if safeDbBoolCall(self.db, "markMetadataItemSynced", {
+                file_hash = file_hash,
+                book_id = item.bookId or book_id,
+                item_type = item.type,
+                dedupe_key = item.dedupeKey,
+                server_id = item.id,
+            }) then
+                merged = merged + 1
+            end
+        end
+    end
+
+    return merged
+end
+
 function Grimmlink:handleMetadataRowRetry(row, reason)
     local max_retry = tonumber(self.metadata_retry_max) or DEFAULTS.metadata_retry_max
     local retry_count = tonumber(row.retry_count) or 0
@@ -411,6 +471,7 @@ function Grimmlink:syncPendingMetadata(silent, limit)
                         }
                     end
                     local group = groups[key]
+                    group.pull_since = group.pull_since or self:getMetadataCursor(row.file_hash, row.book_id, row.book_file_id)
                     group.rows[#group.rows + 1] = row
                     group.item_by_dedupe[row.dedupe_key] = row
 
@@ -465,7 +526,9 @@ function Grimmlink:syncPendingMetadata(silent, limit)
                 self.device_id,
                 group.rating,
                 group.annotations,
-                group.bookmarks
+                group.bookmarks,
+                group.pull_since,
+                limit or 100
             )
 
             local ok_submit, response, code = self.api:submitMetadataBatch(payload)
@@ -476,6 +539,7 @@ function Grimmlink:syncPendingMetadata(silent, limit)
                 end
             else
                 local processed_ids = {}
+                local failed_before_group = failed
                 local results = response.results or (type(response.push) == "table" and response.push.results) or {}
                 if type(results.rating) == "table" then
                     handleResult(group, results.rating, "rating", processed_ids)
@@ -493,6 +557,12 @@ function Grimmlink:syncPendingMetadata(silent, limit)
                         self:handleMetadataRowRetry(row, "missing_result")
                         failed = failed + 1
                     end
+                end
+
+                local pull = type(response.pull) == "table" and response.pull or nil
+                if failed == failed_before_group and pull and pull.ok ~= false then
+                    self:mergePulledMetadataItems(group.book_hash, group.book_id, pull.items)
+                    self:saveMetadataCursor(group.book_hash, group.book_id, group.book_file_id, pull.nextCursor)
                 end
             end
         end

@@ -211,13 +211,17 @@ describe("GrimmLink API client", function()
             "device-1",
             { dedupeKey = "r-1", value = 4, scale = 5 },
             { { dedupeKey = "a-1", text = "Highlight" } },
-            { { dedupeKey = "b-1", title = "Bookmark" } }
+            { { dedupeKey = "b-1", title = "Bookmark" } },
+            "2026-06-05T00:00:00Z",
+            50
         )
         assert.are.equal(88, payload.bookId)
         assert.are.equal("hash-meta", payload.bookHash)
         assert.are.equal(900, payload.bookFileId)
         assert.are.equal("EPUB", payload.fileFormat)
         assert.are.equal("incremental", payload.syncMode)
+        assert.are.equal("2026-06-05T00:00:00Z", payload.since)
+        assert.are.equal(50, payload.limit)
         assert.are.equal(1, #payload.annotations)
         assert.are.equal(1, #payload.bookmarks)
     end)

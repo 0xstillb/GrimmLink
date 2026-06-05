@@ -561,7 +561,7 @@ local function newApi()
         return self.next_session_batch.success, self.next_session_batch.response, self.next_session_batch.code
     end
 
-    function api:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks)
+    function api:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks, pull_since, pull_limit)
         return {
             schemaVersion = 1,
             syncMode = "incremental",
@@ -571,6 +571,8 @@ local function newApi()
             fileFormat = file_format,
             device = device,
             deviceId = device_id,
+            since = pull_since,
+            limit = pull_limit,
             rating = rating,
             annotations = annotations or {},
             bookmarks = bookmarks or {},
@@ -1580,6 +1582,7 @@ describe("GrimmLink helper methods", function()
                 retry_count = 0,
             },
         }
+        plugin.db.settings["metadata_cursor:hash-meta-sync"] = "2026-06-05T00:00:00Z"
         plugin.api.next_metadata_batch = {
             success = true,
             response = {
@@ -1592,7 +1595,13 @@ describe("GrimmLink helper methods", function()
                         bookmarks = { { dedupeKey = "b-1", itemType = "bookmark", status = "updated", serverId = "13" } },
                     },
                 },
-                pull = { ok = true, items = {} },
+                pull = {
+                    ok = true,
+                    nextCursor = "2026-06-05T00:01:00Z",
+                    items = {
+                        { id = "remote-1", type = "annotation", bookId = 70, dedupeKey = "remote-a-1" },
+                    },
+                },
             },
             code = 200,
         }
@@ -1601,7 +1610,10 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(3, synced)
         assert.are.equal(0, failed)
         assert.are.equal(0, #plugin.db.pending_metadata_items)
-        assert.are.equal(3, #plugin.db.synced_metadata_items)
+        assert.are.equal(4, #plugin.db.synced_metadata_items)
+        assert.are.equal("2026-06-05T00:00:00Z", plugin.api.calls[1].payload.since)
+        assert.are.equal(100, plugin.api.calls[1].payload.limit)
+        assert.are.equal("2026-06-05T00:01:00Z", plugin.db.settings["metadata_cursor:hash-meta-sync"])
     end)
 
     it("keeps failed metadata rows pending with retry increment", function()
@@ -1620,6 +1632,7 @@ describe("GrimmLink helper methods", function()
                 retry_count = 0,
             },
         }
+        plugin.db.settings["metadata_cursor:hash-meta-retry"] = "2026-06-05T00:00:00Z"
         plugin.api.next_metadata_batch = {
             success = false,
             response = "HTTP 500",
@@ -1631,6 +1644,7 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(1, failed)
         assert.are.equal(1, #plugin.db.pending_metadata_items)
         assert.are.equal(1, plugin.db.pending_metadata_items[1].retry_count)
+        assert.are.equal("2026-06-05T00:00:00Z", plugin.db.settings["metadata_cursor:hash-meta-retry"])
     end)
 
     it("drops invalid metadata rows and stops retrying after max retry", function()
