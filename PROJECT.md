@@ -79,22 +79,23 @@ Known caveat:
 
 ## Backend Endpoints Used
 
-- `GET /api/koreader/users/auth`
-- `GET /api/koreader/books/by-hash/{hash}`
-- `GET /api/koreader/syncs/progress/{hash}`
-- `PUT /api/koreader/syncs/progress`
-- `POST /api/v1/reading-sessions`
-- `POST /api/v1/reading-sessions/batch`
-- `POST /api/koreader/syncs/metadata`
-- `GET /api/koreader/shelves`
-- `GET /api/koreader/shelves/{type}/{id}/books`
-- `GET /api/koreader/shelves/{id}/books` (fallback path)
-- `POST /api/koreader/shelves/{type}/{id}/books/{bookId}/remove`
-- `POST /api/koreader/shelves/{id}/books/{bookId}/remove` (fallback path)
-- `GET /api/koreader/books/read-statuses`
-- `PUT /api/koreader/books/{bookId}/status`
-- `GET /api/koreader/books/{bookId}/pdf-progress`
-- `PUT /api/koreader/books/{bookId}/pdf-progress`
+- `GET /api/grimmlink/v1/auth`
+- `GET /api/grimmlink/v1/books/by-hash/{hash}`
+- `GET /api/grimmlink/v1/syncs/progress/{hash}`
+- `PUT /api/grimmlink/v1/syncs/progress`
+- `POST /api/grimmlink/v1/reading-sessions`
+- `POST /api/grimmlink/v1/reading-sessions/batch`
+- `POST /api/grimmlink/v1/syncs/metadata`
+- `GET /api/grimmlink/v1/shelves`
+- `GET /api/grimmlink/v1/shelves/{type}/{id}/books`
+- `GET /api/grimmlink/v1/shelves/{id}/books` (fallback path)
+- `GET /api/grimmlink/v1/books/{bookId}/download`
+- `POST /api/grimmlink/v1/shelves/{type}/{id}/books/{bookId}/remove`
+- `POST /api/grimmlink/v1/shelves/{id}/books/{bookId}/remove` (fallback path)
+- `GET /api/grimmlink/v1/books/read-statuses`
+- `PUT /api/grimmlink/v1/books/{bookId}/status`
+- `GET /api/grimmlink/v1/books/{bookId}/pdf-progress`
+- `PUT /api/grimmlink/v1/books/{bookId}/pdf-progress`
 
 ## High-Level Module Map
 

@@ -69,7 +69,7 @@ The fingerprint is cached in the local database so it is only calculated once pe
 The plugin maps the file fingerprint to a BookLore internal book ID using:
 
 ```
-GET /api/koreader/books/by-hash/:hash
+GET /api/grimmlink/v1/books/by-hash/:hash
 ```
 
 The result is cached in the `book_cache` SQLite table alongside the file path, title, isbn10, isbn13 and author.
@@ -120,7 +120,7 @@ This means a single uninterrupted reading period that spans a suspend/resume cyc
 When multiple sessions are pending (e.g., after extended offline use), the plugin uploads them in a single batch request of up to 100 sessions at a time:
 
 ```
-POST /api/v1/reading-sessions/batch
+POST /api/grimmlink/v1/reading-sessions/batch
 ```
 
 ---

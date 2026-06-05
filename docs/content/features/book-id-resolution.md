@@ -42,7 +42,7 @@ The most reliable way to embed metadata is with [Calibre](https://calibre-ebook.
 
 Open the book normally. The plugin will:
 
-1. Calculate the MD5 fingerprint of the file and query `GET /api/koreader/books/by-hash/:hash`.
+1. Calculate the MD5 fingerprint of the file and query `GET /api/grimmlink/v1/books/by-hash/:hash`.
 2. If the hash lookup returns no match, automatically attempt an ISBN lookup (see below).
 3. Cache the resolved book ID for all future sessions.
 

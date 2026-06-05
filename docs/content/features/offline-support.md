@@ -63,7 +63,7 @@ flowchart TD
 When multiple sessions are pending, the plugin uploads them in a single batch request:
 
 ```
-POST /api/v1/reading-sessions/batch
+POST /api/grimmlink/v1/reading-sessions/batch
 ```
 
 Up to **100 sessions per batch** are sent in one request. This is 10–20 times faster than individual uploads for large queues (e.g., after a week without a connection).

@@ -386,27 +386,30 @@ Shelf deletion is scoped to **shelf membership** and **GrimmLink-managed local f
 
 ## 🧩 Grimmory API Usage
 
-GrimmLink communicates with the **[`0xstillb/grimmory`](https://github.com/0xstillb/grimmory) fork** through KOReader companion endpoints.
+GrimmLink communicates with the **[`0xstillb/grimmory`](https://github.com/0xstillb/grimmory) fork** through the GrimmLink v1 API island.
 
 Core endpoint groups include:
 
 ```text
-/api/koreader/users/auth
-/api/koreader/books/by-hash/{hash}
-/api/koreader/syncs/progress
-/api/koreader/syncs/progress/{hash}
-/api/v1/reading-sessions
-/api/v1/reading-sessions/batch
-/api/koreader/syncs/metadata
-/api/koreader/shelves
-/api/koreader/shelves/{type}/{shelfId}/books
-/api/koreader/books/{bookId}/download
-/api/koreader/books/read-statuses
-/api/koreader/books/{bookId}/status
-/api/koreader/books/{bookId}/pdf-progress
+/api/grimmlink/v1/auth
+/api/grimmlink/v1/books/by-hash/{hash}
+/api/grimmlink/v1/syncs/progress
+/api/grimmlink/v1/syncs/progress/{hash}
+/api/grimmlink/v1/reading-sessions
+/api/grimmlink/v1/reading-sessions/batch
+/api/grimmlink/v1/syncs/metadata
+/api/grimmlink/v1/shelves
+/api/grimmlink/v1/shelves/{type}/{shelfId}/books
+/api/grimmlink/v1/shelves/{shelfId}/books
+/api/grimmlink/v1/books/{bookId}/download
+/api/grimmlink/v1/shelves/{type}/{shelfId}/books/{bookId}/remove
+/api/grimmlink/v1/shelves/{shelfId}/books/{bookId}/remove
+/api/grimmlink/v1/books/read-statuses
+/api/grimmlink/v1/books/{bookId}/status
+/api/grimmlink/v1/books/{bookId}/pdf-progress
 ```
 
-Authentication uses KOReader companion-style headers:
+Authentication for the GrimmLink v1 API uses KOReader companion-style headers:
 
 ```text
 x-auth-user

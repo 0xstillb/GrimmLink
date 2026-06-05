@@ -2,6 +2,12 @@
 
 # [Unreleased]
 
+### Improvements
+- Cut normal GrimmLink sync traffic over to the backend v1 API island at `/api/grimmlink/v1`, including auth, progress, sessions, metadata, shelves, downloads, read status, and PDF progress.
+
+### Tests
+- Updated API client coverage to assert the centralized GrimmLink v1 API prefix and migrated endpoint paths.
+
 # [v1.5.1]
 
 ### Fixes

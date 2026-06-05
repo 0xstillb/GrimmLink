@@ -33,13 +33,13 @@ The supported stable scope includes:
 
 Active endpoint families:
 
-- `/api/koreader/users/auth`
-- `/api/koreader/books/by-hash/{bookHash}`
-- `/api/koreader/syncs/progress/{bookHash}`
-- `/api/koreader/syncs/progress`
-- `/api/koreader/books/{bookId}/pdf-progress`
-- `/api/v1/reading-sessions`
-- `/api/v1/reading-sessions/batch`
+- `/api/grimmlink/v1/auth`
+- `/api/grimmlink/v1/books/by-hash/{bookHash}`
+- `/api/grimmlink/v1/syncs/progress/{bookHash}`
+- `/api/grimmlink/v1/syncs/progress`
+- `/api/grimmlink/v1/books/{bookId}/pdf-progress`
+- `/api/grimmlink/v1/reading-sessions`
+- `/api/grimmlink/v1/reading-sessions/batch`
 - Shelf Sync endpoints
 
 ## Safety Invariants
@@ -57,8 +57,8 @@ Active endpoint families:
 ## Out Of Scope
 
 - EPUB CFI conversion
-- `/api/koreader/books/{bookId}/cfi/resolve`
-- `/api/koreader/books/{bookId}/web-progress`
+- `/api/grimmlink/v1/books/{bookId}/cfi/resolve`
+- `/api/grimmlink/v1/books/{bookId}/web-progress`
 - any automatic EPUB Web Reader Bridge flow
 - new major sync features
 - library delete behavior

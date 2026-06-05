@@ -57,7 +57,7 @@ If sessions sync but annotations or ratings do not, the **BookLore Account** cre
 
 **Step 4 - Check firewall / reverse proxy:**
 
-If BookLore is behind a reverse proxy, confirm the `/api/koreader/` path is not blocked or rewritten.
+If Grimmory is behind a reverse proxy, confirm the `/api/grimmlink/v1/` path is not blocked or rewritten.
 
 ---
 

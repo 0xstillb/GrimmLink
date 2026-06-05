@@ -14,9 +14,9 @@ This page documents every API endpoint the plugin communicates with, along with 
 
 The plugin uses two authentication methods depending on the endpoint:
 
-### MD5 credentials (legacy KOReader API)
+### MD5 credentials (GrimmLink v1 API)
 
-Used for the original KOReader sync endpoints. Credentials are sent as HTTP headers:
+Used for the normal GrimmLink sync endpoints under `/api/grimmlink/v1`. Credentials are sent as HTTP headers:
 
 ```
 x-auth-user: <username>
@@ -37,7 +37,7 @@ The token is fetched from `POST /api/v1/auth/login` and automatically refreshed 
 
 ## Authentication endpoints
 
-### `GET /api/koreader/users/auth`
+### `GET /api/grimmlink/v1/auth`
 
 Validates the KOReader (MD5) credentials.
 
@@ -77,7 +77,7 @@ The `accessToken` is cached in the `bearer_tokens` table with a 28-day local TTL
 
 ## Book endpoints
 
-### `GET /api/koreader/books/by-hash/:hash`
+### `GET /api/grimmlink/v1/books/by-hash/:hash`
 
 Looks up a book by its MD5 file fingerprint.
 
@@ -128,7 +128,7 @@ Searches for a book by ISBN.
 
 **Query parameter:** `isbn` - an ISBN-10 or ISBN-13 value. If both are embedded in the file, ISBN-13 is preferred.
 
-**When it is called:** Automatically at book-open time, as a fallback when `GET /api/koreader/books/by-hash/:hash` returns no match and the device has a network connection.
+**When it is called:** Automatically at book-open time, as a fallback when `GET /api/grimmlink/v1/books/by-hash/:hash` returns no match and the device has a network connection.
 
 **Match requirement:** The plugin inspects each result for a `matchScore` field and only accepts a result where `matchScore == 1` (exact match). If no result meets this threshold, the lookup is treated as failed and the user is shown a notification. This prevents a low-confidence ISBN hit from being silently associated with the wrong book.
 
@@ -163,7 +163,7 @@ Used when resolving a book by numeric ID during manual matching, and when fetchi
 
 ## Reading session endpoints
 
-### `POST /api/v1/reading-sessions`
+### `POST /api/grimmlink/v1/reading-sessions`
 
 Uploads a single reading session.
 
@@ -190,7 +190,7 @@ Used as the fallback when the batch endpoint is not available or returns an erro
 
 ---
 
-### `POST /api/v1/reading-sessions/batch`
+### `POST /api/grimmlink/v1/reading-sessions/batch`
 
 Uploads up to 100 reading sessions in a single request.
 

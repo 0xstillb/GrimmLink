@@ -143,7 +143,7 @@ describe("GrimmLink API client", function()
     end)
 
     it("hashes plain-text passwords into x-auth-key headers", function()
-        local success, code, payload = client:request("GET", "/api/koreader/users/auth")
+        local success, code, payload = client:request("GET", client:_apiPath("/auth"))
         assert.is_true(success)
         assert.are.equal(200, code)
         assert.are.equal("ok", payload.status)
@@ -154,7 +154,7 @@ describe("GrimmLink API client", function()
     it("keeps legacy md5 values unchanged", function()
         client:init("http://example.com", "reader", "5f4dcc3b5aa765d61d8327deb882cf99", false)
 
-        local success, code, payload = client:request("GET", "/api/koreader/users/auth")
+        local success, code, payload = client:request("GET", client:_apiPath("/auth"))
         assert.is_true(success)
         assert.are.equal(200, code)
         assert.are.equal("ok", payload.status)
@@ -163,10 +163,10 @@ describe("GrimmLink API client", function()
 
     it("uses the canonical PDF bridge endpoint", function()
         client:getPdfProgress(123)
-        assert.are.equal("/api/koreader/books/123/pdf-progress", captured_request.url:match("/api/koreader/books/123/pdf%-progress$") and "/api/koreader/books/123/pdf-progress" or nil)
+        assert.are.equal("/api/grimmlink/v1/books/123/pdf-progress", captured_request.url:match("/api/grimmlink/v1/books/123/pdf%-progress$") and "/api/grimmlink/v1/books/123/pdf-progress" or nil)
 
         client:updatePdfProgress(123, { currentPage = 9 })
-        assert.are.equal("/api/koreader/books/123/pdf-progress", captured_request.url:match("/api/koreader/books/123/pdf%-progress$") and "/api/koreader/books/123/pdf-progress" or nil)
+        assert.are.equal("/api/grimmlink/v1/books/123/pdf-progress", captured_request.url:match("/api/grimmlink/v1/books/123/pdf%-progress$") and "/api/grimmlink/v1/books/123/pdf-progress" or nil)
     end)
 
     it("returns useful auth errors", function()
@@ -195,10 +195,10 @@ describe("GrimmLink API client", function()
             endTime = "2026-05-07T00:01:00Z",
             durationSeconds = 60,
         })
-        assert.are.equal("/api/v1/reading-sessions", captured_request.url:match("/api/v1/reading%-sessions$") and "/api/v1/reading-sessions" or nil)
+        assert.are.equal("/api/grimmlink/v1/reading-sessions", captured_request.url:match("/api/grimmlink/v1/reading%-sessions$") and "/api/grimmlink/v1/reading-sessions" or nil)
 
         client:submitSessionBatch(99, "hash-1", "PDF", "KOReader", "device-1", {})
-        assert.are.equal("/api/v1/reading-sessions/batch", captured_request.url:match("/api/v1/reading%-sessions/batch$") and "/api/v1/reading-sessions/batch" or nil)
+        assert.are.equal("/api/grimmlink/v1/reading-sessions/batch", captured_request.url:match("/api/grimmlink/v1/reading%-sessions/batch$") and "/api/grimmlink/v1/reading-sessions/batch" or nil)
     end)
 
     it("builds metadata batch payloads", function()
@@ -222,7 +222,7 @@ describe("GrimmLink API client", function()
         assert.are.equal(1, #payload.bookmarks)
     end)
 
-    it("submits metadata batch to the koreader metadata endpoint", function()
+    it("submits metadata batch to the GrimmLink metadata endpoint", function()
         local success, _, _ = client:submitMetadataBatch({
             schemaVersion = 1,
             syncMode = "incremental",
@@ -232,10 +232,10 @@ describe("GrimmLink API client", function()
             bookmarks = {},
         })
         assert.is_true(success)
-        assert.are.equal("/api/koreader/syncs/metadata", captured_request.url:match("/api/koreader/syncs/metadata$") and "/api/koreader/syncs/metadata" or nil)
+        assert.are.equal("/api/grimmlink/v1/syncs/metadata", captured_request.url:match("/api/grimmlink/v1/syncs/metadata$") and "/api/grimmlink/v1/syncs/metadata" or nil)
     end)
 
-    it("fetches supported read statuses from koreader endpoint", function()
+    it("fetches supported read statuses from GrimmLink endpoint", function()
         next_http_response = {
             body = '{"statuses":["UNREAD","READING","READ","PAUSED","ABANDONED","RE_READING"]}',
             code = 200,
@@ -246,10 +246,10 @@ describe("GrimmLink API client", function()
         local success, statuses = client:getSupportedReadStatuses()
         assert.is_true(success)
         assert.are.same({ "UNREAD", "READING", "READ", "PAUSED", "ABANDONED", "RE_READING" }, statuses)
-        assert.are.equal("/api/koreader/books/read-statuses", captured_request.url:match("/api/koreader/books/read%-statuses$") and "/api/koreader/books/read-statuses" or nil)
+        assert.are.equal("/api/grimmlink/v1/books/read-statuses", captured_request.url:match("/api/grimmlink/v1/books/read%-statuses$") and "/api/grimmlink/v1/books/read-statuses" or nil)
     end)
 
-    it("updates read status through koreader endpoint", function()
+    it("updates read status through GrimmLink endpoint", function()
         next_http_response = {
             body = '{"status":"ok","readStatus":"READ"}',
             code = 200,
@@ -260,7 +260,7 @@ describe("GrimmLink API client", function()
         local success, response = client:updateBookReadStatus(123, "read")
         assert.is_true(success)
         assert.are.equal("READ", response.readStatus)
-        assert.are.equal("/api/koreader/books/123/status", captured_request.url:match("/api/koreader/books/123/status$") and "/api/koreader/books/123/status" or nil)
+        assert.are.equal("/api/grimmlink/v1/books/123/status", captured_request.url:match("/api/grimmlink/v1/books/123/status$") and "/api/grimmlink/v1/books/123/status" or nil)
         local request_payload = type(captured_request.source) == "function" and captured_request.source() or nil
         assert.is_true(type(request_payload) == "string")
         assert.is_true(request_payload:find('"status":"READ"', 1, true) ~= nil)
@@ -318,13 +318,13 @@ describe("GrimmLink API client", function()
             },
         }
 
-        local success, code, payload, _headers, details = client:request("GET", "/api/koreader/users/auth")
+        local success, code, payload, _headers, details = client:request("GET", client:_apiPath("/auth"))
         assert.is_true(success)
         assert.are.equal(200, code)
         assert.are.equal("ok", payload.status)
         assert.are.equal("http://example.com", client.server_url)
         assert.is_true(details.used_fallback)
-        assert.are.equal("https://backup.example.com/api/koreader/users/auth", details.used_url)
+        assert.are.equal("https://backup.example.com/api/grimmlink/v1/auth", details.used_url)
         local last_failure = client:getLastPrimaryFailure()
         assert.is_true(type(last_failure) == "table")
         assert.are.equal("http://example.com", last_failure.url)
@@ -346,7 +346,7 @@ describe("GrimmLink API client", function()
                 ok = 1,
             },
         }
-        local ok_first = select(1, client:request("GET", "/api/koreader/users/auth"))
+        local ok_first = select(1, client:request("GET", client:_apiPath("/auth")))
         assert.is_true(ok_first)
         assert.is_not_nil(client:getLastPrimaryFailure())
 
@@ -356,7 +356,7 @@ describe("GrimmLink API client", function()
             headers = {},
             ok = 1,
         }
-        local ok_second = select(1, client:request("GET", "/api/koreader/users/auth"))
+        local ok_second = select(1, client:request("GET", client:_apiPath("/auth")))
         assert.is_true(ok_second)
         assert.is_nil(client:getLastPrimaryFailure())
     end)
@@ -380,12 +380,17 @@ describe("GrimmLink API client", function()
             },
         }
 
-        local ok, code, message, _headers, details = client:request("GET", "/api/koreader/users/auth")
+        local ok, code, message, _headers, details = client:request("GET", client:_apiPath("/auth"))
         assert.is_false(ok)
         assert.is_nil(code)
         assert.is_true(type(message) == "string")
         assert.is_true(details.used_fallback)
         assert.are.equal(15, require("socket.http").TIMEOUT)
         assert.are.equal(7, require("ssl.https").TIMEOUT)
+    end)
+
+    it("centralizes the API prefix", function()
+        assert.are.equal("/api/grimmlink/v1", client.api_prefix)
+        assert.are.equal("/api/grimmlink/v1/syncs/progress", client:_apiPath("/syncs/progress"))
     end)
 end)

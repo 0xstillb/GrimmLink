@@ -15,6 +15,7 @@ local APIClient = {
     timeout = 25,
     secure_logs = false,
     debug_logging = false,
+    api_prefix = "/api/grimmlink/v1",
 }
 
 local function redact_urls(message)
@@ -121,6 +122,10 @@ function APIClient:_urlEncode(value)
     end)
     encoded = encoded:gsub(" ", "+")
     return encoded
+end
+
+function APIClient:_apiPath(path)
+    return self.api_prefix .. tostring(path or "")
 end
 
 function APIClient:parseJSON(response_text)
@@ -338,7 +343,7 @@ function APIClient:testAuth(timeout_sec)
 
     local success, code, response, _headers, details = self:request(
         "GET",
-        "/api/koreader/users/auth",
+        self:_apiPath("/auth"),
         nil,
         nil,
         timeout_sec
@@ -352,7 +357,7 @@ end
 function APIClient:getBookByHash(book_hash)
     local success, code, response = self:request(
         "GET",
-        "/api/koreader/books/by-hash/" .. self:_urlEncode(book_hash)
+        self:_apiPath("/books/by-hash/" .. self:_urlEncode(book_hash))
     )
     if success and type(response) == "table" then
         return true, response, code
@@ -363,7 +368,7 @@ end
 function APIClient:getProgress(book_hash, timeout_sec)
     local success, code, response = self:request(
         "GET",
-        "/api/koreader/syncs/progress/" .. self:_urlEncode(book_hash),
+        self:_apiPath("/syncs/progress/" .. self:_urlEncode(book_hash)),
         nil,
         nil,
         timeout_sec
@@ -375,7 +380,7 @@ function APIClient:getProgress(book_hash, timeout_sec)
 end
 
 function APIClient:updateProgress(progress_payload)
-    local success, code, response = self:request("PUT", "/api/koreader/syncs/progress", progress_payload)
+    local success, code, response = self:request("PUT", self:_apiPath("/syncs/progress"), progress_payload)
     if success then
         return true, response, code
     end
@@ -383,7 +388,7 @@ function APIClient:updateProgress(progress_payload)
 end
 
 function APIClient:submitSession(session_payload)
-    local success, code, response = self:request("POST", "/api/v1/reading-sessions", session_payload)
+    local success, code, response = self:request("POST", self:_apiPath("/reading-sessions"), session_payload)
     if success then
         return true, response, code
     end
@@ -400,7 +405,7 @@ function APIClient:submitSessionBatch(book_id, book_hash, book_type, device, dev
         sessions = sessions,
     }
 
-    local success, code, response = self:request("POST", "/api/v1/reading-sessions/batch", payload)
+    local success, code, response = self:request("POST", self:_apiPath("/reading-sessions/batch"), payload)
     if success then
         return true, response, code
     end
@@ -564,7 +569,7 @@ function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, f
 end
 
 function APIClient:submitMetadataBatch(payload)
-    local success, code, response = self:request("POST", "/api/koreader/syncs/metadata", payload)
+    local success, code, response = self:request("POST", self:_apiPath("/syncs/metadata"), payload)
     if success then
         return true, response, code
     end
@@ -619,7 +624,7 @@ function APIClient:normalizeShelfBookObject(book)
 end
 
 function APIClient:getShelves(shelf_type)
-    local path = "/api/koreader/shelves"
+    local path = self:_apiPath("/shelves")
     local normalized_type = normalizeShelfType(shelf_type)
     if shelf_type ~= nil and shelf_type ~= "" then
         path = path .. "?type=" .. self:_urlEncode(normalized_type)
@@ -650,7 +655,7 @@ end
 
 function APIClient:getShelfBooks(shelf_id, shelf_type)
     local normalized_type = normalizeShelfType(shelf_type)
-    local primary_path = "/api/koreader/shelves/" .. normalized_type .. "/" .. tostring(shelf_id) .. "/books"
+    local primary_path = self:_apiPath("/shelves/" .. normalized_type .. "/" .. tostring(shelf_id) .. "/books")
     local success, code, response = self:request(
         "GET",
         primary_path
@@ -660,7 +665,7 @@ function APIClient:getShelfBooks(shelf_id, shelf_type)
     if not success and normalized_type == "regular" and tonumber(code) == 404 then
         success, code, response = self:request(
             "GET",
-            "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books"
+            self:_apiPath("/shelves/" .. tostring(shelf_id) .. "/books")
         )
     end
 
@@ -716,7 +721,7 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec_or_opts)
         return false, "Cannot open temp file: " .. tostring(err)
     end
 
-    local url = self.server_url .. "/api/koreader/books/" .. tostring(book_id) .. "/download"
+    local url = self.server_url .. self:_apiPath("/books/" .. tostring(book_id) .. "/download")
     self:log("info", "GrimmLink API: GET (binary)", url)
 
     -- Auto-scale timeout based on expected file size.
@@ -921,7 +926,7 @@ function APIClient:startAsyncDownload(book_id, dest_path, opts)
     os.remove(code_path)
     os.remove(script_path)
 
-    local url = self.server_url .. "/api/koreader/books/" .. tostring(book_id) .. "/download"
+    local url = self.server_url .. self:_apiPath("/books/" .. tostring(book_id) .. "/download")
     self:log("info", "GrimmLink API: async GET (curl)", url)
 
     -- Auto-scale timeout: 180s base + 1s per MB, cap at 45 minutes.
@@ -1157,14 +1162,14 @@ end
 
 function APIClient:removeBookFromShelf(shelf_id, book_id, shelf_type)
     local normalized_type = normalizeShelfType(shelf_type)
-    local typed_path = "/api/koreader/shelves/" .. normalized_type .. "/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove"
+    local typed_path = self:_apiPath("/shelves/" .. normalized_type .. "/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove")
 
     local success, code, response = self:request("POST", typed_path)
 
     if not success and normalized_type == "regular" and tonumber(code) == 404 then
         success, code, response = self:request(
             "POST",
-            "/api/koreader/shelves/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove"
+            self:_apiPath("/shelves/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove")
         )
     end
 
@@ -1175,7 +1180,7 @@ function APIClient:removeBookFromShelf(shelf_id, book_id, shelf_type)
 end
 
 function APIClient:getSupportedReadStatuses()
-    local success, code, response = self:request("GET", "/api/koreader/books/read-statuses")
+    local success, code, response = self:request("GET", self:_apiPath("/books/read-statuses"))
     if success and type(response) == "table" then
         local raw = response
         if type(response.statuses) == "table" then
@@ -1202,7 +1207,7 @@ function APIClient:updateBookReadStatus(book_id, status)
     }
     local success, code, response = self:request(
         "PUT",
-        "/api/koreader/books/" .. normalized_book_id .. "/status",
+        self:_apiPath("/books/" .. normalized_book_id .. "/status"),
         payload
     )
     if success then
@@ -1215,7 +1220,7 @@ function APIClient:getPdfProgress(book_id, timeout_sec)
     local normalized_book_id = normalizeNumericId(book_id)
     local success, code, response = self:request(
         "GET",
-        "/api/koreader/books/" .. normalized_book_id .. "/pdf-progress",
+        self:_apiPath("/books/" .. normalized_book_id .. "/pdf-progress"),
         nil,
         nil,
         timeout_sec
@@ -1230,7 +1235,7 @@ function APIClient:updatePdfProgress(book_id, progress_payload)
     local normalized_book_id = normalizeNumericId(book_id)
     local success, code, response = self:request(
         "PUT",
-        "/api/koreader/books/" .. normalized_book_id .. "/pdf-progress",
+        self:_apiPath("/books/" .. normalized_book_id .. "/pdf-progress"),
         progress_payload
     )
     if success then

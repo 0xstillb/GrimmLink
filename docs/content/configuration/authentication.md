@@ -43,11 +43,11 @@ Trailing slashes are not required. The plugin will strip them automatically.
 Tap **KOReader Username** and **Password** to set the credentials the plugin uses for its primary connection to Grimmory.
 
 These credentials are used for:
-- **Authentication test** (`GET /api/koreader/users/auth`)
-- **Book lookup by hash** (`GET /api/koreader/books/by-hash/:hash`)
-- **Session upload** (`POST /api/v1/reading-sessions`)
+- **Authentication test** (`GET /api/grimmlink/v1/auth`)
+- **Book lookup by hash** (`GET /api/grimmlink/v1/books/by-hash/:hash`)
+- **Session upload** (`POST /api/grimmlink/v1/reading-sessions`)
 
-The password is stored in plain text in the local settings database. When making requests to the KOReader sync endpoint, the plugin hashes it to MD5 on the fly and sends it as the `x-auth-key` header.
+The password is stored in plain text in the local settings database. When making requests to the GrimmLink v1 sync endpoints, the plugin hashes it to MD5 on the fly and sends it as the `x-auth-key` header.
 
 The username and password should match your Grimmory account credentials.
 
