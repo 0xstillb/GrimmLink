@@ -73,6 +73,37 @@ local function encodeSettingValue(value)
     return tostring(value)
 end
 
+local function sqliteText(value)
+    if value == nil then
+        return nil
+    end
+    if type(value) == "table" then
+        local ok, encoded = pcall(json.encode, value)
+        if ok and encoded ~= nil then
+            return tostring(encoded)
+        end
+    end
+    if type(value) == "boolean" then
+        return value and "true" or "false"
+    end
+    return tostring(value)
+end
+
+local function sqliteNumber(value)
+    if value == nil then
+        return nil
+    end
+    if type(value) == "boolean" then
+        return value and 1 or 0
+    end
+    return tonumber(value)
+end
+
+local function sqliteInteger(value)
+    local number = sqliteNumber(value)
+    return number and math.floor(number) or nil
+end
+
 local function firstRow(stmt, mapper)
     if not stmt then
         return nil
@@ -1766,19 +1797,19 @@ function Database:upsertShelfSyncEntry(entry)
     end
     local normalized_type = normalizeShelfType(entry.shelf_type)
     stmt:bind(
-        entry.book_id,
-        entry.shelf_id,
+        sqliteInteger(entry.book_id),
+        sqliteInteger(entry.shelf_id),
         normalized_type,
-        entry.remote_filename,
-        entry.remote_title,
-        entry.remote_author,
-        entry.remote_format,
-        entry.remote_file_size_kb,
-        entry.remote_series_name,
-        entry.remote_series_number,
-        entry.local_path,
-        entry.downloaded_at or nowEpoch(),
-        entry.last_seen_in_shelf_at or nowEpoch(),
+        sqliteText(entry.remote_filename),
+        sqliteText(entry.remote_title),
+        sqliteText(entry.remote_author),
+        sqliteText(entry.remote_format),
+        sqliteInteger(entry.remote_file_size_kb),
+        sqliteText(entry.remote_series_name),
+        sqliteNumber(entry.remote_series_number),
+        sqliteText(entry.local_path),
+        sqliteInteger(entry.downloaded_at) or nowEpoch(),
+        sqliteInteger(entry.last_seen_in_shelf_at) or nowEpoch(),
         entry.downloaded_by_grimmlink == false and 0 or 1,
         nowEpoch()
     )

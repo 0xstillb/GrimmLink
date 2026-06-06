@@ -599,4 +599,64 @@ describe("GrimmLink database helpers", function()
         assert.is_true(db:updateShelfMappingLocalPath(77, 5, "magic", "/magic/Title.epub"))
         assert.are.equal("/magic/Title.epub", updated_path)
     end)
+
+    it("normalizes non-scalar shelf metadata before binding to sqlite", function()
+        local bound_args = nil
+        local bound_count = 0
+        local fake_stmt = {
+            bind = function(_, ...)
+                bound_args = { ... }
+                bound_count = select("#", ...)
+                for i = 1, bound_count do
+                    local value = bound_args[i]
+                    local value_type = type(value)
+                    assert.is_true(
+                        value == nil or value_type == "string" or value_type == "number",
+                        "unexpected sqlite bind type at arg " .. tostring(i) .. ": " .. value_type
+                    )
+                end
+            end,
+            step = function()
+                return 101
+            end,
+            close = function() end,
+        }
+
+        local db = setmetatable({
+            conn = {
+                prepare = function()
+                    return fake_stmt
+                end,
+            },
+        }, { __index = Database })
+
+        assert.is_true(db:upsertShelfSyncEntry({
+            book_id = "77",
+            shelf_id = "5",
+            shelf_type = "magic",
+            remote_filename = { name = "Magic.epub" },
+            remote_title = "Magic Title",
+            remote_author = { "Author A", "Author B" },
+            remote_format = { mime = "application/epub+zip" },
+            remote_file_size_kb = { size = 128 },
+            remote_series_name = false,
+            remote_series_number = { number = 2 },
+            local_path = "/books/Magic.epub",
+            downloaded_at = "1710000000",
+            last_seen_in_shelf_at = true,
+            downloaded_by_grimmlink = 1,
+        }))
+
+        assert.are.equal(15, bound_count)
+        assert.are.equal(77, bound_args[1])
+        assert.are.equal(5, bound_args[2])
+        assert.are.equal("magic", bound_args[3])
+        assert.are.equal("string", type(bound_args[4]))
+        assert.are.equal("string", type(bound_args[6]))
+        assert.is_nil(bound_args[8])
+        assert.are.equal("false", bound_args[9])
+        assert.is_nil(bound_args[10])
+        assert.are.equal(1710000000, bound_args[12])
+        assert.are.equal(1, bound_args[13])
+    end)
 end)
