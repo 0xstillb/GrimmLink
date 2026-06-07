@@ -623,6 +623,164 @@ local function collectMagicOnlyMappings(db)
     return result
 end
 
+local function incrementSummary(summary, key)
+    summary[key] = (tonumber(summary[key]) or 0) + 1
+end
+
+local function recordMoveSkip(summary, reason, warning)
+    summary.skipped = summary.skipped + 1
+    if reason and reason ~= "" then
+        incrementSummary(summary, reason)
+    end
+    if warning and warning ~= "" then
+        summary.warnings[#summary.warnings + 1] = warning
+    end
+end
+
+local function addFallbackCandidate(candidates, seen, source_root, filename)
+    if not source_root or source_root == "" or not filename or filename == "" then
+        return
+    end
+    local cleaned = basenameOfPath(tostring(filename))
+    if cleaned == "" or cleaned == "." or cleaned == ".." then
+        return
+    end
+    local path = joinPath(source_root, cleaned)
+    local normalized = normalizePathForCompare(path)
+    if normalized and not seen[normalized] then
+        seen[normalized] = true
+        candidates[#candidates + 1] = path
+    end
+end
+
+local function addSanitizedFallbackCandidate(candidates, seen, source_root, filename)
+    local sanitized = sanitizeFilename(filename)
+    if sanitized and sanitized ~= "" then
+        addFallbackCandidate(candidates, seen, source_root, sanitized)
+    end
+end
+
+local function getMappingFallbackExtension(mapping)
+    local ext = resolveBookFormat({
+        fileName = mapping.remote_filename,
+        fileFormat = mapping.remote_format,
+        extension = mapping.remote_format,
+    })
+    if ext and ext ~= "" then
+        return ext
+    end
+    local local_ext = mapping.local_path and tostring(mapping.local_path):match("%.([%w]+)$") or nil
+    if local_ext and local_ext ~= "" then
+        return local_ext:lower()
+    end
+    return nil
+end
+
+local function findFallbackSourcePath(mapping, source_root)
+    if not source_root or source_root == "" or type(mapping) ~= "table" then
+        return nil
+    end
+
+    local candidates = {}
+    local seen = {}
+    addFallbackCandidate(candidates, seen, source_root, basenameOfPath(mapping.local_path))
+    addFallbackCandidate(candidates, seen, source_root, mapping.remote_filename)
+    addSanitizedFallbackCandidate(candidates, seen, source_root, mapping.remote_filename)
+
+    local ext = getMappingFallbackExtension(mapping)
+    if ext and ext ~= "" then
+        if mapping.remote_title and tostring(mapping.remote_title) ~= "" and mapping.book_id then
+            addSanitizedFallbackCandidate(
+                candidates,
+                seen,
+                source_root,
+                tostring(mapping.remote_title) .. "_" .. tostring(mapping.book_id) .. "." .. ext
+            )
+        end
+        if mapping.book_id then
+            addSanitizedFallbackCandidate(
+                candidates,
+                seen,
+                source_root,
+                "book_" .. tostring(mapping.book_id) .. "." .. ext
+            )
+        end
+    end
+
+    for _, candidate in ipairs(candidates) do
+        local attr = safeLfsAttributes(candidate)
+        if attr and attr.mode == "file" then
+            return candidate
+        end
+    end
+    return nil
+end
+
+local function resolveMoveSourcePath(mapping, source_root, managed_roots, options)
+    local local_path = mapping.local_path
+    local allow_fallback = options and options.allow_source_fallback == true
+    local source_path = local_path
+    local used_fallback = false
+
+    if not source_path or source_path == "" then
+        return nil, "skipped_empty_local_path"
+    end
+
+    local source_attr = safeLfsAttributes(source_path)
+    if source_root and source_root ~= "" and not isPathUnderDirectory(source_path, source_root) then
+        if allow_fallback then
+            local fallback_path = findFallbackSourcePath(mapping, source_root)
+            if fallback_path then
+                source_path = fallback_path
+                source_attr = safeLfsAttributes(source_path)
+                used_fallback = true
+            else
+                return nil, "skipped_not_magic_path"
+            end
+        else
+            return nil, "skipped_not_magic_path"
+        end
+    end
+
+    if not isPathUnderAnyDirectory(source_path, managed_roots) then
+        return nil, "skipped_outside_managed_roots"
+    end
+
+    if not source_attr or source_attr.mode ~= "file" then
+        if allow_fallback then
+            local fallback_path = findFallbackSourcePath(mapping, source_root)
+            if fallback_path and normalizePathForCompare(fallback_path) ~= normalizePathForCompare(source_path) then
+                source_path = fallback_path
+                source_attr = safeLfsAttributes(source_path)
+                used_fallback = true
+            end
+        end
+    end
+
+    if not source_attr or source_attr.mode ~= "file" then
+        return nil, "skipped_missing_file"
+    end
+
+    return source_path, nil, used_fallback
+end
+
+local function logMoveSkipSummary(summary)
+    if not summary or not logger or type(logger.info) ~= "function" then
+        return
+    end
+    logger.info(
+        "GrimmLink ShelfSync: Magic file move summary:",
+        "moved=" .. tostring(summary.moved),
+        "shared=" .. tostring(summary.shared),
+        "skipped=" .. tostring(summary.skipped),
+        "failed=" .. tostring(summary.failed),
+        "skipped_not_magic_path=" .. tostring(summary.skipped_not_magic_path or 0),
+        "skipped_not_downloaded_by_grimmlink=" .. tostring(summary.skipped_not_downloaded_by_grimmlink or 0),
+        "skipped_missing_file=" .. tostring(summary.skipped_missing_file or 0),
+        "skipped_outside_managed_roots=" .. tostring(summary.skipped_outside_managed_roots or 0)
+    )
+end
+
 local function moveMagicOnlyFiles(self, source_root, target_root, opts)
     local options = opts or {}
     local summary = {
@@ -631,12 +789,24 @@ local function moveMagicOnlyFiles(self, source_root, target_root, opts)
         failed = 0,
         shared = 0,
         sidecar_warnings = 0,
+        skipped_empty_local_path = 0,
+        skipped_not_magic_path = 0,
+        skipped_not_downloaded_by_grimmlink = 0,
+        skipped_shared_regular = 0,
+        skipped_missing_file = 0,
+        skipped_outside_managed_roots = 0,
         warnings = {},
         errors = {},
     }
 
     if not target_root or target_root == "" then
         summary.errors[#summary.errors + 1] = "target directory is empty"
+        summary.failed = summary.failed + 1
+        return summary
+    end
+
+    if not ensureDirectory(target_root) then
+        summary.errors[#summary.errors + 1] = "target directory cannot be created: " .. tostring(target_root)
         summary.failed = summary.failed + 1
         return summary
     end
@@ -658,24 +828,24 @@ local function moveMagicOnlyFiles(self, source_root, target_root, opts)
         if book_id and not processed_books[book_key] then
             processed_books[book_key] = true
 
-            local local_path = mapping.local_path
-            if not local_path or local_path == "" then
-                summary.skipped = summary.skipped + 1
-            elseif mapping.downloaded_by_grimmlink ~= 1 then
-                summary.skipped = summary.skipped + 1
+            if mapping.downloaded_by_grimmlink ~= 1 and mapping.downloaded_by_grimmlink ~= true then
+                recordMoveSkip(summary, "skipped_not_downloaded_by_grimmlink")
             elseif type(self.db.isBookTrackedByRegularShelf) == "function" and self.db:isBookTrackedByRegularShelf(book_id) then
                 summary.shared = summary.shared + 1
-            elseif source_root and source_root ~= "" and not isPathUnderDirectory(local_path, source_root) then
-                summary.skipped = summary.skipped + 1
-            elseif not isPathUnderAnyDirectory(local_path, managed_roots) then
-                summary.skipped = summary.skipped + 1
-                summary.warnings[#summary.warnings + 1] = "Skipped outside managed roots for bookId=" .. tostring(book_id)
+                incrementSummary(summary, "skipped_shared_regular")
             else
-                local attr = safeLfsAttributes(local_path)
-                if not attr or attr.mode ~= "file" then
-                    summary.skipped = summary.skipped + 1
+                local local_path = mapping.local_path
+                local source_path, skip_reason, used_fallback = resolveMoveSourcePath(mapping, source_root, managed_roots, options)
+                if not source_path then
+                    local warning = nil
+                    if skip_reason == "skipped_outside_managed_roots" then
+                        warning = "Skipped outside managed roots for bookId=" .. tostring(book_id)
+                    elseif skip_reason == "skipped_not_magic_path" and options.allow_source_fallback == true then
+                        warning = "Skipped missing Magic folder source for bookId=" .. tostring(book_id)
+                    end
+                    recordMoveSkip(summary, skip_reason, warning)
                 else
-                    local filename = basenameOfPath(local_path)
+                    local filename = basenameOfPath(source_path)
                     local desired_target = joinPath(target_root, filename)
                     local final_target = desired_target
                     local reuse_existing = false
@@ -701,8 +871,8 @@ local function moveMagicOnlyFiles(self, source_root, target_root, opts)
                     if final_target then
                         local move_ok = true
                         local moved_file = false
-                        if not reuse_existing and normalizePathForCompare(local_path) ~= normalizePathForCompare(final_target) then
-                            local renamed, rename_err = os.rename(local_path, final_target)
+                        if not reuse_existing and normalizePathForCompare(source_path) ~= normalizePathForCompare(final_target) then
+                            local renamed, rename_err = os.rename(source_path, final_target)
                             move_ok = renamed and true or false
                             if not move_ok then
                                 summary.failed = summary.failed + 1
@@ -718,23 +888,29 @@ local function moveMagicOnlyFiles(self, source_root, target_root, opts)
                             if mapping_ok then
                                 local sidecar_warnings = 0
                                 if moved_file then
-                                    sidecar_warnings = moveSdrSidecarsWithWarning(local_path, final_target)
+                                    sidecar_warnings = moveSdrSidecarsWithWarning(source_path, final_target)
                                     if type(self.deleteFromBookInfoCache) == "function" then
-                                        self:deleteFromBookInfoCache(local_path)
+                                        self:deleteFromBookInfoCache(source_path)
+                                        if local_path and normalizePathForCompare(local_path) ~= normalizePathForCompare(source_path) then
+                                            self:deleteFromBookInfoCache(local_path)
+                                        end
                                     end
                                 end
                                 summary.sidecar_warnings = summary.sidecar_warnings + sidecar_warnings
                                 if moved_file then
                                     summary.moved = summary.moved + 1
+                                    if used_fallback then
+                                        incrementSummary(summary, "fallback_sources_used")
+                                    end
                                 else
-                                    summary.skipped = summary.skipped + 1
+                                    recordMoveSkip(summary, "skipped_already_at_target")
                                 end
                                 if self.db and type(self.db.saveBookCache) == "function" then
                                     self.db:saveBookCache(final_target, "", book_id, mapping.remote_title, mapping.remote_author)
                                 end
                             else
                                 if moved_file then
-                                    local rolled_back, rollback_err = os.rename(final_target, local_path)
+                                    local rolled_back, rollback_err = os.rename(final_target, source_path)
                                     if not rolled_back then
                                         summary.warnings[#summary.warnings + 1] =
                                             "Rollback failed after DB update failure for bookId="
@@ -754,6 +930,7 @@ local function moveMagicOnlyFiles(self, source_root, target_root, opts)
         end
     end
 
+    logMoveSkipSummary(summary)
     return summary
 end
 
@@ -770,6 +947,7 @@ function ShelfSync:moveMagicShelfFilesBackToSharedDirectory(shared_dir, opts)
     return moveMagicOnlyFiles(self, options.magic_dir, shared_dir, {
         download_dir = shared_dir,
         magic_download_dir = options.magic_dir,
+        allow_source_fallback = true,
     })
 end
 

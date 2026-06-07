@@ -886,6 +886,7 @@ if ReadingCompletionController and type(ReadingCompletionController.install) == 
         tryFlushDocSettings = tryFlushDocSettings,
         tryReadSetting = tryReadSetting,
         tryWriteSetting = tryWriteSetting,
+        lfs = lfs,
     })
 end
 if DiagnosticsController and type(DiagnosticsController.install) == "function" then
@@ -990,6 +991,14 @@ if MetadataController and type(MetadataController.install) == "function" then
         safeToString = safeToString,
         shortPrefix = shortPrefix,
         stableTextHash = stableTextHash,
+        READING_COMPLETION_RATING_STATE_KEY = READING_COMPLETION_RATING_STATE_KEY,
+        buildReadingCompletionRatingState = buildReadingCompletionRatingState,
+        convertTenScaleRatingToSummaryRating = convertTenScaleRatingToSummaryRating,
+        tryCloseDocSettings = tryCloseDocSettings,
+        tryFlushDocSettings = tryFlushDocSettings,
+        tryReadSetting = tryReadSetting,
+        tryWriteSetting = tryWriteSetting,
+        lfs = lfs,
     })
 end
 if ShelfController and type(ShelfController.install) == "function" then

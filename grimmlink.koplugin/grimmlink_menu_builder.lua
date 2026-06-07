@@ -698,6 +698,14 @@ function Grimmlink:addToMainMenu(menu_items)
                                 callback = function() self:showMetadataPreview() end,
                             },
                             {
+                                text = _("Pull Remote Metadata Now"),
+                                callback = function() self:pullRemoteMetadataNow(false, 100) end,
+                            },
+                            {
+                                text = _("Reset Metadata Pull Cursor"),
+                                callback = function() self:resetMetadataPullCursorForCurrentBook() end,
+                            },
+                            {
                                 text_func = function()
                                     return T(_("Pending Metadata Count: %1"), safeDbValueCall(self.db, "getPendingMetadataCount", 0))
                                 end,

@@ -142,21 +142,23 @@ function Grimmlink:moveMagicShelfFilesToMagicDirectory()
     self:showMagicMoveSummary(_("Moving Magic Shelf files…"), summary)
 end
 
-function Grimmlink:moveMagicShelfFilesBackToSharedDirectory()
+function Grimmlink:moveMagicShelfFilesBackToSharedDirectory(shared_dir_override, magic_dir_override)
     if not self.shelf_sync or type(self.shelf_sync.moveMagicShelfFilesBackToSharedDirectory) ~= "function" then
-        return
+        return nil
     end
-    local shared_dir = self:getResolvedShelfDownloadDirectory()
+    local shared_dir = normalizeDirectoryPath(shared_dir_override or self:getResolvedShelfDownloadDirectory())
     if shared_dir == "" then
         self:showMessage(_("Shared shelf directory is not available."), 4)
-        return
+        return nil
     end
+    local magic_dir = normalizeDirectoryPath(magic_dir_override or self.magic_download_dir)
     self:showMessage(_("Moving Magic Shelf files…"), 2)
     local summary = self.shelf_sync:moveMagicShelfFilesBackToSharedDirectory(shared_dir, {
-        magic_dir = self.magic_download_dir,
+        magic_dir = magic_dir,
         download_dir = shared_dir,
     })
     self:showMagicMoveSummary(_("Moving Magic Shelf files…"), summary)
+    return summary
 end
 
 local function collapseTrailingMagicShelfSegments(path_value)
@@ -257,13 +259,16 @@ function Grimmlink:enableSeparateMagicDownloadDirectory()
 end
 
 function Grimmlink:disableSeparateMagicDownloadDirectory()
-    self:saveSetting("use_separate_magic_download_dir", false)
-    self:showMessage(_("Separate magic shelf folder disabled."), 3)
+    local shared_dir = self:getResolvedShelfDownloadDirectory()
+    local magic_dir = normalizeDirectoryPath(self.magic_download_dir)
+
     self:showConfirmAction(
         _("Move Magic Shelf files back to the shared folder?"),
         _("Move Files"),
         function()
-            self:moveMagicShelfFilesBackToSharedDirectory()
+            self:moveMagicShelfFilesBackToSharedDirectory(shared_dir, magic_dir)
+            self:saveSetting("use_separate_magic_download_dir", false)
+            self:showMessage(_("Separate magic shelf folder disabled."), 3)
         end
     )
 end

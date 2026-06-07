@@ -541,6 +541,13 @@ local function normalizeShelfType(value)
     return shelf_type
 end
 
+local function isIsoInstantLike(value)
+    if type(value) ~= "string" then
+        return false
+    end
+    return value:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d") ~= nil
+end
+
 function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks, pull_since, pull_limit)
     local normalized_annotations = nil
     if type(annotations) == "table" and #annotations > 0 then
@@ -562,12 +569,35 @@ function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, f
         device = device,
         deviceId = device_id,
         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        since = pull_since,
+        -- Keep legacy `since` for the current Instant-based backend contract,
+        -- and send `cursor` for the next stable cursor contract. If the cursor
+        -- is not ISO-like, avoid sending it as `since` to prevent Instant parse errors.
+        since = isIsoInstantLike(pull_since) and pull_since or nil,
+        cursor = pull_since,
         limit = pull_limit,
         rating = rating,
         annotations = normalized_annotations,
         bookmarks = normalized_bookmarks,
     }
+end
+
+function APIClient:buildMetadataPullPayload(book_id, book_hash, book_file_id, file_format, device, device_id, pull_since, pull_limit, item_type)
+    local payload = self:buildMetadataBatchPayload(
+        book_id,
+        book_hash,
+        book_file_id,
+        file_format,
+        device,
+        device_id,
+        nil,
+        {},
+        {},
+        pull_since,
+        pull_limit
+    )
+    payload.syncMode = "pull"
+    payload.type = item_type
+    return payload
 end
 
 function APIClient:submitMetadataBatch(payload)
@@ -579,6 +609,10 @@ function APIClient:submitMetadataBatch(payload)
         return true, response, code
     end
     return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
+function APIClient:pullMetadataBatch(payload)
+    return self:submitMetadataBatch(payload)
 end
 
 function APIClient:normalizeShelfObject(shelf)

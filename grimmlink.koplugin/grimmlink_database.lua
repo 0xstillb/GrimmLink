@@ -325,6 +325,27 @@ Database.schema_sql = {
         )
     ]],
     [[
+        CREATE TABLE IF NOT EXISTS applied_remote_metadata_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL,
+            book_id INTEGER,
+            book_file_id INTEGER,
+            item_type TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            remote_id TEXT,
+            payload_json TEXT,
+            status TEXT,
+            applied_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(file_hash, item_type, dedupe_key)
+        )
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_applied_remote_metadata_file_hash ON applied_remote_metadata_items(file_hash)
+    ]],
+    [[
+        CREATE INDEX IF NOT EXISTS idx_applied_remote_metadata_book_id ON applied_remote_metadata_items(book_id)
+    ]],
+    [[
         CREATE TABLE IF NOT EXISTS shelf_sync_map (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_id INTEGER NOT NULL,
@@ -507,6 +528,27 @@ function Database:_migrateMetadataSyncTables()
                 synced_at INTEGER DEFAULT (strftime('%s', 'now')),
                 UNIQUE(file_hash, item_type, dedupe_key)
             )
+        ]],
+        [[
+            CREATE TABLE IF NOT EXISTS applied_remote_metadata_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT NOT NULL,
+                book_id INTEGER,
+                book_file_id INTEGER,
+                item_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                remote_id TEXT,
+                payload_json TEXT,
+                status TEXT,
+                applied_at INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(file_hash, item_type, dedupe_key)
+            )
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_applied_remote_metadata_file_hash ON applied_remote_metadata_items(file_hash)
+        ]],
+        [[
+            CREATE INDEX IF NOT EXISTS idx_applied_remote_metadata_book_id ON applied_remote_metadata_items(book_id)
         ]],
     }
 
@@ -833,6 +875,20 @@ function Database:savePluginSetting(key, value)
     return ok
 end
 
+function Database:deletePluginSetting(key)
+    if not key or key == "" then
+        return false
+    end
+    local stmt = self.conn and self.conn:prepare("DELETE FROM plugin_settings WHERE key = ?")
+    if not stmt then
+        return false
+    end
+    stmt:bind(key)
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
 local function mapBookCacheRow(row)
     return {
         id = tonumber(row[1]) or row[1],
@@ -956,6 +1012,79 @@ function Database:getStaleCacheEntries(limit)
     end
     stmt:bind(limit or 10)
     return allRows(stmt, mapBookCacheRow)
+end
+
+
+function Database:getMetadataPullCandidates(limit)
+    local max_rows = math.max(1, tonumber(limit) or 100)
+    local candidates = {}
+    local seen = {}
+
+    local function addCandidate(entry)
+        if type(entry) ~= "table" then
+            return
+        end
+        local path = entry.file_path or entry.local_path
+        local key = tostring(path or "") .. ":" .. tostring(entry.book_id or "")
+        if key == ":" or seen[key] then
+            return
+        end
+        seen[key] = true
+        candidates[#candidates + 1] = entry
+    end
+
+    local stmt_cache = self.conn and self.conn:prepare([[
+        SELECT file_path, file_hash, book_id, title, author, COALESCE(last_accessed, updated_at, 0) AS sort_key
+        FROM book_cache
+        WHERE file_path IS NOT NULL
+          AND file_path != ''
+          AND (book_id IS NOT NULL OR (file_hash IS NOT NULL AND file_hash != ''))
+        ORDER BY sort_key DESC
+        LIMIT ?
+    ]])
+    if stmt_cache then
+        stmt_cache:bind(max_rows)
+        for _, row in ipairs(allRows(stmt_cache)) do
+            addCandidate({
+                file_path = row[1],
+                file_hash = row[2],
+                book_id = tonumber(row[3]) or row[3],
+                title = row[4],
+                author = row[5],
+                source = "book_cache",
+            })
+        end
+    end
+
+    if #candidates < max_rows then
+        local stmt_shelf = self.conn and self.conn:prepare([[
+            SELECT local_path, book_id, remote_title, remote_author, remote_format, updated_at
+            FROM shelf_sync_map
+            WHERE local_path IS NOT NULL
+              AND local_path != ''
+            ORDER BY updated_at DESC
+            LIMIT ?
+        ]])
+        if stmt_shelf then
+            stmt_shelf:bind(max_rows)
+            for _, row in ipairs(allRows(stmt_shelf)) do
+                addCandidate({
+                    file_path = row[1],
+                    file_hash = nil,
+                    book_id = tonumber(row[2]) or row[2],
+                    title = row[3],
+                    author = row[4],
+                    file_format = row[5],
+                    source = "shelf_sync_map",
+                })
+                if #candidates >= max_rows then
+                    break
+                end
+            end
+        end
+    end
+
+    return candidates
 end
 
 function Database:getStaleCacheCount()
@@ -1237,6 +1366,84 @@ function Database:isMetadataItemSynced(file_hash, item_type, dedupe_key)
     stmt:bind(file_hash, item_type, dedupe_key)
     local row = firstRow(stmt, rowOrNil)
     return row ~= nil
+end
+
+function Database:isRemoteMetadataItemApplied(file_hash, item_type, dedupe_key)
+    if not file_hash or not item_type or not dedupe_key then
+        return false
+    end
+    local sql = "SELECT 1 FROM applied_remote_metadata_items WHERE file_hash = ? AND item_type = ? AND dedupe_key = ?"
+    local stmt = self.conn and self.conn:prepare(sql)
+    if not stmt then
+        self:_migrateMetadataSyncTables()
+        stmt = self.conn and self.conn:prepare(sql)
+        if not stmt then
+            return false
+        end
+    end
+    stmt:bind(file_hash, item_type, dedupe_key)
+    local row = firstRow(stmt, rowOrNil)
+    return row ~= nil
+end
+
+function Database:markRemoteMetadataItemApplied(item)
+    if type(item) ~= "table" or not item.file_hash or not item.item_type or not item.dedupe_key then
+        return false
+    end
+    local sql = [[
+        INSERT INTO applied_remote_metadata_items (
+            file_hash, book_id, book_file_id, item_type, dedupe_key,
+            remote_id, payload_json, status, applied_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(file_hash, item_type, dedupe_key) DO UPDATE SET
+            book_id = excluded.book_id,
+            book_file_id = excluded.book_file_id,
+            remote_id = excluded.remote_id,
+            payload_json = excluded.payload_json,
+            status = excluded.status,
+            applied_at = excluded.applied_at
+    ]]
+    local stmt = self.conn and self.conn:prepare(sql)
+    if not stmt then
+        self:_migrateMetadataSyncTables()
+        stmt = self.conn and self.conn:prepare(sql)
+        if not stmt then
+            return false
+        end
+    end
+    local payload_json = item.payload_json
+    if type(payload_json) == "table" then
+        local ok, encoded = pcall(json.encode, payload_json)
+        payload_json = ok and encoded or nil
+    end
+    stmt:bind(
+        item.file_hash,
+        item.book_id,
+        item.book_file_id,
+        item.item_type,
+        item.dedupe_key,
+        item.remote_id,
+        payload_json,
+        item.status,
+        nowEpoch()
+    )
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
+end
+
+function Database:clearRemoteMetadataAppliedForFileHash(file_hash)
+    if not file_hash or file_hash == "" then
+        return false
+    end
+    local stmt = self.conn and self.conn:prepare("DELETE FROM applied_remote_metadata_items WHERE file_hash = ?")
+    if not stmt then
+        return false
+    end
+    stmt:bind(file_hash)
+    local ok = stmt:step() == SQ3.DONE
+    stmt:close()
+    return ok
 end
 
 function Database:getPendingMetadataCount()

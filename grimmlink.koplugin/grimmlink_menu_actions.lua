@@ -215,6 +215,10 @@ function M:buildMaintenanceItem(plugin)
                         end,
                     },
                     {
+                        text = _("Pull Remote Metadata Now"),
+                        callback = function() plugin:pullRemoteMetadataNow(false, 100) end,
+                    },
+                    {
                         text = _("Sync PDF Bridge Now"),
                         enabled_func = function()
                             return plugin.current_session and plugin.current_session.book_id ~= nil and plugin:isPdfWebReaderBridgeEnabled()
@@ -249,6 +253,14 @@ function M:buildMaintenanceItem(plugin)
                     {
                         text = _("Force resync metadata for current book"),
                         callback = function() plugin:forceMetadataResyncForCurrentBook() end,
+                    },
+                    {
+                        text = _("Pull remote metadata for current book"),
+                        callback = function() plugin:pullRemoteMetadataForCurrentBook(false, 100) end,
+                    },
+                    {
+                        text = _("Reset metadata pull cursor for current book"),
+                        callback = function() plugin:resetMetadataPullCursorForCurrentBook() end,
                     },
                     {
                         text = _("Re-match current book"),

@@ -2758,13 +2758,15 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(false, plugin.db.settings.e_reader_friendly_mode)
     end)
 
-    it("asks to move files back when disabling separate magic folder", function()
+    it("asks to move files back and disables separate magic folder after confirmation", function()
         local plugin = newPlugin({
             use_separate_magic_download_dir = true,
         })
         local confirm_calls = 0
-        plugin.showConfirmAction = function()
+        plugin.showConfirmAction = function(_, _message, _ok_text, on_confirm)
             confirm_calls = confirm_calls + 1
+            assert.is_true(plugin.use_separate_magic_download_dir)
+            on_confirm()
         end
 
         plugin:disableSeparateMagicDownloadDirectory()
