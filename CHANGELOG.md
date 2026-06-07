@@ -2,6 +2,14 @@
 
 # [Unreleased]
 
+# [v1.5.2]
+
+### Fixes
+- Fixed disabling the separate Magic Shelf folder so confirming "Move Magic Shelf files back to the shared folder" can move files even when duplicate Magic Shelf mappings for the same book are stored in the local shelf map.
+
+### Tests
+- Added shelf-sync coverage for moving Magic Shelf-only files back to the shared download directory, including duplicate mapping ordering.
+
 # [v1.5.1]
 
 ### Fixes

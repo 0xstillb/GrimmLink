@@ -304,7 +304,7 @@ Open the GrimmLink settings menu and configure the connection to your Grimmory s
 |---|---|
 | Regular shelf sync | Sync one selected Grimmory shelf |
 | Magic shelf sync | Sync one selected Magic Shelf |
-| Separate Magic download directory | Store Magic Shelf downloads separately |
+| Separate Magic download directory | Store Magic Shelf downloads separately; turning it off can move Magic-only GrimmLink downloads back to the shared shelf folder |
 | Use original filename | Keep server-provided filenames when possible |
 | Two-way shelf delete sync | Experimental / implementation-dependent; do not rely on local-delete → server shelf removal unless verified on device |
 

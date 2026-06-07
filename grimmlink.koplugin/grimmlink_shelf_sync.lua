@@ -651,12 +651,35 @@ local function moveMagicOnlyFiles(self, source_root, target_root, opts)
     })
 
     local mappings = collectMagicOnlyMappings(self.db)
-    local processed_books = {}
+    local mappings_by_book = {}
+    local book_order = {}
     for _, mapping in ipairs(mappings) do
         local book_id = mapping.book_id
         local book_key = tostring(book_id or "")
-        if book_id and not processed_books[book_key] then
-            processed_books[book_key] = true
+        if book_id and book_key ~= "" then
+            if not mappings_by_book[book_key] then
+                mappings_by_book[book_key] = {}
+                book_order[#book_order + 1] = book_key
+            end
+            local book_mappings = mappings_by_book[book_key]
+            book_mappings[#book_mappings + 1] = mapping
+        end
+    end
+
+    for _, book_key in ipairs(book_order) do
+        local book_mappings = mappings_by_book[book_key] or {}
+        local mapping = book_mappings[1]
+        if source_root and source_root ~= "" then
+            for _, candidate in ipairs(book_mappings) do
+                local candidate_path = candidate.local_path
+                if candidate_path and candidate_path ~= "" and isPathUnderDirectory(candidate_path, source_root) then
+                    mapping = candidate
+                    break
+                end
+            end
+        end
+        if mapping then
+            local book_id = mapping.book_id
 
             local local_path = mapping.local_path
             if not local_path or local_path == "" then

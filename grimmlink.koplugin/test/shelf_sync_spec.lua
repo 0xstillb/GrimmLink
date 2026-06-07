@@ -426,6 +426,138 @@ describe("GrimmLink shelf sync download directory", function()
         assert.are.equal("/shared/Alpha.epub", deleted_cache_paths[1])
     end)
 
+    it("moves magic-only files back to the shared directory", function()
+        local updated_paths = {}
+        local sync = ShelfSync:new({
+            getMagicOnlyShelfMappings = function()
+                return {
+                    {
+                        book_id = 303,
+                        shelf_id = 9,
+                        shelf_type = "magic",
+                        local_path = "/magic/Gamma.epub",
+                        downloaded_by_grimmlink = 1,
+                        remote_title = "Gamma",
+                        remote_author = "Author G",
+                    },
+                }
+            end,
+            isBookTrackedByRegularShelf = function()
+                return false
+            end,
+            getShelfMappingsForBook = function(_, book_id)
+                return {
+                    {
+                        book_id = book_id,
+                        shelf_id = 9,
+                        shelf_type = "magic",
+                    },
+                }
+            end,
+            updateShelfMappingLocalPath = function(_, book_id, _shelf_id, _shelf_type, local_path)
+                updated_paths[book_id] = local_path
+                return true
+            end,
+            getShelfSyncEntryByLocalPath = function()
+                return nil
+            end,
+            saveBookCache = function()
+                return true
+            end,
+        }, {})
+
+        mock_attrs["/shared"] = { mode = "directory" }
+        mock_attrs["/magic"] = { mode = "directory" }
+        mock_attrs["/storage/emulated/0/koreader"] = { mode = "directory" }
+        mock_attrs["/storage/emulated/0/koreader/settings"] = { mode = "directory" }
+        mock_attrs["/magic/Gamma.epub"] = { mode = "file", size = 3456 }
+
+        local summary = sync:moveMagicShelfFilesBackToSharedDirectory("/shared", {
+            magic_dir = "/magic",
+            download_dir = "/shared",
+        })
+
+        assert.are.equal(1, summary.moved)
+        assert.are.equal(0, summary.failed)
+        assert.are.equal("/shared/Gamma.epub", updated_paths[303])
+        assert.is_nil(mock_attrs["/magic/Gamma.epub"])
+        assert.is_not_nil(mock_attrs["/shared/Gamma.epub"])
+    end)
+
+    it("prefers the source-folder mapping when moving duplicate magic mappings back", function()
+        local updated_paths = {}
+        local sync = ShelfSync:new({
+            getMagicOnlyShelfMappings = function()
+                return {
+                    {
+                        book_id = 404,
+                        shelf_id = 11,
+                        shelf_type = "magic",
+                        local_path = "/shared/Delta.epub",
+                        downloaded_by_grimmlink = 1,
+                    },
+                    {
+                        book_id = 404,
+                        shelf_id = 12,
+                        shelf_type = "magic",
+                        local_path = "/magic/Delta.epub",
+                        downloaded_by_grimmlink = 1,
+                        remote_title = "Delta",
+                        remote_author = "Author D",
+                    },
+                }
+            end,
+            isBookTrackedByRegularShelf = function()
+                return false
+            end,
+            getShelfMappingsForBook = function(_, book_id)
+                return {
+                    {
+                        book_id = book_id,
+                        shelf_id = 11,
+                        shelf_type = "magic",
+                    },
+                    {
+                        book_id = book_id,
+                        shelf_id = 12,
+                        shelf_type = "magic",
+                    },
+                }
+            end,
+            updateShelfMappingLocalPath = function(_, book_id, shelf_id, _shelf_type, local_path)
+                updated_paths[shelf_id] = {
+                    book_id = book_id,
+                    local_path = local_path,
+                }
+                return true
+            end,
+            getShelfSyncEntryByLocalPath = function()
+                return nil
+            end,
+            saveBookCache = function()
+                return true
+            end,
+        }, {})
+
+        mock_attrs["/shared"] = { mode = "directory" }
+        mock_attrs["/magic"] = { mode = "directory" }
+        mock_attrs["/storage/emulated/0/koreader"] = { mode = "directory" }
+        mock_attrs["/storage/emulated/0/koreader/settings"] = { mode = "directory" }
+        mock_attrs["/magic/Delta.epub"] = { mode = "file", size = 4567 }
+
+        local summary = sync:moveMagicShelfFilesBackToSharedDirectory("/shared", {
+            magic_dir = "/magic",
+            download_dir = "/shared",
+        })
+
+        assert.are.equal(1, summary.moved)
+        assert.are.equal(0, summary.failed)
+        assert.are.equal("/shared/Delta.epub", updated_paths[11].local_path)
+        assert.are.equal("/shared/Delta.epub", updated_paths[12].local_path)
+        assert.is_nil(mock_attrs["/magic/Delta.epub"])
+        assert.is_not_nil(mock_attrs["/shared/Delta.epub"])
+    end)
+
     it("uses snapshot fast-path for unchanged large shelves (100/500/1000)", function()
         mock_attrs["/storage/emulated/0/koreader/books/Book"] = { mode = "directory" }
 
