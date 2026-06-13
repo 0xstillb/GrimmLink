@@ -47,7 +47,7 @@ function M.normalizePercent(value)
     if value > 100 then
         value = 100
     end
-    return math.floor(value * 10 + 0.5) / 10
+    return math.floor(value * 100 + 0.5) / 100
 end
 
 function M.normalizeDirectoryPath(path)

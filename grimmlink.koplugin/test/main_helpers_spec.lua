@@ -831,6 +831,31 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("/body/4/10", snapshot.progress)
     end)
 
+    it("does not double-scale reflowable page-derived percentage", function()
+        local plugin = newPlugin()
+        plugin.send_reflowable_percentage = true
+        plugin.ui.paging.getCurrentPage = function()
+            return 55
+        end
+        plugin.ui.document.getCurrentPage = function()
+            return 55
+        end
+        plugin.ui.document.getPageCount = function()
+            return 16653
+        end
+        plugin.ui.document.getCurrentPos = function()
+            return 55
+        end
+        plugin.ui.document.getXPointer = function()
+            return "/body/55"
+        end
+
+        local snapshot = plugin:getCurrentProgressSnapshot("hash-epub", "/books/demo.epub", 11, 12)
+
+        assert.are.equal(0.33, snapshot.percentage)
+        assert.is_true(snapshot.percentage ~= 33.0)
+    end)
+
     it("calculates a deterministic book hash", function()
         local plugin = newPlugin()
         local original_sha2_preload = package.preload["ffi/sha2"]

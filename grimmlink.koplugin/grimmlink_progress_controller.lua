@@ -202,7 +202,7 @@ function Grimmlink:getCurrentProgressSnapshot(file_hash, file_path, book_id, boo
 
     local percentage = nil
     if current_page and total_pages and total_pages > 0 and (is_fixed_page or allow_reflowable_percentage) then
-        percentage = normalizePercent((current_page / total_pages) * 100)
+        percentage = normalizePercent(current_page / total_pages)
     end
 
     local snapshot = {
