@@ -350,6 +350,69 @@ describe("GrimmLink API client", function()
         assert.are.equal(200, code)
     end)
 
+    it("parses and cleans up a completed background metadata pull", function()
+        local prefix = os.tmpname()
+        os.remove(prefix)
+        local handle = {
+            response_path = prefix .. ".json",
+            http_code_path = prefix .. ".http",
+            exit_code_path = prefix .. ".exit",
+            pid_path = prefix .. ".pid",
+            script_path = prefix .. ".sh",
+            started_at = os.time(),
+            timeout = 25,
+        }
+        local response_file = assert(io.open(handle.response_path, "w"))
+        response_file:write('{"ok":true,"items":[]}')
+        response_file:close()
+        local http_file = assert(io.open(handle.http_code_path, "w"))
+        http_file:write("200")
+        http_file:close()
+        local exit_file = assert(io.open(handle.exit_code_path, "w"))
+        exit_file:write("0")
+        exit_file:close()
+
+        local status, response, code = client:pollAsyncMetadataPull(handle)
+
+        assert.are.equal("done", status)
+        assert.are.equal(200, code)
+        assert.is_true(response.ok)
+        assert.are.same({}, response.items)
+        assert.is_nil(io.open(handle.response_path, "r"))
+        assert.is_nil(io.open(handle.http_code_path, "r"))
+        assert.is_nil(io.open(handle.exit_code_path, "r"))
+    end)
+
+    it("rejects malformed completed background metadata responses", function()
+        local prefix = os.tmpname()
+        os.remove(prefix)
+        local handle = {
+            response_path = prefix .. ".json",
+            http_code_path = prefix .. ".http",
+            exit_code_path = prefix .. ".exit",
+            pid_path = prefix .. ".pid",
+            script_path = prefix .. ".sh",
+            started_at = os.time(),
+            timeout = 25,
+        }
+        local response_file = assert(io.open(handle.response_path, "w"))
+        response_file:write("not-json")
+        response_file:close()
+        local http_file = assert(io.open(handle.http_code_path, "w"))
+        http_file:write("200")
+        http_file:close()
+        local exit_file = assert(io.open(handle.exit_code_path, "w"))
+        exit_file:write("0")
+        exit_file:close()
+
+        local status, response, code, details = client:pollAsyncMetadataPull(handle)
+
+        assert.are.equal("failed", status)
+        assert.are.equal("Malformed response", response)
+        assert.are.equal(200, code)
+        assert.is_true(details.malformed_response)
+    end)
+
     it("fetches supported read statuses from GrimmLink endpoint", function()
         next_http_response = {
             body = '{"statuses":["UNREAD","READING","READ","PAUSED","ABANDONED","RE_READING"]}',

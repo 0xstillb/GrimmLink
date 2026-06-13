@@ -183,7 +183,9 @@ Supported metadata areas:
 Metadata sync can be enabled separately from core progress and shelf sync.
 `Pull Remote Metadata Now` resolves the open/current book, applies supported
 items without duplicating local annotations or bookmarks, and reports why any
-unsupported or disabled items were skipped.
+unsupported or disabled items were skipped. Manual pulls run in the background
+and show connecting, receiving, and applying stages so slow network requests do
+not block the KOReader interface.
 
 ---
 

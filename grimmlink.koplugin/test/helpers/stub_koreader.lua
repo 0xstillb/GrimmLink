@@ -65,10 +65,12 @@ local function install()
             last_shown = nil,
             last_closed = nil,
             dirty_calls = 0,
+            shown_texts = {},
         }
         return {
             show = function(_, widget)
                 UIManager.last_shown = widget
+                UIManager.shown_texts[#UIManager.shown_texts + 1] = widget and widget.text
             end,
             close = function(_, widget)
                 UIManager.last_closed = widget
@@ -93,10 +95,14 @@ local function install()
             getDirtyCalls = function()
                 return UIManager.dirty_calls
             end,
+            getShownTexts = function()
+                return UIManager.shown_texts
+            end,
             reset = function()
                 UIManager.last_shown = nil
                 UIManager.last_closed = nil
                 UIManager.dirty_calls = 0
+                UIManager.shown_texts = {}
             end,
         }
     end

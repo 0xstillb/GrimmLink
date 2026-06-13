@@ -534,6 +534,9 @@ local function newApi()
         next_session_batch = { success = true, response = { status = "ok" }, code = 200 },
         next_metadata_batch = { success = true, response = { ok = true, results = { annotations = {}, bookmarks = {} } }, code = 200 },
         next_metadata_pull = { success = true, response = { ok = true, items = {} }, code = 200 },
+        next_async_metadata_polls = {
+            { status = "done", response = { ok = true, items = {} }, code = 200 },
+        },
     }
 
     function api:init(...)
@@ -627,6 +630,29 @@ local function newApi()
             item_type = item_type,
         }
         return self.next_metadata_pull.success, self.next_metadata_pull.response, self.next_metadata_pull.code
+    end
+
+    function api:startAsyncMetadataPull(book_id, book_hash, book_file_id, cursor, limit, item_type, opts)
+        self.calls[#self.calls + 1] = {
+            name = "startAsyncMetadataPull",
+            book_id = book_id,
+            book_hash = book_hash,
+            book_file_id = book_file_id,
+            cursor = cursor,
+            limit = limit,
+            item_type = item_type,
+            opts = opts,
+        }
+        return { id = "async-metadata-pull" }
+    end
+
+    function api:pollAsyncMetadataPull(handle)
+        self.calls[#self.calls + 1] = { name = "pollAsyncMetadataPull", handle = handle }
+        local next_poll = table.remove(self.next_async_metadata_polls, 1)
+        if not next_poll then
+            return "failed", "Missing async metadata poll result", nil, { transport_error = true }
+        end
+        return next_poll.status, next_poll.response, next_poll.code, next_poll.details
     end
 
     return api
@@ -1844,6 +1870,116 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(0, #plugin.api.calls)
         local dialog = UIManager.getLastShown()
         assert.is_true(dialog.text:find("Please open a book first", 1, true) ~= nil)
+    end)
+
+    it("runs manual metadata pull in the background with staged progress", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.document.currentHash = "hash-async-progress"
+        plugin.api.next_async_metadata_polls = {
+            {
+                status = "running",
+                details = { response_bytes = 128 },
+            },
+            {
+                status = "done",
+                response = { ok = true, items = {} },
+                code = 200,
+            },
+        }
+
+        local result = plugin:pullRemoteMetadataNow(false, 100)
+
+        assert.is_true(result.pending, result.reason)
+        assert.is_false(plugin._metadata_pull_running == true)
+        local shown_texts = UIManager.getShownTexts()
+        local joined = table.concat(shown_texts, "\n")
+        assert.is_true(joined:find("Step 1 of 3", 1, true) ~= nil)
+        assert.is_true(joined:find("Step 2 of 3", 1, true) ~= nil)
+        assert.is_true(joined:find("Step 3 of 3", 1, true) ~= nil)
+        assert.is_true(joined:find("KOReader will remain responsive", 1, true) ~= nil)
+        assert.is_true(joined:find("No remote metadata for this book", 1, true) ~= nil)
+    end)
+
+    it("prevents a second manual metadata pull while one is running", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.document.currentHash = "hash-async-duplicate"
+        local scheduled = {}
+        local original_schedule = UIManager.scheduleIn
+        UIManager.scheduleIn = function(_, _, callback)
+            scheduled[#scheduled + 1] = callback
+        end
+
+        local first = plugin:pullRemoteMetadataNow(false, 100)
+        local second = plugin:pullRemoteMetadataNow(false, 100)
+
+        UIManager.scheduleIn = original_schedule
+        plugin._metadata_pull_running = false
+        plugin._metadata_pull_handle = nil
+        plugin:closeMetadataPullProgress()
+
+        assert.is_true(first.pending, first.reason)
+        assert.are.equal("already_running", second.reason)
+        assert.are.equal(1, #scheduled)
+        local starts = 0
+        for _, call in ipairs(plugin.api.calls) do
+            if call.name == "startAsyncMetadataPull" then
+                starts = starts + 1
+            end
+        end
+        assert.are.equal(1, starts)
+    end)
+
+    it("contains background metadata poll exceptions without crashing the UI", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.document.currentHash = "hash-async-exception"
+        plugin.api.pollAsyncMetadataPull = function()
+            error("simulated poll failure")
+        end
+
+        local result = plugin:pullRemoteMetadataNow(false, 100)
+
+        assert.is_true(result.pending, result.reason)
+        assert.is_false(plugin._metadata_pull_running == true)
+        local dialog = UIManager.getLastShown()
+        assert.is_true(dialog.text:find("Server unreachable", 1, true) ~= nil)
+    end)
+
+    it("uses a silent background pull when pending metadata is empty", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.document.currentHash = "hash-auto-background"
+
+        local synced, failed = plugin:syncPendingMetadata(true)
+
+        assert.are.equal(0, synced)
+        assert.are.equal(0, failed)
+        local async_starts = 0
+        local blocking_pulls = 0
+        for _, call in ipairs(plugin.api.calls) do
+            if call.name == "startAsyncMetadataPull" then
+                async_starts = async_starts + 1
+            elseif call.name == "pullMetadata" then
+                blocking_pulls = blocking_pulls + 1
+            end
+        end
+        assert.are.equal(1, async_starts)
+        assert.are.equal(0, blocking_pulls)
+        assert.are.equal(0, #UIManager.getShownTexts())
+    end)
+
+    it("contains synchronous metadata request exceptions", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.api.pullMetadata = function()
+            error("simulated socket failure")
+        end
+
+        local result = plugin:pullRemoteMetadataForContext({
+            file_path = "/books/demo.epub",
+            file_hash = "hash-sync-exception",
+            book_id = 70,
+        }, true, 100)
+
+        assert.are.equal(1, result.failed)
+        assert.are.equal("request_failed", result.reason)
     end)
 
     it("pulls and deduplicates rating, annotation, and bookmark metadata", function()

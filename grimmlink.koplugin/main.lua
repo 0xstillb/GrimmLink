@@ -999,6 +999,8 @@ if MetadataController and type(MetadataController.install) == "function" then
         tryReadSetting = tryReadSetting,
         tryWriteSetting = tryWriteSetting,
         lfs = lfs,
+        InfoMessage = InfoMessage,
+        UIManager = UIManager,
     })
 end
 if ShelfController and type(ShelfController.install) == "function" then

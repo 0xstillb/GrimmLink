@@ -25,6 +25,8 @@ function M.install(Grimmlink, deps)
     local tryFlushDocSettings = deps.tryFlushDocSettings
     local tryCloseDocSettings = deps.tryCloseDocSettings
     local lfs = deps.lfs
+    local InfoMessage = deps.InfoMessage
+    local UIManager = deps.UIManager
 
     local function cloneForMetadata(value)
         if type(cloneTable) == "function" then
@@ -993,69 +995,57 @@ local function formatMetadataSkipReasons(reasons)
     return table.concat(parts, ", ")
 end
 
-function Grimmlink:pullRemoteMetadataForContext(context, silent, limit, item_type)
-    local result = {
+local function newMetadataPullResult()
+    return {
         pulled = 0,
         applied = 0,
         skipped = 0,
         failed = 0,
         cursor_saved = false,
     }
+end
 
-    if not self.db or not self.metadata_sync_enabled then
-        return result
+function Grimmlink:closeMetadataPullProgress()
+    if self._metadata_pull_progress_widget and UIManager then
+        pcall(UIManager.close, UIManager, self._metadata_pull_progress_widget)
     end
-    if not context or (not context.book_id and not context.file_hash and not context.book_file_id) then
-        return result
+    self._metadata_pull_progress_widget = nil
+end
+
+function Grimmlink:showMetadataPullProgress(stage, detail)
+    if not UIManager or not InfoMessage then
+        return
     end
-    if context.file_hash and not self:isTrackingEnabledForContext(context) then
-        return result
+    self:closeMetadataPullProgress()
+    local lines = {
+        _("Pulling remote metadata"),
+        "",
+        T(_("Step %1 of 3"), stage),
+        detail or _("Please wait..."),
+        "",
+        _("Please wait. KOReader will remain responsive."),
+    }
+    local widget = InfoMessage:new{
+        text = table.concat(lines, "\n"),
+        timeout = 90,
+    }
+    self._metadata_pull_progress_widget = widget
+    UIManager:show(widget)
+    if type(UIManager.forceRePaint) == "function" then
+        pcall(UIManager.forceRePaint, UIManager)
     end
-    if not self:requireReady({ require_api = true, silent = silent }) then
-        return result
-    end
-    if not self:isOnline() then
+end
+
+function Grimmlink:processMetadataPullResponse(context, pull, code, silent, item_type)
+    local result = newMetadataPullResult()
+    if type(pull) ~= "table" then
         result.failed = 1
-        result.reason = "server_unreachable"
+        result.reason = "malformed_response"
         if not silent then
-            self:showMessage(_("Server unreachable. Check the URL and network connection."), 4)
+            self:showMessage(_("Malformed response from Grimmory."), 4)
         end
         return result
     end
-    if not self:isApiReady({ "pullMetadata" }) then
-        result.failed = 1
-        result.reason = "api_unavailable"
-        if not silent then
-            self:showMessage(_("Metadata pull is unavailable in this GrimmLink build."), 4)
-        end
-        return result
-    end
-    if not self:refreshApiClient() then
-        result.failed = 1
-        result.reason = "api_unavailable"
-        return result
-    end
-
-    local pull_since = self:getMetadataCursor(context.file_hash, context.book_id, context.book_file_id, item_type)
-    local ok_pull, response, code = self.api:pullMetadata(
-        context.book_id,
-        context.file_hash,
-        context.book_file_id,
-        pull_since,
-        limit or 100,
-        item_type
-    )
-    if not ok_pull or type(response) ~= "table" then
-        result.failed = 1
-        result.reason = "request_failed"
-        self:logWarn("GrimmLink metadata pull request failed:", safeToString(response or code or "network_error"))
-        if not silent then
-            self:showMessage(metadataPullErrorMessage(code, response), 4)
-        end
-        return result
-    end
-
-    local pull = response
     if pull.ok == false then
         result.failed = 1
         result.reason = "request_failed"
@@ -1110,6 +1100,73 @@ function Grimmlink:pullRemoteMetadataForContext(context, silent, limit, item_typ
         end
     end
     return result
+end
+
+function Grimmlink:pullRemoteMetadataForContext(context, silent, limit, item_type)
+    local result = newMetadataPullResult()
+
+    if not self.db or not self.metadata_sync_enabled then
+        return result
+    end
+    if not context or (not context.book_id and not context.file_hash and not context.book_file_id) then
+        return result
+    end
+    if context.file_hash and not self:isTrackingEnabledForContext(context) then
+        return result
+    end
+    if not self:requireReady({ require_api = true, silent = silent }) then
+        return result
+    end
+    if not self:isOnline() then
+        result.failed = 1
+        result.reason = "server_unreachable"
+        if not silent then
+            self:showMessage(_("Server unreachable. Check the URL and network connection."), 4)
+        end
+        return result
+    end
+    if not self:isApiReady({ "pullMetadata" }) then
+        result.failed = 1
+        result.reason = "api_unavailable"
+        if not silent then
+            self:showMessage(_("Metadata pull is unavailable in this GrimmLink build."), 4)
+        end
+        return result
+    end
+    if not self:refreshApiClient() then
+        result.failed = 1
+        result.reason = "api_unavailable"
+        return result
+    end
+
+    local pull_since = self:getMetadataCursor(context.file_hash, context.book_id, context.book_file_id, item_type)
+    local call_ok, ok_pull, response, code = pcall(
+        self.api.pullMetadata,
+        self.api,
+        context.book_id,
+        context.file_hash,
+        context.book_file_id,
+        pull_since,
+        limit or 100,
+        item_type
+    )
+    if not call_ok then
+        local request_exception = ok_pull
+        ok_pull = false
+        response = safeToString(request_exception or "metadata request exception")
+        code = nil
+    end
+    if not ok_pull or type(response) ~= "table" then
+        result.failed = 1
+        result.reason = "request_failed"
+        self:logWarn("GrimmLink metadata pull request failed:", safeToString(response or code or "network_error"))
+        if not silent then
+            self:showMessage(metadataPullErrorMessage(code, response), 4)
+        end
+        return result
+    end
+
+    return self:processMetadataPullResponse(context, response, code, silent, item_type)
 end
 
 
@@ -1379,6 +1436,165 @@ function Grimmlink:pullRemoteMetadataForKnownBooks(silent, limit, item_type)
     return result
 end
 
+function Grimmlink:startRemoteMetadataPullAsync(context, limit, item_type, silent)
+    local pending_result = newMetadataPullResult()
+    pending_result.pending = true
+
+    if self._metadata_pull_running then
+        pending_result.reason = "already_running"
+        if not silent then
+            self:showMessage(_("A remote metadata pull is already in progress. Please wait."), 3)
+        end
+        return pending_result
+    end
+    if not UIManager or type(UIManager.scheduleIn) ~= "function" then
+        pending_result.pending = false
+        pending_result.failed = 1
+        pending_result.reason = "background_ui_unavailable"
+        if not silent then
+            self:showMessage(_("Background metadata pull is unavailable in this KOReader build."), 4)
+        end
+        return pending_result
+    end
+    if not self:requireReady({ require_api = true, silent = silent }) then
+        pending_result.pending = false
+        pending_result.failed = 1
+        pending_result.reason = "not_ready"
+        return pending_result
+    end
+    if not self:isOnline() then
+        pending_result.pending = false
+        pending_result.failed = 1
+        pending_result.reason = "server_unreachable"
+        if not silent then
+            self:showMessage(_("Server unreachable. Check the URL and network connection."), 4)
+        end
+        return pending_result
+    end
+    if not self:isApiReady({ "startAsyncMetadataPull", "pollAsyncMetadataPull" }) then
+        pending_result.pending = false
+        pending_result.failed = 1
+        pending_result.reason = "background_api_unavailable"
+        if not silent then
+            self:showMessage(_("Safe background metadata pull is unavailable in this GrimmLink build."), 4)
+        end
+        return pending_result
+    end
+    if not self:refreshApiClient() then
+        pending_result.pending = false
+        pending_result.failed = 1
+        pending_result.reason = "api_unavailable"
+        return pending_result
+    end
+
+    local pull_since = self:getMetadataCursor(context.file_hash, context.book_id, context.book_file_id, item_type)
+    local start_ok, handle, start_error = pcall(
+        self.api.startAsyncMetadataPull,
+        self.api,
+        context.book_id,
+        context.file_hash,
+        context.book_file_id,
+        pull_since,
+        limit or 100,
+        item_type,
+        { timeout = 25 }
+    )
+    if not start_ok or not handle then
+        pending_result.pending = false
+        pending_result.failed = 1
+        pending_result.reason = "background_start_failed"
+        self:logWarn("GrimmLink background metadata pull could not start:", safeToString(start_error or handle))
+        if not silent then
+            self:showMessage(
+                _("Could not start a safe background metadata pull. Check that curl or wget is available."),
+                5
+            )
+        end
+        return pending_result
+    end
+
+    self._metadata_pull_running = true
+    self._metadata_pull_handle = handle
+    self._metadata_pull_progress_stage = 1
+    if not silent then
+        self:showMetadataPullProgress(1, _("Connecting to Grimmory..."))
+    end
+
+    local function finish()
+        self._metadata_pull_running = false
+        self._metadata_pull_handle = nil
+        self._metadata_pull_progress_stage = nil
+        self:closeMetadataPullProgress()
+    end
+
+    local function failSafely(response, code, reason)
+        finish()
+        self:logWarn("GrimmLink background metadata pull failed:", safeToString(reason or response or code))
+        if not silent then
+            self:showMessage(metadataPullErrorMessage(code, response), 5)
+        end
+    end
+
+    local poll
+    poll = function()
+        if not self._metadata_pull_running or self._metadata_pull_handle ~= handle then
+            return
+        end
+
+        local poll_ok, status, response, code, details = pcall(
+            self.api.pollAsyncMetadataPull,
+            self.api,
+            handle
+        )
+        if not poll_ok then
+            failSafely(status, nil, "poll_exception")
+            return
+        end
+        if status == "running" then
+            local response_bytes = type(details) == "table" and tonumber(details.response_bytes) or 0
+            if response_bytes > 0 and self._metadata_pull_progress_stage ~= 2 then
+                self._metadata_pull_progress_stage = 2
+                if not silent then
+                    self:showMetadataPullProgress(2, _("Receiving metadata from Grimmory..."))
+                end
+            end
+            UIManager:scheduleIn(0.25, poll)
+            return
+        end
+        if status ~= "done" then
+            failSafely(response, code, status)
+            return
+        end
+
+        local item_count = type(response) == "table" and type(response.items) == "table" and #response.items or 0
+        self._metadata_pull_progress_stage = 3
+        if not silent then
+            self:showMetadataPullProgress(3, T(_("Applying %1 metadata items..."), item_count))
+        end
+        UIManager:scheduleIn(0.05, function()
+            finish()
+            local apply_ok, apply_result = pcall(
+                self.processMetadataPullResponse,
+                self,
+                context,
+                response,
+                code,
+                silent,
+                item_type
+            )
+            if not apply_ok then
+                self:logWarn("GrimmLink metadata pull apply exception:", safeToString(apply_result))
+                if not silent then
+                    self:showMessage(_("Remote metadata was received but could not be applied safely."), 5)
+                end
+            end
+        end)
+    end
+
+    UIManager:scheduleIn(0.1, poll)
+    return pending_result
+end
+
 function Grimmlink:pullRemoteMetadataNow(silent, limit, item_type)
     if not self.metadata_sync_enabled then
         if not silent then
@@ -1406,6 +1622,9 @@ function Grimmlink:pullRemoteMetadataNow(silent, limit, item_type)
         end
         return nil
     end
+    if not silent then
+        return self:startRemoteMetadataPullAsync(context, limit, item_type)
+    end
     return self:pullRemoteMetadataForContext(context, silent, limit, item_type)
 end
 
@@ -1428,6 +1647,9 @@ function Grimmlink:pullRemoteMetadataForCurrentBook(silent, limit, item_type)
             self:showTrackingDisabledMessage()
         end
         return nil
+    end
+    if not silent then
+        return self:startRemoteMetadataPullAsync(context, limit, item_type, false)
     end
     return self:pullRemoteMetadataForContext(context, silent, limit, item_type)
 end
@@ -1467,9 +1689,13 @@ function Grimmlink:syncPendingMetadata(silent, limit)
 
     local pending = safeDbValueCall(self.db, "getPendingMetadataItems", {}, limit or 100)
     if #pending == 0 then
-        local pull_result = self:pullRemoteMetadataForCurrentBook(true, limit or 100)
-        if pull_result and pull_result.failed and pull_result.failed > 0 then
-            failed = failed + pull_result.failed
+        local context = self:resolveMetadataPullContext()
+        if context and (context.file_hash or context.book_id or context.book_file_id)
+            and self:isTrackingEnabledForContext(context) then
+            local pull_result = self:startRemoteMetadataPullAsync(context, limit or 100, nil, true)
+            if pull_result and pull_result.failed and pull_result.failed > 0 then
+                failed = failed + pull_result.failed
+            end
         end
         return synced, failed
     end

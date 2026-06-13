@@ -616,7 +616,7 @@ function APIClient:buildMetadataPullPayload(book_id, book_hash, book_file_id, fi
     return payload
 end
 
-function APIClient:pullMetadata(book_id, book_hash, book_file_id, cursor, limit, item_type)
+function APIClient:buildMetadataPullPath(book_id, book_hash, book_file_id, cursor, limit, item_type)
     local query = {}
     local normalized_hash = tostring(book_hash or ""):match("^%s*(.-)%s*$")
     if normalized_hash ~= "" then
@@ -626,7 +626,7 @@ function APIClient:pullMetadata(book_id, book_hash, book_file_id, cursor, limit,
     elseif book_file_id ~= nil and tostring(book_file_id) ~= "" then
         query[#query + 1] = "bookFileId=" .. self:_urlEncode(normalizeNumericId(book_file_id))
     else
-        return false, "Book context is required", nil
+        return nil, "Book context is required"
     end
 
     local normalized_cursor = normalizeMetadataCursor(cursor)
@@ -645,7 +645,21 @@ function APIClient:pullMetadata(book_id, book_hash, book_file_id, cursor, limit,
         query[#query + 1] = "type=" .. self:_urlEncode(normalized_type)
     end
 
-    local path = self:_apiPath("/syncs/metadata") .. "?" .. table.concat(query, "&")
+    return self:_apiPath("/syncs/metadata") .. "?" .. table.concat(query, "&")
+end
+
+function APIClient:pullMetadata(book_id, book_hash, book_file_id, cursor, limit, item_type)
+    local path, path_error = self:buildMetadataPullPath(
+        book_id,
+        book_hash,
+        book_file_id,
+        cursor,
+        limit,
+        item_type
+    )
+    if not path then
+        return false, path_error or "Book context is required", nil
+    end
     local success, code, response = self:request("GET", path)
     if success and type(response) == "table" then
         return true, response, code
@@ -971,6 +985,239 @@ end
 local function shquote(s)
     if not s then return "''" end
     return "'" .. tostring(s):gsub("'", "'\"'\"'") .. "'"
+end
+
+local function readTextFile(path)
+    local file = io.open(path, "r")
+    if not file then
+        return nil
+    end
+    local value = file:read("*a")
+    file:close()
+    return value
+end
+
+local function removeAsyncRequestArtifacts(handle)
+    if not handle then
+        return
+    end
+    os.remove(handle.response_path)
+    os.remove(handle.http_code_path)
+    os.remove(handle.exit_code_path)
+    os.remove(handle.pid_path)
+    os.remove(handle.script_path)
+end
+
+--- Start a metadata GET in a background curl/wget process.
+--- Returns a pollable handle, or nil + an error string.
+function APIClient:startAsyncMetadataPull(book_id, book_hash, book_file_id, cursor, limit, item_type, opts)
+    opts = opts or {}
+    if not self.server_url or self.server_url == "" then
+        return nil, "Server URL not configured"
+    end
+    if not self:isAsyncDownloadAvailable() then
+        return nil, "Background HTTP tools are unavailable"
+    end
+
+    local path, path_error = self:buildMetadataPullPath(
+        book_id,
+        book_hash,
+        book_file_id,
+        cursor,
+        limit,
+        item_type
+    )
+    if not path then
+        return nil, path_error or "Book context is required"
+    end
+
+    local prefix = opts.temp_prefix or os.tmpname()
+    if not prefix or prefix == "" then
+        return nil, "Cannot allocate metadata pull temporary files"
+    end
+    os.remove(prefix)
+
+    local response_path = prefix .. ".json"
+    local http_code_path = prefix .. ".http"
+    local exit_code_path = prefix .. ".exit"
+    local pid_path = prefix .. ".pid"
+    local script_path = prefix .. ".sh"
+    local timeout = math.max(5, math.min(math.floor(tonumber(opts.timeout) or self.timeout or 25), 60))
+    local primary_url = self.server_url .. path
+    local fallback_url = ""
+    if self.fallback_url and self.fallback_url ~= "" and self.fallback_url ~= self.server_url then
+        fallback_url = self.fallback_url .. path
+    end
+    local auth_user = self.username or ""
+    local auth_key = self:_resolveAuthKey() or ""
+
+    local script = string.format([[#!/bin/sh
+export GL_USER=%s
+export GL_KEY=%s
+REQ_TIMEOUT=%d
+REQ_PRIMARY=%s
+REQ_FALLBACK=%s
+REQ_BODY=%s
+REQ_HTTP=%s
+REQ_EXIT=%s
+REQ_PID=%s
+
+run_curl() {
+  REQ_URL="$1"
+  curl -s -S --max-time "$REQ_TIMEOUT" \
+    -H "x-auth-user: $GL_USER" \
+    -H "x-auth-key: $GL_KEY" \
+    -H "Accept: application/json" \
+    -o "$REQ_BODY" \
+    -w "%%{http_code}" \
+    "$REQ_URL" > "$REQ_HTTP" &
+  echo $! > "$REQ_PID"
+  wait $!
+  return $?
+}
+
+run_wget() {
+  REQ_URL="$1"
+  REQ_HEADERS="${REQ_HTTP}.headers"
+  wget -q --timeout="$REQ_TIMEOUT" --server-response \
+    --header="x-auth-user: $GL_USER" \
+    --header="x-auth-key: $GL_KEY" \
+    --header="Accept: application/json" \
+    -O "$REQ_BODY" \
+    "$REQ_URL" 2> "$REQ_HEADERS" &
+  echo $! > "$REQ_PID"
+  wait $!
+  REQ_STATUS=$?
+  awk '/^  HTTP\// { code=$2 } END { if (code != "") print code; else print 0 }' "$REQ_HEADERS" > "$REQ_HTTP"
+  rm -f "$REQ_HEADERS"
+  return $REQ_STATUS
+}
+
+run_request() {
+  if command -v curl >/dev/null 2>&1; then
+    run_curl "$1"
+    return $?
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    run_wget "$1"
+    return $?
+  fi
+  echo 127 > "$REQ_EXIT"
+  return 127
+}
+
+run_request "$REQ_PRIMARY"
+REQ_STATUS=$?
+REQ_HTTP_CODE=$(cat "$REQ_HTTP" 2>/dev/null)
+if [ "$REQ_STATUS" -ne 0 ] && { [ -z "$REQ_HTTP_CODE" ] || [ "$REQ_HTTP_CODE" = "0" ] || [ "$REQ_HTTP_CODE" = "000" ]; } && [ -n "$REQ_FALLBACK" ]; then
+  rm -f "$REQ_BODY" "$REQ_HTTP"
+  run_request "$REQ_FALLBACK"
+  REQ_STATUS=$?
+fi
+echo "$REQ_STATUS" > "$REQ_EXIT"
+]],
+        shquote(auth_user),
+        shquote(auth_key),
+        timeout,
+        shquote(primary_url),
+        shquote(fallback_url),
+        shquote(response_path),
+        shquote(http_code_path),
+        shquote(exit_code_path),
+        shquote(pid_path)
+    )
+
+    local prepare_status = ffi.C.system("umask 077; : > " .. shquote(script_path) .. " && chmod 700 " .. shquote(script_path))
+    if prepare_status ~= 0 then
+        return nil, "Cannot prepare metadata pull script"
+    end
+    local script_file = io.open(script_path, "w")
+    if not script_file then
+        os.remove(script_path)
+        return nil, "Cannot create metadata pull script"
+    end
+    script_file:write(script)
+    script_file:close()
+
+    local handle = {
+        response_path = response_path,
+        http_code_path = http_code_path,
+        exit_code_path = exit_code_path,
+        pid_path = pid_path,
+        script_path = script_path,
+        started_at = os.time(),
+        timeout = timeout,
+    }
+    ffi.C.system("sh " .. shquote(script_path) .. " </dev/null >/dev/null 2>&1 &")
+    return handle
+end
+
+--- Poll a background metadata pull.
+--- Returns status, response, HTTP code, details.
+function APIClient:pollAsyncMetadataPull(handle)
+    if not handle then
+        return "failed", "Missing metadata pull handle", nil, { transport_error = true }
+    end
+
+    local exit_text = readTextFile(handle.exit_code_path)
+    if exit_text == nil then
+        if os.time() - handle.started_at > handle.timeout + 10 then
+            self:cancelAsyncMetadataPull(handle)
+            return "timeout", "Metadata pull timed out", nil, { transport_error = true }
+        end
+        local response_size = 0
+        if lfs then
+            local attr = lfs.attributes(handle.response_path)
+            response_size = attr and attr.size or 0
+        end
+        return "running", nil, nil, { response_bytes = response_size }
+    end
+
+    local exit_code = tonumber(exit_text:match("%-?%d+")) or -1
+    local http_text = readTextFile(handle.http_code_path) or ""
+    local http_code = tonumber(http_text:match("%d%d%d"))
+    local response_text = readTextFile(handle.response_path) or ""
+    local parsed = nil
+    if response_text ~= "" then
+        parsed = select(1, self:parseJSON(response_text))
+    end
+    removeAsyncRequestArtifacts(handle)
+
+    if exit_code == 0 and http_code and http_code >= 200 and http_code < 300 then
+        if type(parsed) ~= "table" then
+            return "failed", "Malformed response", http_code, {
+                transport_error = false,
+                malformed_response = true,
+                exit_code = exit_code,
+            }
+        end
+        return "done", parsed, http_code, {
+            transport_error = false,
+            exit_code = exit_code,
+        }
+    end
+    if http_code and http_code > 0 then
+        return "failed", self:extractErrorMessage(response_text, http_code), http_code, {
+            transport_error = false,
+            exit_code = exit_code,
+        }
+    end
+    return "failed",
+        response_text ~= "" and response_text or ("Background request failed (exit " .. tostring(exit_code) .. ")"),
+        nil,
+        { transport_error = true, exit_code = exit_code }
+end
+
+function APIClient:cancelAsyncMetadataPull(handle)
+    if not handle then
+        return
+    end
+    local pid = tonumber((readTextFile(handle.pid_path) or ""):match("%d+"))
+    if pid and ffi then
+        ffi.C.system("kill " .. tostring(pid) .. " 2>/dev/null")
+        ffi.C.system("kill -9 " .. tostring(pid) .. " 2>/dev/null")
+    end
+    removeAsyncRequestArtifacts(handle)
 end
 
 --- Check if async download is available (curl or wget + ffi.C.system).
