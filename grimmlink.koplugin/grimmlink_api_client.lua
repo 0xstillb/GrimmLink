@@ -541,11 +541,24 @@ local function normalizeShelfType(value)
     return shelf_type
 end
 
-local function isIsoInstantLike(value)
+local function normalizeMetadataCursor(value)
     if type(value) ~= "string" then
-        return false
+        return nil
     end
-    return value:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d") ~= nil
+    local text = value:match("^%s*(.-)%s*$")
+    if text == "" then
+        return nil
+    end
+    if text:match("^function:") then
+        return nil
+    end
+    if text:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+Z$")
+        or text:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$")
+        or text:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+[+-]%d%d:%d%d$")
+        or text:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[+-]%d%d:%d%d$") then
+        return text
+    end
+    return nil
 end
 
 function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, file_format, device, device_id, rating, annotations, bookmarks, pull_since, pull_limit)
@@ -559,6 +572,8 @@ function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, f
         normalized_bookmarks = bookmarks
     end
 
+    local normalized_cursor = normalizeMetadataCursor(pull_since)
+
     return {
         schemaVersion = 1,
         syncMode = "incremental",
@@ -570,10 +585,11 @@ function APIClient:buildMetadataBatchPayload(book_id, book_hash, book_file_id, f
         deviceId = device_id,
         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         -- Keep legacy `since` for the current Instant-based backend contract,
-        -- and send `cursor` for the next stable cursor contract. If the cursor
-        -- is not ISO-like, avoid sending it as `since` to prevent Instant parse errors.
-        since = isIsoInstantLike(pull_since) and pull_since or nil,
-        cursor = pull_since,
+        -- and send `cursor` for the next stable cursor contract. Only valid
+        -- ISO-8601 timestamp cursors are sent; JSON-null sentinels and legacy
+        -- `function: 0x...` values are omitted entirely.
+        since = normalized_cursor,
+        cursor = normalized_cursor,
         limit = pull_limit,
         rating = rating,
         annotations = normalized_annotations,

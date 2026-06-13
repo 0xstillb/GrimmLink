@@ -379,27 +379,62 @@ function Grimmlink:metadataCursorKey(file_hash, book_id, book_file_id)
     return "metadata_cursor:" .. identity
 end
 
+local function normalizeMetadataCursor(cursor)
+    if type(cursor) ~= "string" then
+        return nil
+    end
+    local text = cursor:match("^%s*(.-)%s*$")
+    if text == "" then
+        return nil
+    end
+    if text:match("^function:") then
+        return nil
+    end
+    if text:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+Z$")
+        or text:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$")
+        or text:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+[+-]%d%d:%d%d$")
+        or text:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[+-]%d%d:%d%d$") then
+        return text
+    end
+    return nil
+end
+
+local function clearMetadataCursorSetting(db, key)
+    if type(key) ~= "string" or key == "" then
+        return false
+    end
+    if db and type(db.deletePluginSetting) == "function" then
+        return safeDbBoolCall(db, "deletePluginSetting", key)
+    end
+    return safeDbBoolCall(db, "savePluginSetting", key, "")
+end
+
 function Grimmlink:getMetadataCursor(file_hash, book_id, book_file_id)
     local key = self:metadataCursorKey(file_hash, book_id, book_file_id)
     if not key then
         return nil
     end
     local cursor = safeDbValueCall(self.db, "getPluginSetting", nil, key)
-    if cursor == nil or cursor == "" then
-        return nil
+    local normalized = normalizeMetadataCursor(cursor)
+    if normalized then
+        return normalized
     end
-    return safeToString(cursor)
+    if cursor ~= nil and cursor ~= "" then
+        clearMetadataCursorSetting(self.db, key)
+    end
+    return nil
 end
 
 function Grimmlink:saveMetadataCursor(file_hash, book_id, book_file_id, cursor)
-    if cursor == nil or cursor == "" then
+    local normalized = normalizeMetadataCursor(cursor)
+    if not normalized then
         return false
     end
     local key = self:metadataCursorKey(file_hash, book_id, book_file_id)
     if not key then
         return false
     end
-    return safeDbBoolCall(self.db, "savePluginSetting", key, safeToString(cursor))
+    return safeDbBoolCall(self.db, "savePluginSetting", key, normalized)
 end
 
 local function normalizeRemoteMetadataType(value)

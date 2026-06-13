@@ -221,9 +221,46 @@ describe("GrimmLink API client", function()
         assert.are.equal("EPUB", payload.fileFormat)
         assert.are.equal("incremental", payload.syncMode)
         assert.are.equal("2026-06-05T00:00:00Z", payload.since)
+        assert.are.equal("2026-06-05T00:00:00Z", payload.cursor)
         assert.are.equal(50, payload.limit)
         assert.are.equal(1, #payload.annotations)
         assert.are.equal(1, #payload.bookmarks)
+    end)
+
+    it("omits invalid metadata cursors from payloads", function()
+        local payload = client:buildMetadataBatchPayload(
+            88,
+            "hash-meta",
+            900,
+            "EPUB",
+            "KOReader",
+            "device-1",
+            nil,
+            {},
+            {},
+            nil,
+            50
+        )
+
+        assert.is_nil(payload.since)
+        assert.is_nil(payload.cursor)
+
+        payload = client:buildMetadataBatchPayload(
+            88,
+            "hash-meta",
+            900,
+            "EPUB",
+            "KOReader",
+            "device-1",
+            nil,
+            {},
+            {},
+            "function: 0x79a56e3318",
+            50
+        )
+
+        assert.is_nil(payload.since)
+        assert.is_nil(payload.cursor)
     end)
 
     it("submits metadata batch to the GrimmLink metadata batch endpoint", function()

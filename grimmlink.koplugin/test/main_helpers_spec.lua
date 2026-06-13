@@ -83,6 +83,11 @@ local function newDb()
         return true
     end
 
+    function db:deletePluginSetting(key)
+        self.settings[key] = nil
+        return true
+    end
+
     function db:getBookByHash(file_hash)
         return self.book_cache_by_hash[file_hash]
     end
@@ -572,6 +577,7 @@ local function newApi()
             device = device,
             deviceId = device_id,
             since = pull_since,
+            cursor = pull_since,
             limit = pull_limit,
             rating = rating,
             annotations = annotations or {},
@@ -1637,8 +1643,79 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(0, #plugin.db.pending_metadata_items)
         assert.are.equal(4, #plugin.db.synced_metadata_items)
         assert.are.equal("2026-06-05T00:00:00Z", plugin.api.calls[1].payload.since)
+        assert.are.equal("2026-06-05T00:00:00Z", plugin.api.calls[1].payload.cursor)
         assert.are.equal(100, plugin.api.calls[1].payload.limit)
         assert.are.equal("2026-06-05T00:01:00Z", plugin.db.settings["metadata_cursor:hash-meta-sync"])
+    end)
+
+    it("stores and returns valid ISO metadata cursors", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        local cursor = "2026-06-05T00:00:00Z"
+
+        assert.is_true(plugin:saveMetadataCursor("hash-valid-cursor", 70, 71, cursor))
+        assert.are.equal(cursor, plugin.db.settings["metadata_cursor:hash-valid-cursor"])
+        assert.are.equal(cursor, plugin:getMetadataCursor("hash-valid-cursor", 70, 71))
+    end)
+
+    it("refuses nil metadata cursors", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+
+        assert.is_false(plugin:saveMetadataCursor("hash-nil-cursor", 70, 71, nil))
+        assert.is_nil(plugin.db.settings["metadata_cursor:hash-nil-cursor"])
+        assert.is_nil(plugin:getMetadataCursor("hash-nil-cursor", 70, 71))
+    end)
+
+    it("refuses JSON-null function sentinels as metadata cursors", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        local null_sentinel = function() end
+
+        assert.is_false(plugin:saveMetadataCursor("hash-function-cursor", 70, 71, null_sentinel))
+        assert.is_nil(plugin.db.settings["metadata_cursor:hash-function-cursor"])
+    end)
+
+    it("ignores and deletes stored legacy function metadata cursors", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.db.settings["metadata_cursor:hash-legacy-function"] = "function: 0x79a56e3318"
+
+        assert.is_nil(plugin:getMetadataCursor("hash-legacy-function", 70, 71))
+        assert.is_nil(plugin.db.settings["metadata_cursor:hash-legacy-function"])
+    end)
+
+    it("refuses invalid arbitrary metadata cursor strings", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.db.settings["metadata_cursor:hash-invalid-cursor"] = "not-a-timestamp"
+
+        assert.is_false(plugin:saveMetadataCursor("hash-invalid-cursor", 70, 71, "not-a-timestamp"))
+        assert.is_nil(plugin:getMetadataCursor("hash-invalid-cursor", 70, 71))
+        assert.is_nil(plugin.db.settings["metadata_cursor:hash-invalid-cursor"])
+    end)
+
+    it("omits null metadata cursors from pull requests and does not store them", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.api.next_metadata_batch = {
+            success = true,
+            response = {
+                ok = true,
+                pull = {
+                    ok = true,
+                    nextCursor = nil,
+                    items = {},
+                },
+            },
+            code = 200,
+        }
+
+        local result = plugin:pullRemoteMetadataForContext({
+            file_hash = "hash-null-cursor",
+            book_id = 70,
+            book_file_id = 71,
+            file_format = "EPUB",
+        }, true)
+
+        assert.are.equal(0, result.failed)
+        assert.is_nil(plugin.api.calls[1].payload.since)
+        assert.is_nil(plugin.api.calls[1].payload.cursor)
+        assert.is_nil(plugin.db.settings["metadata_cursor:hash-null-cursor"])
     end)
 
     it("keeps failed metadata rows pending with retry increment", function()
