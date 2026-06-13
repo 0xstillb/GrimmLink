@@ -43,16 +43,30 @@ function M.install(Grimmlink, deps)
 function Grimmlink:getMetadataExtractionContext()
     local file_path = nil
     local file_hash = nil
+    local initial_hash = nil
     local book_id = nil
     local book_file_id = nil
 
-    if self.current_session then
+    if self.ui and self.ui.document and self.ui.document.file then
+        file_path = tostring(self.ui.document.file)
+        file_hash = self.ui.document.file_hash or self.ui.document.fileHash
+            or self.ui.document.book_hash or self.ui.document.bookHash
+            or self.ui.document.current_hash or self.ui.document.currentHash
+        initial_hash = self.ui.document.initial_hash or self.ui.document.initialHash
+        if self.current_session and self.current_session.file_path == file_path then
+            file_hash = file_hash or self.current_session.file_hash
+                or self.current_session.current_hash or self.current_session.currentHash
+            initial_hash = initial_hash or self.current_session.initial_hash or self.current_session.initialHash
+            book_id = self.current_session.book_id or self.current_session.bookId
+            book_file_id = self.current_session.book_file_id or self.current_session.bookFileId
+        end
+    elseif self.current_session then
         file_path = self.current_session.file_path
         file_hash = self.current_session.file_hash
-        book_id = self.current_session.book_id
-        book_file_id = self.current_session.book_file_id
-    elseif self.ui and self.ui.document and self.ui.document.file then
-        file_path = tostring(self.ui.document.file)
+            or self.current_session.current_hash or self.current_session.currentHash
+        initial_hash = self.current_session.initial_hash or self.current_session.initialHash
+        book_id = self.current_session.book_id or self.current_session.bookId
+        book_file_id = self.current_session.book_file_id or self.current_session.bookFileId
     end
 
     if not file_path or file_path == "" then
@@ -64,6 +78,7 @@ function Grimmlink:getMetadataExtractionContext()
         if ok_cached and type(cached) == "table" then
             file_hash = cached.file_hash or file_hash
             book_id = book_id or cached.book_id
+            book_file_id = book_file_id or cached.book_file_id or cached.bookFileId
         end
     end
 
@@ -73,10 +88,14 @@ function Grimmlink:getMetadataExtractionContext()
             file_hash = computed_hash
         end
     end
+    if not file_hash or file_hash == "" then
+        file_hash = initial_hash
+    end
 
     return {
         file_path = file_path,
         file_hash = file_hash,
+        initial_hash = initial_hash,
         book_id = book_id,
         book_file_id = book_file_id,
     }
@@ -365,7 +384,7 @@ function Grimmlink:markMetadataRowSynced(row, server_id)
     safeDbBoolCall(self.db, "deletePendingMetadataItem", row.id)
 end
 
-function Grimmlink:metadataCursorKey(file_hash, book_id, book_file_id)
+function Grimmlink:metadataCursorKey(file_hash, book_id, book_file_id, item_type)
     local identity = safeToString(file_hash)
     if identity == "" then
         identity = "book:" .. safeToString(book_id)
@@ -376,7 +395,29 @@ function Grimmlink:metadataCursorKey(file_hash, book_id, book_file_id)
     if identity == "book_file:" then
         return nil
     end
-    return "metadata_cursor:" .. identity
+
+    local server = safeToString(self.active_url)
+    if server == "" and self.api then
+        server = safeToString(self.api.server_url)
+    end
+    if server == "" then
+        server = safeToString(self.server_url)
+    end
+    server = server:gsub("/+$", ""):lower()
+
+    local username = safeToString(self.username)
+    local normalized_type = safeToString(item_type):lower()
+    if normalized_type == "" then
+        normalized_type = "all"
+    end
+
+    return table.concat({
+        "metadata_cursor:v2",
+        stableTextHash(server),
+        stableTextHash(username),
+        stableTextHash(identity),
+        normalized_type,
+    }, ":")
 end
 
 local function normalizeMetadataCursor(cursor)
@@ -409,8 +450,8 @@ local function clearMetadataCursorSetting(db, key)
     return safeDbBoolCall(db, "savePluginSetting", key, "")
 end
 
-function Grimmlink:getMetadataCursor(file_hash, book_id, book_file_id)
-    local key = self:metadataCursorKey(file_hash, book_id, book_file_id)
+function Grimmlink:getMetadataCursor(file_hash, book_id, book_file_id, item_type)
+    local key = self:metadataCursorKey(file_hash, book_id, book_file_id, item_type)
     if not key then
         return nil
     end
@@ -425,12 +466,12 @@ function Grimmlink:getMetadataCursor(file_hash, book_id, book_file_id)
     return nil
 end
 
-function Grimmlink:saveMetadataCursor(file_hash, book_id, book_file_id, cursor)
+function Grimmlink:saveMetadataCursor(file_hash, book_id, book_file_id, cursor, item_type)
     local normalized = normalizeMetadataCursor(cursor)
     if not normalized then
         return false
     end
-    local key = self:metadataCursorKey(file_hash, book_id, book_file_id)
+    local key = self:metadataCursorKey(file_hash, book_id, book_file_id, item_type)
     if not key then
         return false
     end
@@ -761,12 +802,22 @@ function Grimmlink:markRemoteMetadataItemApplied(context, item, status)
     })
 end
 
+local function addMetadataSkipReason(result, reason)
+    local normalized = safeToString(reason)
+    if normalized == "" then
+        normalized = "unspecified"
+    end
+    result.skipped_reasons = result.skipped_reasons or {}
+    result.skipped_reasons[normalized] = (result.skipped_reasons[normalized] or 0) + 1
+end
+
 function Grimmlink:applyPulledMetadataItems(context, items)
     local result = {
         applied = 0,
         skipped = 0,
         failed = 0,
         changed = false,
+        skipped_reasons = {},
     }
     if type(items) ~= "table" or #items == 0 then
         return result
@@ -778,44 +829,74 @@ function Grimmlink:applyPulledMetadataItems(context, items)
     end
 
     context.file_path = context.file_path or self:getMetadataFilePathForIdentity(context.file_hash, context.book_id)
-    if not context.file_path or context.file_path == "" then
-        result.failed = #items
-        result.reason = "missing_file_path"
-        self:logWarn("GrimmLink metadata pull cannot apply: missing local file path")
-        return result
-    end
-
-    local doc_settings, should_close = self:loadWritableDocSettings(context.file_path)
-    if type(doc_settings) ~= "table" then
-        result.failed = #items
-        result.reason = "doc_settings_unavailable"
-        self:logWarn("GrimmLink metadata pull cannot apply: doc settings unavailable")
-        return result
-    end
+    local doc_settings = nil
+    local should_close = false
+    local doc_settings_loaded = false
 
     for _, item in ipairs(items) do
         local item_type = normalizeRemoteMetadataType(item and item.type)
         local dedupe_key = remoteItemDedupeKey(item)
-        if not item_type or not dedupe_key then
+        local payload = remoteItemPayload(item)
+        if not item_type then
             result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "unsupported_type:" .. safeToString(item and item.type))
+        elseif not dedupe_key or dedupe_key == "" then
+            result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "missing_dedupe_key")
+        elseif type(payload) ~= "table" then
+            self:markRemoteMetadataItemApplied(context, item, "skipped_malformed_payload")
+            result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "malformed_payload")
+        elseif item_type == "rating" and not self.rating_sync_enabled then
+            self:markRemoteMetadataItemApplied(context, item, "rating_disabled")
+            result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "rating_disabled")
+        elseif item_type == "annotation" and not self.annotations_sync_enabled then
+            self:markRemoteMetadataItemApplied(context, item, "annotation_disabled")
+            result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "annotation_disabled")
+        elseif item_type == "bookmark" and not self.bookmarks_sync_enabled then
+            self:markRemoteMetadataItemApplied(context, item, "bookmark_disabled")
+            result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "bookmark_disabled")
         elseif remoteItemDeviceId(item) and self.device_id and remoteItemDeviceId(item) == safeToString(self.device_id) then
             self:markRemoteMetadataItemApplied(context, item, "skipped_same_device")
             result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "same_device")
         elseif safeDbBoolCall(self.db, "isRemoteMetadataItemApplied", context.file_hash, item_type, dedupe_key) then
             result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "already_applied")
         else
-            local ok_apply, applied, status = pcall(self.applyPulledMetadataItem, self, doc_settings, item)
-            if ok_apply and applied == true then
-                self:markRemoteMetadataItemApplied(context, item, status or "applied")
-                result.applied = result.applied + 1
-                if status ~= "already_in_docsettings" and not tostring(status or ""):find("disabled", 1, true)
-                    and status ~= "skipped_same_device" then
-                    result.changed = true
+            if not doc_settings_loaded then
+                doc_settings_loaded = true
+                if context.file_path and context.file_path ~= "" then
+                    doc_settings, should_close = self:loadWritableDocSettings(context.file_path)
                 end
-            else
+            end
+            if type(doc_settings) ~= "table" then
                 result.failed = result.failed + 1
-                self:logWarn("GrimmLink metadata pull apply failed type=", item_type,
-                    " dedupe=", shortPrefix(dedupe_key, 16), " reason=", safeToString(status or applied or ok_apply))
+                result.reason = context.file_path and context.file_path ~= ""
+                    and "doc_settings_unavailable" or "missing_file_path"
+                self:logWarn("GrimmLink metadata pull cannot apply:", result.reason)
+            else
+                local ok_apply, applied, status = pcall(self.applyPulledMetadataItem, self, doc_settings, item)
+                if ok_apply and applied == true then
+                    self:markRemoteMetadataItemApplied(context, item, status or "applied")
+                    local normalized_status = safeToString(status)
+                    if normalized_status == "already_in_docsettings"
+                        or normalized_status:find("disabled", 1, true)
+                        or normalized_status:find("skipped_", 1, true) then
+                        result.skipped = result.skipped + 1
+                        addMetadataSkipReason(result, normalized_status)
+                    else
+                        result.applied = result.applied + 1
+                        result.changed = true
+                    end
+                else
+                    result.failed = result.failed + 1
+                    self:logWarn("GrimmLink metadata pull apply failed type=", item_type,
+                        " dedupe=", shortPrefix(dedupe_key, 16), " reason=", safeToString(status or applied or ok_apply))
+                end
             end
         end
     end
@@ -823,7 +904,7 @@ function Grimmlink:applyPulledMetadataItems(context, items)
     if result.changed and type(tryFlushDocSettings) == "function" then
         tryFlushDocSettings(doc_settings)
     end
-    if should_close and type(tryCloseDocSettings) == "function" then
+    if doc_settings and should_close and type(tryCloseDocSettings) == "function" then
         tryCloseDocSettings(doc_settings)
     end
     return result
@@ -852,6 +933,66 @@ function Grimmlink:mergePulledMetadataItems(file_hash, book_id, items)
     return merged
 end
 
+local function metadataPullErrorMessage(code, response)
+    local status = tonumber(code)
+    local text = safeToString(response)
+    local lowered = text:lower()
+    if status == 401 then
+        return _("Authentication failed. Check your GrimmLink username and password.")
+    end
+    if status == 403 then
+        return _("Book not found or forbidden for this user.")
+    end
+    if status == 404 then
+        if lowered:find("book", 1, true) or lowered:find("forbidden", 1, true) then
+            return _("Book not found or forbidden for this user.")
+        end
+        return _("Server URL or metadata endpoint not found.")
+    end
+    if status == 400 or status == 422 then
+        return _("The server rejected this book metadata request.")
+    end
+    if status and status >= 500 then
+        return _("Grimmory server is unavailable.")
+    end
+    if lowered:find("malformed", 1, true) then
+        return _("Malformed response from Grimmory.")
+    end
+    if status == nil then
+        return _("Server unreachable. Check the URL and network connection.")
+    end
+    return T(_("Remote metadata pull failed: %1"), text ~= "" and text or ("HTTP " .. tostring(status)))
+end
+
+local function formatMetadataSkipReasons(reasons)
+    if type(reasons) ~= "table" then
+        return ""
+    end
+    local labels = {
+        already_applied = _("already applied"),
+        already_in_docsettings = _("already present locally"),
+        annotation_disabled = _("annotation sync disabled"),
+        bookmark_disabled = _("bookmark sync disabled"),
+        malformed_payload = _("malformed item"),
+        missing_dedupe_key = _("missing dedupe key"),
+        rating_disabled = _("rating sync disabled"),
+        same_device = _("from this device"),
+        unspecified = _("unspecified"),
+    }
+    local parts = {}
+    for reason, count in pairs(reasons) do
+        local label = labels[reason]
+        if not label and reason:find("unsupported_type:", 1, true) == 1 then
+            local item_type = reason:sub(#"unsupported_type:" + 1)
+            label = T(_("unsupported type %1"), item_type ~= "" and item_type or _("unknown"))
+        end
+        label = label or reason
+        parts[#parts + 1] = T(_("%1 (%2)"), label, count)
+    end
+    table.sort(parts)
+    return table.concat(parts, ", ")
+end
+
 function Grimmlink:pullRemoteMetadataForContext(context, silent, limit, item_type)
     local result = {
         pulled = 0,
@@ -874,84 +1015,99 @@ function Grimmlink:pullRemoteMetadataForContext(context, silent, limit, item_typ
         return result
     end
     if not self:isOnline() then
+        result.failed = 1
+        result.reason = "server_unreachable"
+        if not silent then
+            self:showMessage(_("Server unreachable. Check the URL and network connection."), 4)
+        end
         return result
     end
-    if not self:isApiReady({ "submitMetadataBatch" }) then
+    if not self:isApiReady({ "pullMetadata" }) then
+        result.failed = 1
+        result.reason = "api_unavailable"
+        if not silent then
+            self:showMessage(_("Metadata pull is unavailable in this GrimmLink build."), 4)
+        end
         return result
     end
     if not self:refreshApiClient() then
+        result.failed = 1
+        result.reason = "api_unavailable"
         return result
     end
 
-    local pull_since = self:getMetadataCursor(context.file_hash, context.book_id, context.book_file_id)
-    local payload = nil
-    if type(self.api.buildMetadataPullPayload) == "function" then
-        payload = self.api:buildMetadataPullPayload(
-            context.book_id,
-            context.file_hash,
-            context.book_file_id,
-            context.file_format or context.book_type or "EPUB",
-            self.device_name,
-            self.device_id,
-            pull_since,
-            limit or 100,
-            item_type
-        )
-    else
-        payload = self.api:buildMetadataBatchPayload(
-            context.book_id,
-            context.file_hash,
-            context.book_file_id,
-            context.file_format or context.book_type or "EPUB",
-            self.device_name,
-            self.device_id,
-            nil,
-            {},
-            {},
-            pull_since,
-            limit or 100
-        )
-        payload.type = item_type
-    end
-
-    local ok_submit, response, code = self.api:submitMetadataBatch(payload)
-    if not ok_submit or type(response) ~= "table" then
+    local pull_since = self:getMetadataCursor(context.file_hash, context.book_id, context.book_file_id, item_type)
+    local ok_pull, response, code = self.api:pullMetadata(
+        context.book_id,
+        context.file_hash,
+        context.book_file_id,
+        pull_since,
+        limit or 100,
+        item_type
+    )
+    if not ok_pull or type(response) ~= "table" then
         result.failed = 1
+        result.reason = "request_failed"
         self:logWarn("GrimmLink metadata pull request failed:", safeToString(response or code or "network_error"))
         if not silent then
-            self:showMessage(T(_("Remote metadata pull failed: %1"), safeToString(response or code or "network_error")), 4)
+            self:showMessage(metadataPullErrorMessage(code, response), 4)
         end
         return result
     end
 
-    local pull = type(response.pull) == "table" and response.pull or response
+    local pull = response
     if pull.ok == false then
         result.failed = 1
+        result.reason = "request_failed"
         if not silent then
-            self:showMessage(_("Remote metadata pull failed"), 4)
+            self:showMessage(metadataPullErrorMessage(code, pull.message or pull.error), 4)
+        end
+        return result
+    end
+    if type(pull.items) ~= "table" then
+        result.failed = 1
+        result.reason = "malformed_response"
+        if not silent then
+            self:showMessage(_("Malformed response from Grimmory."), 4)
         end
         return result
     end
 
-    local items = type(pull.items) == "table" and pull.items or {}
+    local items = pull.items
     result.pulled = #items
     local apply_result = self:applyPulledMetadataItems(context, items)
     result.applied = apply_result.applied or 0
     result.skipped = apply_result.skipped or 0
     result.failed = apply_result.failed or 0
+    result.skipped_reasons = apply_result.skipped_reasons or {}
+    result.reason = apply_result.reason
 
     if result.failed == 0 and pull.nextCursor ~= nil and pull.nextCursor ~= "" then
-        result.cursor_saved = self:saveMetadataCursor(context.file_hash, context.book_id, context.book_file_id, pull.nextCursor)
+        result.cursor_saved = self:saveMetadataCursor(
+            context.file_hash,
+            context.book_id,
+            context.book_file_id,
+            pull.nextCursor,
+            item_type
+        )
     end
 
     if not silent then
-        self:showMessage(T(
-            _("Remote metadata pull\nPulled: %1\nApplied: %2\nSkipped: %3\nFailed: %4"),
-            result.pulled,
-            result.applied,
-            result.skipped,
-            result.failed
-        ), 4)
+        if result.pulled == 0 then
+            self:showMessage(_("No remote metadata for this book."), 3)
+        else
+            local message = T(
+                _("Remote metadata pull succeeded\nApplied: %1\nSkipped: %2\nFailed: %3"),
+                result.applied,
+                result.skipped,
+                result.failed
+            )
+            local skip_reasons = formatMetadataSkipReasons(result.skipped_reasons)
+            if skip_reasons ~= "" then
+                message = message .. "\n" .. T(_("Skipped reasons: %1"), skip_reasons)
+            end
+            self:showMessage(message, 5)
+        end
     end
     return result
 end
@@ -966,6 +1122,144 @@ local function fileExists(path)
         return ok_attr and type(attr) == "table" and attr.mode == "file"
     end
     return true
+end
+
+local function mergeMetadataContextFields(context, source)
+    if type(source) ~= "table" then
+        return
+    end
+    context.file_path = context.file_path or firstNonEmpty(
+        source.file_path,
+        source.filePath,
+        source.path,
+        source.file
+    )
+    context.file_hash = context.file_hash or firstNonEmpty(
+        source.file_hash,
+        source.fileHash,
+        source.book_hash,
+        source.bookHash,
+        source.current_hash,
+        source.currentHash
+    )
+    context.initial_hash = context.initial_hash or firstNonEmpty(
+        source.initial_hash,
+        source.initialHash
+    )
+    context.book_id = context.book_id or source.book_id or source.bookId
+    context.book_file_id = context.book_file_id or source.book_file_id or source.bookFileId
+    context.file_format = context.file_format or source.file_format or source.fileFormat
+        or source.book_type or source.bookType
+end
+
+function Grimmlink:getMetadataFileBrowserPath()
+    local ui = self.ui
+    if type(ui) ~= "table" then
+        return nil
+    end
+    local sources = {
+        ui,
+        ui.file_chooser,
+        ui.file_dialog,
+        ui.menu,
+    }
+    for _, source in ipairs(sources) do
+        if type(source) == "table" then
+            local path = firstNonEmpty(
+                source.selected_file,
+                source.selected_path,
+                source.file,
+                source.filepath
+            )
+            if path then
+                return path
+            end
+        end
+    end
+    return nil
+end
+
+function Grimmlink:resolveMetadataPullContext()
+    local context = {}
+    local open_document = self.ui and self.ui.document or nil
+    local open_path = open_document and firstNonEmpty(open_document.file, open_document.file_path, open_document.filePath) or nil
+
+    if open_path then
+        context.file_path = open_path
+        mergeMetadataContextFields(context, open_document)
+        if self.current_session and self.current_session.file_path == open_path then
+            mergeMetadataContextFields(context, self.current_session)
+        end
+    elseif self.current_session then
+        mergeMetadataContextFields(context, self.current_session)
+    else
+        local browser_path = self:getMetadataFileBrowserPath()
+        if browser_path then
+            context.file_path = browser_path
+        end
+    end
+
+    if not context.file_path or context.file_path == "" then
+        return nil
+    end
+
+    if self.ui and self.ui.doc_settings and type(tryReadSetting) == "function" then
+        context.file_hash = context.file_hash
+            or firstNonEmpty(
+                tryReadSetting(self.ui.doc_settings, "bookHash"),
+                tryReadSetting(self.ui.doc_settings, "currentHash"),
+                tryReadSetting(self.ui.doc_settings, "fileHash")
+            )
+        context.initial_hash = context.initial_hash
+            or firstNonEmpty(tryReadSetting(self.ui.doc_settings, "initialHash"))
+    end
+
+    local cached = nil
+    if type(self.resolveBookByFilePath) == "function" then
+        local ok_cached, value = pcall(self.resolveBookByFilePath, self, context.file_path)
+        if ok_cached and type(value) == "table" then
+            cached = value
+        end
+    end
+
+    if not context.file_hash or context.file_hash == "" then
+        if type(self.calculateBookHash) == "function" then
+            local ok_hash, computed_hash = pcall(self.calculateBookHash, self, context.file_path)
+            if ok_hash and computed_hash and computed_hash ~= "" then
+                context.file_hash = computed_hash
+            end
+        end
+    end
+    if (not context.file_hash or context.file_hash == "") and cached then
+        context.file_hash = firstNonEmpty(
+            cached.file_hash,
+            cached.fileHash,
+            cached.book_hash,
+            cached.bookHash,
+            cached.current_hash,
+            cached.currentHash
+        )
+    end
+    if (not context.initial_hash or context.initial_hash == "") and cached then
+        context.initial_hash = firstNonEmpty(cached.initial_hash, cached.initialHash)
+    end
+    if not context.file_hash or context.file_hash == "" then
+        context.file_hash = context.initial_hash
+    end
+
+    if cached then
+        context.book_id = context.book_id or cached.book_id or cached.bookId
+        context.book_file_id = context.book_file_id or cached.book_file_id or cached.bookFileId
+        context.file_format = context.file_format or cached.file_format or cached.fileFormat
+    end
+
+    if not context.file_hash and not context.book_id and not context.book_file_id then
+        return nil
+    end
+    context.file_format = context.file_format
+        or (type(self.getBookType) == "function" and self:getBookType(context.file_path))
+        or "EPUB"
+    return context
 end
 
 function Grimmlink:buildMetadataPullContextFromCandidate(candidate)
@@ -1086,11 +1380,33 @@ function Grimmlink:pullRemoteMetadataForKnownBooks(silent, limit, item_type)
 end
 
 function Grimmlink:pullRemoteMetadataNow(silent, limit, item_type)
-    local context = self:getMetadataExtractionContext()
-    if context and (context.file_hash or context.book_id or context.book_file_id) then
-        return self:pullRemoteMetadataForCurrentBook(silent, limit, item_type)
+    if not self.metadata_sync_enabled then
+        if not silent then
+            self:showMessage(_("Metadata sync is disabled"), 3)
+        end
+        return nil
     end
-    return self:pullRemoteMetadataForKnownBooks(silent, limit, item_type)
+    local context = self:resolveMetadataPullContext()
+    if not context then
+        if not silent then
+            self:showMessage(_("Please open a book first"), 3)
+        end
+        return {
+            pulled = 0,
+            applied = 0,
+            skipped = 0,
+            failed = 0,
+            cursor_saved = false,
+            reason = "no_book_context",
+        }
+    end
+    if not self:isTrackingEnabledForContext(context) then
+        if not silent then
+            self:showTrackingDisabledMessage()
+        end
+        return nil
+    end
+    return self:pullRemoteMetadataForContext(context, silent, limit, item_type)
 end
 
 function Grimmlink:pullRemoteMetadataForCurrentBook(silent, limit, item_type)
@@ -1100,10 +1416,10 @@ function Grimmlink:pullRemoteMetadataForCurrentBook(silent, limit, item_type)
         end
         return nil
     end
-    local context = self:getMetadataExtractionContext()
+    local context = self:resolveMetadataPullContext()
     if not context or (not context.file_hash and not context.book_id and not context.book_file_id) then
         if not silent then
-            self:showMessage(_("No active document to pull remote metadata"), 3)
+            self:showMessage(_("Please open a book first"), 3)
         end
         return nil
     end
@@ -1429,21 +1745,30 @@ function Grimmlink:resetMetadataPullCursorForCurrentBook()
         self:showMessage(_("Database not available"), 3)
         return false
     end
-    local context = self:getMetadataExtractionContext()
+    local context = self:resolveMetadataPullContext()
     if not context or (not context.file_hash and not context.book_id and not context.book_file_id) then
-        self:showMessage(_("No active document to reset metadata cursor"), 3)
+        self:showMessage(_("Please open a book first"), 3)
         return false
     end
-    local key = self:metadataCursorKey(context.file_hash, context.book_id, context.book_file_id)
-    if not key then
+    local keys = {
+        self:metadataCursorKey(context.file_hash, context.book_id, context.book_file_id),
+        self:metadataCursorKey(context.file_hash, context.book_id, context.book_file_id, "rating"),
+        self:metadataCursorKey(context.file_hash, context.book_id, context.book_file_id, "annotation"),
+        self:metadataCursorKey(context.file_hash, context.book_id, context.book_file_id, "bookmark"),
+    }
+    if not keys[1] then
         self:showMessage(_("Metadata cursor key unavailable"), 3)
         return false
     end
-    local cleared = false
-    if type(self.db.deletePluginSetting) == "function" then
-        cleared = safeDbBoolCall(self.db, "deletePluginSetting", key)
-    else
-        cleared = safeDbBoolCall(self.db, "savePluginSetting", key, "")
+    local cleared = true
+    for _, key in ipairs(keys) do
+        local key_cleared = false
+        if type(self.db.deletePluginSetting) == "function" then
+            key_cleared = safeDbBoolCall(self.db, "deletePluginSetting", key)
+        else
+            key_cleared = safeDbBoolCall(self.db, "savePluginSetting", key, "")
+        end
+        cleared = key_cleared and cleared
     end
     if cleared and context.file_hash and type(self.db.clearRemoteMetadataAppliedForFileHash) == "function" then
         safeDbBoolCall(self.db, "clearRemoteMetadataAppliedForFileHash", context.file_hash)

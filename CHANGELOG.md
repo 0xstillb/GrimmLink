@@ -5,10 +5,14 @@
 ### Improvements
 - Cut normal GrimmLink sync traffic over to the backend v1 API island at `/api/grimmlink/v1`, including auth, progress, sessions, metadata, shelves, downloads, read status, and PDF progress.
 - Moved metadata queue flushes to the GrimmLink v1 push-pull batch endpoint while preserving existing per-item queue result handling.
+- Made manual remote metadata pulls resolve the open/current book instead of sweeping cached books, using the existing `GET /api/grimmlink/v1/syncs/metadata` endpoint.
+- Scoped metadata cursors per server, user, book, and metadata type, and only advance them after a successful pull/apply pass.
+- Added clear metadata pull outcomes for missing book context, authentication, connectivity, missing/forbidden books, malformed responses, empty results, and applied/skipped counts.
 
 ### Tests
 - Updated API client coverage to assert the centralized GrimmLink v1 API prefix and migrated endpoint paths.
 - Added API client coverage for metadata push-pull batch response normalization.
+- Added current-book resolver, cursor isolation, metadata application, duplicate prevention, partial failure, and pull error coverage.
 
 # [v1.5.1]
 

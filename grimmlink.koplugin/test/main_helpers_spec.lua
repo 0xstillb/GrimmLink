@@ -70,6 +70,7 @@ local function newDb()
         pending_sessions = {},
         pending_metadata_items = {},
         synced_metadata_items = {},
+        applied_remote_metadata_items = {},
         historical_import_sessions = {},
         book_cache_calls = {},
     }
@@ -85,6 +86,30 @@ local function newDb()
 
     function db:deletePluginSetting(key)
         self.settings[key] = nil
+        return true
+    end
+
+    function db:isRemoteMetadataItemApplied(file_hash, item_type, dedupe_key)
+        local key = table.concat({ file_hash or "", item_type or "", dedupe_key or "" }, "|")
+        return self.applied_remote_metadata_items[key] ~= nil
+    end
+
+    function db:markRemoteMetadataItemApplied(item)
+        local key = table.concat({
+            item.file_hash or "",
+            item.item_type or "",
+            item.dedupe_key or "",
+        }, "|")
+        self.applied_remote_metadata_items[key] = item
+        return true
+    end
+
+    function db:clearRemoteMetadataAppliedForFileHash(file_hash)
+        for key, item in pairs(self.applied_remote_metadata_items) do
+            if item.file_hash == file_hash then
+                self.applied_remote_metadata_items[key] = nil
+            end
+        end
         return true
     end
 
@@ -508,6 +533,7 @@ local function newApi()
         next_session = { success = true, response = {}, code = 202 },
         next_session_batch = { success = true, response = { status = "ok" }, code = 200 },
         next_metadata_batch = { success = true, response = { ok = true, results = { annotations = {}, bookmarks = {} } }, code = 200 },
+        next_metadata_pull = { success = true, response = { ok = true, items = {} }, code = 200 },
     }
 
     function api:init(...)
@@ -588,6 +614,19 @@ local function newApi()
     function api:submitMetadataBatch(payload)
         self.calls[#self.calls + 1] = { name = "submitMetadataBatch", payload = payload }
         return self.next_metadata_batch.success, self.next_metadata_batch.response, self.next_metadata_batch.code
+    end
+
+    function api:pullMetadata(book_id, book_hash, book_file_id, cursor, limit, item_type)
+        self.calls[#self.calls + 1] = {
+            name = "pullMetadata",
+            book_id = book_id,
+            book_hash = book_hash,
+            book_file_id = book_file_id,
+            cursor = cursor,
+            limit = limit,
+            item_type = item_type,
+        }
+        return self.next_metadata_pull.success, self.next_metadata_pull.response, self.next_metadata_pull.code
     end
 
     return api
@@ -1613,7 +1652,8 @@ describe("GrimmLink helper methods", function()
                 retry_count = 0,
             },
         }
-        plugin.db.settings["metadata_cursor:hash-meta-sync"] = "2026-06-05T00:00:00Z"
+        local cursor_key = plugin:metadataCursorKey("hash-meta-sync", 70, 71)
+        plugin.db.settings[cursor_key] = "2026-06-05T00:00:00Z"
         plugin.api.next_metadata_batch = {
             success = true,
             response = {
@@ -1645,62 +1685,82 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("2026-06-05T00:00:00Z", plugin.api.calls[1].payload.since)
         assert.are.equal("2026-06-05T00:00:00Z", plugin.api.calls[1].payload.cursor)
         assert.are.equal(100, plugin.api.calls[1].payload.limit)
-        assert.are.equal("2026-06-05T00:01:00Z", plugin.db.settings["metadata_cursor:hash-meta-sync"])
+        assert.are.equal("2026-06-05T00:01:00Z", plugin.db.settings[cursor_key])
     end)
 
     it("stores and returns valid ISO metadata cursors", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
         local cursor = "2026-06-05T00:00:00Z"
+        local cursor_key = plugin:metadataCursorKey("hash-valid-cursor", 70, 71)
 
         assert.is_true(plugin:saveMetadataCursor("hash-valid-cursor", 70, 71, cursor))
-        assert.are.equal(cursor, plugin.db.settings["metadata_cursor:hash-valid-cursor"])
+        assert.are.equal(cursor, plugin.db.settings[cursor_key])
         assert.are.equal(cursor, plugin:getMetadataCursor("hash-valid-cursor", 70, 71))
+    end)
+
+    it("scopes metadata cursors by server, user, book, and type", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        local all_key = plugin:metadataCursorKey("hash-scope", 70, 71)
+        local rating_key = plugin:metadataCursorKey("hash-scope", 70, 71, "rating")
+        local other_book_key = plugin:metadataCursorKey("hash-other", 70, 71)
+
+        plugin.username = "other-reader"
+        local other_user_key = plugin:metadataCursorKey("hash-scope", 70, 71)
+        plugin.username = "reader"
+        plugin.server_url = "http://other.example.com"
+        local other_server_key = plugin:metadataCursorKey("hash-scope", 70, 71)
+
+        assert.are_not.equal(all_key, rating_key)
+        assert.are_not.equal(all_key, other_book_key)
+        assert.are_not.equal(all_key, other_user_key)
+        assert.are_not.equal(all_key, other_server_key)
     end)
 
     it("refuses nil metadata cursors", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
+        local cursor_key = plugin:metadataCursorKey("hash-nil-cursor", 70, 71)
 
         assert.is_false(plugin:saveMetadataCursor("hash-nil-cursor", 70, 71, nil))
-        assert.is_nil(plugin.db.settings["metadata_cursor:hash-nil-cursor"])
+        assert.is_nil(plugin.db.settings[cursor_key])
         assert.is_nil(plugin:getMetadataCursor("hash-nil-cursor", 70, 71))
     end)
 
     it("refuses JSON-null function sentinels as metadata cursors", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
         local null_sentinel = function() end
+        local cursor_key = plugin:metadataCursorKey("hash-function-cursor", 70, 71)
 
         assert.is_false(plugin:saveMetadataCursor("hash-function-cursor", 70, 71, null_sentinel))
-        assert.is_nil(plugin.db.settings["metadata_cursor:hash-function-cursor"])
+        assert.is_nil(plugin.db.settings[cursor_key])
     end)
 
     it("ignores and deletes stored legacy function metadata cursors", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
-        plugin.db.settings["metadata_cursor:hash-legacy-function"] = "function: 0x79a56e3318"
+        local cursor_key = plugin:metadataCursorKey("hash-legacy-function", 70, 71)
+        plugin.db.settings[cursor_key] = "function: 0x79a56e3318"
 
         assert.is_nil(plugin:getMetadataCursor("hash-legacy-function", 70, 71))
-        assert.is_nil(plugin.db.settings["metadata_cursor:hash-legacy-function"])
+        assert.is_nil(plugin.db.settings[cursor_key])
     end)
 
     it("refuses invalid arbitrary metadata cursor strings", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
-        plugin.db.settings["metadata_cursor:hash-invalid-cursor"] = "not-a-timestamp"
+        local cursor_key = plugin:metadataCursorKey("hash-invalid-cursor", 70, 71)
+        plugin.db.settings[cursor_key] = "not-a-timestamp"
 
         assert.is_false(plugin:saveMetadataCursor("hash-invalid-cursor", 70, 71, "not-a-timestamp"))
         assert.is_nil(plugin:getMetadataCursor("hash-invalid-cursor", 70, 71))
-        assert.is_nil(plugin.db.settings["metadata_cursor:hash-invalid-cursor"])
+        assert.is_nil(plugin.db.settings[cursor_key])
     end)
 
     it("omits null metadata cursors from pull requests and does not store them", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
-        plugin.api.next_metadata_batch = {
+        plugin.api.next_metadata_pull = {
             success = true,
             response = {
                 ok = true,
-                pull = {
-                    ok = true,
-                    nextCursor = nil,
-                    items = {},
-                },
+                nextCursor = nil,
+                items = {},
             },
             code = 200,
         }
@@ -1713,9 +1773,287 @@ describe("GrimmLink helper methods", function()
         }, true)
 
         assert.are.equal(0, result.failed)
-        assert.is_nil(plugin.api.calls[1].payload.since)
-        assert.is_nil(plugin.api.calls[1].payload.cursor)
-        assert.is_nil(plugin.db.settings["metadata_cursor:hash-null-cursor"])
+        assert.is_nil(plugin.api.calls[1].cursor)
+        assert.is_nil(plugin.db.settings[plugin:metadataCursorKey("hash-null-cursor", 70, 71)])
+    end)
+
+    it("resolves the open document before a stale session and uses currentHash before initialHash", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.document.file = "/books/open.epub"
+        plugin.ui.document.currentHash = "current-open-hash"
+        plugin.ui.document.initialHash = "initial-open-hash"
+        plugin.current_session = {
+            file_path = "/books/stale.epub",
+            file_hash = "stale-hash",
+            book_id = 1,
+            book_file_id = 2,
+        }
+        plugin.db.book_cache_by_path["/books/open.epub"] = {
+            file_path = "/books/open.epub",
+            file_hash = "cached-open-hash",
+            book_id = 70,
+            book_file_id = 71,
+        }
+
+        local context = plugin:resolveMetadataPullContext()
+        assert.are.equal("/books/open.epub", context.file_path)
+        assert.are.equal("current-open-hash", context.file_hash)
+        assert.are.equal("initial-open-hash", context.initial_hash)
+        assert.are.equal(70, context.book_id)
+        assert.are.equal(71, context.book_file_id)
+    end)
+
+    it("falls back to initialHash, cached IDs, and file-browser context", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui = {
+            selected_file = "/books/browser.epub",
+            doc_settings = newDocSettings(),
+        }
+        plugin.current_session = nil
+        plugin.calculateBookHash = function()
+            return nil
+        end
+        plugin.db.book_cache_by_path["/books/browser.epub"] = {
+            file_path = "/books/browser.epub",
+            initialHash = "initial-browser-hash",
+            book_id = 80,
+            book_file_id = 81,
+        }
+        plugin.resolveBookByFilePath = function()
+            return {
+                initialHash = "initial-browser-hash",
+                book_id = 80,
+                book_file_id = 81,
+            }
+        end
+
+        local context = plugin:resolveMetadataPullContext()
+        assert.are.equal("/books/browser.epub", context.file_path)
+        assert.are.equal("initial-browser-hash", context.file_hash)
+        assert.are.equal(80, context.book_id)
+        assert.are.equal(81, context.book_file_id)
+    end)
+
+    it("does not call the backend when no book context exists", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui = {}
+        plugin.current_session = nil
+
+        local result = plugin:pullRemoteMetadataNow(false, 100)
+        assert.are.equal("no_book_context", result.reason)
+        assert.are.equal(0, #plugin.api.calls)
+        local dialog = UIManager.getLastShown()
+        assert.is_true(dialog.text:find("Please open a book first", 1, true) ~= nil)
+    end)
+
+    it("pulls and deduplicates rating, annotation, and bookmark metadata", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        local doc_settings = newDocSettings({
+            summary = {},
+            annotations = {},
+        })
+        plugin.ui.document.file = "/books/demo.epub"
+        plugin.ui.doc_settings = doc_settings
+        local items = {
+            {
+                id = "rating-1",
+                type = "rating",
+                dedupeKey = "rating-dedupe",
+                deviceId = "other-device",
+                payload = { value = 8, scale = 10 },
+            },
+            {
+                id = "annotation-1",
+                type = "annotation",
+                dedupeKey = "annotation-dedupe",
+                deviceId = "other-device",
+                payload = { text = "Remote highlight", pos0 = "xp-1", pos1 = "xp-2" },
+            },
+            {
+                id = "bookmark-1",
+                type = "bookmark",
+                dedupeKey = "bookmark-dedupe",
+                deviceId = "other-device",
+                payload = { title = "Remote bookmark", page = 12 },
+            },
+            {
+                id = "read-status-1",
+                type = "read_status",
+                dedupeKey = "status-dedupe",
+                payload = { status = "READ" },
+            },
+        }
+        plugin.api.next_metadata_pull = {
+            success = true,
+            response = {
+                ok = true,
+                nextCursor = "2026-06-05T00:01:00Z",
+                items = items,
+            },
+            code = 200,
+        }
+        local context = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-pull-e2e",
+            book_id = 70,
+            book_file_id = 71,
+        }
+
+        local first = plugin:pullRemoteMetadataForContext(context, false, 100)
+        assert.are.equal(3, first.applied)
+        assert.are.equal(1, first.skipped)
+        assert.are.equal(0, first.failed)
+        assert.is_true(first.cursor_saved)
+        assert.are.equal(4, doc_settings._store.summary.rating)
+        assert.are.equal(2, #doc_settings._store.annotations)
+        assert.are.equal(
+            "2026-06-05T00:01:00Z",
+            plugin.db.settings[plugin:metadataCursorKey("hash-pull-e2e", 70, 71)]
+        )
+
+        plugin.api.next_metadata_pull.response.nextCursor = "2026-06-05T00:02:00Z"
+        local second = plugin:pullRemoteMetadataForContext(context, true, 100)
+        assert.are.equal(0, second.applied)
+        assert.are.equal(4, second.skipped)
+        assert.are.equal(0, second.failed)
+        assert.are.equal(2, #doc_settings._store.annotations)
+    end)
+
+    it("applies good metadata items without advancing the cursor past a failed item", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.doc_settings = newDocSettings({ annotations = {} })
+        plugin.api.next_metadata_pull = {
+            success = true,
+            response = {
+                ok = true,
+                nextCursor = "2026-06-05T00:03:00Z",
+                items = {
+                    {
+                        id = "bad-rating",
+                        type = "rating",
+                        dedupeKey = "bad-rating",
+                        payload = { value = 99, scale = 10 },
+                    },
+                    {
+                        id = "good-bookmark",
+                        type = "bookmark",
+                        dedupeKey = "good-bookmark",
+                        payload = { title = "Good bookmark", page = 2 },
+                    },
+                },
+            },
+            code = 200,
+        }
+        local context = {
+            file_path = "/books/demo.epub",
+            file_hash = "hash-partial-failure",
+            book_id = 70,
+            book_file_id = 71,
+        }
+
+        local result = plugin:pullRemoteMetadataForContext(context, true, 100)
+        assert.are.equal(1, result.applied)
+        assert.are.equal(1, result.failed)
+        assert.is_false(result.cursor_saved)
+        assert.is_nil(plugin.db.settings[plugin:metadataCursorKey("hash-partial-failure", 70, 71)])
+        assert.are.equal(1, #plugin.ui.doc_settings._store.annotations)
+    end)
+
+    it("counts disabled metadata types as safely skipped", function()
+        local plugin = newPlugin({
+            metadata_sync_enabled = true,
+            annotations_sync_enabled = false,
+        })
+        plugin.ui.doc_settings = newDocSettings({ annotations = {} })
+        plugin.api.next_metadata_pull = {
+            success = true,
+            response = {
+                ok = true,
+                nextCursor = "2026-06-05T00:04:00Z",
+                items = {
+                    {
+                        id = "annotation-disabled",
+                        type = "annotation",
+                        dedupeKey = "annotation-disabled",
+                        payload = { text = "Skipped", pos0 = "xp-1", pos1 = "xp-2" },
+                    },
+                },
+            },
+            code = 200,
+        }
+
+        local result = plugin:pullRemoteMetadataForContext({
+            file_path = "/books/demo.epub",
+            file_hash = "hash-disabled",
+            book_id = 70,
+        }, true, 100, "annotation")
+        assert.are.equal(0, result.applied)
+        assert.are.equal(1, result.skipped)
+        assert.are.equal(0, result.failed)
+        assert.are.equal(1, result.skipped_reasons.annotation_disabled)
+        assert.is_true(result.cursor_saved)
+    end)
+
+    local metadata_pull_error_cases = {
+        {
+            name = "authentication failures",
+            response = { success = false, response = "Unauthorized", code = 401 },
+            expected = "Authentication failed",
+        },
+        {
+            name = "wrong server URLs",
+            response = { success = false, response = "Not Found", code = 404 },
+            expected = "Server URL or metadata endpoint not found",
+        },
+        {
+            name = "unreachable servers",
+            response = { success = false, response = "connection refused", code = nil },
+            expected = "Server unreachable",
+        },
+        {
+            name = "forbidden books",
+            response = { success = false, response = "Forbidden", code = 403 },
+            expected = "Book not found or forbidden",
+        },
+        {
+            name = "malformed responses",
+            response = { success = false, response = "Malformed response", code = 200 },
+            expected = "Malformed response from Grimmory",
+        },
+    }
+    for _, case in ipairs(metadata_pull_error_cases) do
+        it("shows a clear message for " .. case.name, function()
+            local plugin = newPlugin({ metadata_sync_enabled = true })
+            plugin.api.next_metadata_pull = case.response
+
+            local result = plugin:pullRemoteMetadataForContext({
+                file_path = "/books/demo.epub",
+                file_hash = "hash-error",
+                book_id = 70,
+            }, false, 100)
+
+            assert.are.equal(1, result.failed)
+            local dialog = UIManager.getLastShown()
+            assert.is_true(dialog.text:find(case.expected, 1, true) ~= nil)
+        end)
+    end
+
+    it("reports an empty metadata pull clearly", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.api.next_metadata_pull = {
+            success = true,
+            response = { ok = true, items = {} },
+            code = 200,
+        }
+
+        local result = plugin:pullRemoteMetadataForContext({
+            file_path = "/books/demo.epub",
+            file_hash = "hash-empty",
+            book_id = 70,
+        }, false, 100)
+        assert.are.equal(0, result.pulled)
+        local dialog = UIManager.getLastShown()
+        assert.is_true(dialog.text:find("No remote metadata for this book", 1, true) ~= nil)
     end)
 
     it("keeps failed metadata rows pending with retry increment", function()
@@ -1734,7 +2072,8 @@ describe("GrimmLink helper methods", function()
                 retry_count = 0,
             },
         }
-        plugin.db.settings["metadata_cursor:hash-meta-retry"] = "2026-06-05T00:00:00Z"
+        local cursor_key = plugin:metadataCursorKey("hash-meta-retry", 70, 71)
+        plugin.db.settings[cursor_key] = "2026-06-05T00:00:00Z"
         plugin.api.next_metadata_batch = {
             success = false,
             response = "HTTP 500",
@@ -1746,7 +2085,7 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(1, failed)
         assert.are.equal(1, #plugin.db.pending_metadata_items)
         assert.are.equal(1, plugin.db.pending_metadata_items[1].retry_count)
-        assert.are.equal("2026-06-05T00:00:00Z", plugin.db.settings["metadata_cursor:hash-meta-retry"])
+        assert.are.equal("2026-06-05T00:00:00Z", plugin.db.settings[cursor_key])
     end)
 
     it("drops invalid metadata rows and stops retrying after max retry", function()

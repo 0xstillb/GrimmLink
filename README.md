@@ -181,6 +181,9 @@ Supported metadata areas:
 - 🔖 bookmarks
 
 Metadata sync can be enabled separately from core progress and shelf sync.
+`Pull Remote Metadata Now` resolves the open/current book, applies supported
+items without duplicating local annotations or bookmarks, and reports why any
+unsupported or disabled items were skipped.
 
 ---
 

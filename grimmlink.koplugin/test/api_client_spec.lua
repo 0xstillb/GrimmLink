@@ -116,6 +116,16 @@ package.preload["json"] = function()
             if value == '{"status":"ok","readStatus":"READ"}' then
                 return { status = "ok", readStatus = "READ" }
             end
+            if value == '{"ok":true,"items":[]}' then
+                return { ok = true, items = {} }
+            end
+            if value == '{"ok":true,"items":[],"nextCursor":"2026-06-05T00:01:00Z"}' then
+                return {
+                    ok = true,
+                    items = {},
+                    nextCursor = "2026-06-05T00:01:00Z",
+                }
+            end
             error("invalid json")
         end,
     }
@@ -280,6 +290,64 @@ describe("GrimmLink API client", function()
         })
         assert.is_true(success)
         assert.are.equal("/api/grimmlink/v1/syncs/metadata/batch", captured_request.url:match("/api/grimmlink/v1/syncs/metadata/batch$") and "/api/grimmlink/v1/syncs/metadata/batch" or nil)
+    end)
+
+    it("pulls metadata from the existing GET endpoint with hash priority", function()
+        next_http_response = {
+            body = '{"ok":true,"items":[],"nextCursor":"2026-06-05T00:01:00Z"}',
+            code = 200,
+            headers = {},
+            ok = 1,
+        }
+
+        local success = client:pullMetadata(
+            88,
+            "hash meta",
+            900,
+            "2026-06-05T00:00:00Z",
+            50,
+            "annotation"
+        )
+
+        assert.is_true(success)
+        assert.are.equal("GET", captured_request.method)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v1/syncs/metadata?", 1, true) ~= nil)
+        assert.is_true(captured_request.url:find("bookHash=hash+meta", 1, true) ~= nil)
+        assert.is_true(captured_request.url:find("bookId=", 1, true) == nil)
+        assert.is_true(captured_request.url:find("bookFileId=", 1, true) == nil)
+        assert.is_true(captured_request.url:find("cursor=2026%-06%-05T00%%3A00%%3A00Z") ~= nil)
+        assert.is_true(captured_request.url:find("limit=50", 1, true) ~= nil)
+        assert.is_true(captured_request.url:find("type=annotation", 1, true) ~= nil)
+    end)
+
+    it("falls back from bookId to bookFileId for metadata pulls", function()
+        next_http_response = {
+            body = '{"ok":true,"items":[]}',
+            code = 200,
+            headers = {},
+            ok = 1,
+        }
+
+        assert.is_true(client:pullMetadata(88, nil, 900, nil, 50))
+        assert.is_true(captured_request.url:find("bookId=88", 1, true) ~= nil)
+        assert.is_true(captured_request.url:find("bookFileId=", 1, true) == nil)
+
+        assert.is_true(client:pullMetadata(nil, nil, 900, nil, 50))
+        assert.is_true(captured_request.url:find("bookFileId=900", 1, true) ~= nil)
+    end)
+
+    it("rejects malformed successful metadata pull responses", function()
+        next_http_response = {
+            body = "not-json",
+            code = 200,
+            headers = {},
+            ok = 1,
+        }
+
+        local success, message, code = client:pullMetadata(88, nil, nil, nil, 50)
+        assert.is_false(success)
+        assert.are.equal("Malformed response", message)
+        assert.are.equal(200, code)
     end)
 
     it("fetches supported read statuses from GrimmLink endpoint", function()

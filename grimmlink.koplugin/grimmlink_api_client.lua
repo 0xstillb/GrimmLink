@@ -616,6 +616,46 @@ function APIClient:buildMetadataPullPayload(book_id, book_hash, book_file_id, fi
     return payload
 end
 
+function APIClient:pullMetadata(book_id, book_hash, book_file_id, cursor, limit, item_type)
+    local query = {}
+    local normalized_hash = tostring(book_hash or ""):match("^%s*(.-)%s*$")
+    if normalized_hash ~= "" then
+        query[#query + 1] = "bookHash=" .. self:_urlEncode(normalized_hash)
+    elseif book_id ~= nil and tostring(book_id) ~= "" then
+        query[#query + 1] = "bookId=" .. self:_urlEncode(normalizeNumericId(book_id))
+    elseif book_file_id ~= nil and tostring(book_file_id) ~= "" then
+        query[#query + 1] = "bookFileId=" .. self:_urlEncode(normalizeNumericId(book_file_id))
+    else
+        return false, "Book context is required", nil
+    end
+
+    local normalized_cursor = normalizeMetadataCursor(cursor)
+    if normalized_cursor then
+        query[#query + 1] = "cursor=" .. self:_urlEncode(normalized_cursor)
+    end
+
+    local normalized_limit = tonumber(limit)
+    if normalized_limit then
+        normalized_limit = math.max(1, math.min(math.floor(normalized_limit), 500))
+        query[#query + 1] = "limit=" .. tostring(normalized_limit)
+    end
+
+    local normalized_type = tostring(item_type or ""):match("^%s*(.-)%s*$"):lower()
+    if normalized_type ~= "" then
+        query[#query + 1] = "type=" .. self:_urlEncode(normalized_type)
+    end
+
+    local path = self:_apiPath("/syncs/metadata") .. "?" .. table.concat(query, "&")
+    local success, code, response = self:request("GET", path)
+    if success and type(response) == "table" then
+        return true, response, code
+    end
+    if success then
+        return false, "Malformed response", code
+    end
+    return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
 function APIClient:submitMetadataBatch(payload)
     local success, code, response = self:request("POST", self:_apiPath("/syncs/metadata/batch"), payload)
     if success then

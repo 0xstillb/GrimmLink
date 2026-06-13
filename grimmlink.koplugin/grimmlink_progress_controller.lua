@@ -1089,6 +1089,7 @@ function Grimmlink:resolveBookByHash(file_path, file_hash, silent)
             file_hash = file_hash,
             book_id = tonumber(book.id),
             bookFileId = maybeNumber(book.bookFileId or book.book_file_id),
+            book_file_id = maybeNumber(book.bookFileId or book.book_file_id),
             title = book.title,
             author = book.author,
         }
