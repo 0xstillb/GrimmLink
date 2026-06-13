@@ -1064,6 +1064,36 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(80, jumped_page)
     end)
 
+    it("replaces an existing remote progress prompt instead of stacking dialogs", function()
+        local plugin = newPlugin()
+        local local_snapshot = {
+            percentage = 10,
+            currentPage = 10,
+            totalPages = 100,
+            timestamp = 100,
+        }
+        local first = plugin:showProgressConflictDialog("hash-dialog", local_snapshot, {
+            percentage = 20,
+            currentPage = 20,
+            totalPages = 100,
+            timestamp = 200,
+        }, "native")
+        local second = plugin:showProgressConflictDialog("hash-dialog", local_snapshot, {
+            percentage = 30,
+            currentPage = 30,
+            totalPages = 100,
+            timestamp = 300,
+        }, "pdf")
+
+        assert.are.equal(first, UIManager.getLastClosed())
+        assert.are.equal(second, plugin._progress_conflict_dialog)
+        assert.are.equal(second, UIManager.getLastShown())
+
+        second.buttons[1][3].callback()
+        assert.is_nil(plugin._progress_conflict_dialog)
+        assert.are.equal(second, UIManager.getLastClosed())
+    end)
+
     it("applies remote EPUB progress using native location only", function()
         local plugin = newPlugin()
         local location_jump = nil
@@ -1259,6 +1289,100 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(1, #plugin.db.pending_sessions)
         assert.are.equal(1, #plugin.db.pending_progress)
         assert.are.equal("native", plugin.db.pending_progress[1].kind)
+    end)
+
+    it("uses only the PDF bridge progress source when opening a PDF with the bridge enabled", function()
+        local plugin = newPlugin({
+            pdf_web_reader_bridge_enabled = true,
+        })
+        plugin.ui.document.file = "/books/demo.pdf"
+        plugin.resolveBookByFilePath = function()
+            return {
+                file_hash = "hash-pdf-open",
+                book_id = 42,
+                book_file_id = 43,
+                title = "Demo PDF",
+            }
+        end
+        plugin.resolveBookByHash = function()
+            return {
+                book_id = 42,
+                bookFileId = 43,
+                title = "Demo PDF",
+            }
+        end
+        plugin.getCurrentProgressSnapshot = function()
+            return {
+                percentage = 10,
+                currentPage = 10,
+                totalPages = 100,
+                timestamp = 100,
+            }
+        end
+        plugin.isTrackingEnabled = function()
+            return true
+        end
+        local native_pulls = 0
+        local pdf_pulls = 0
+        plugin.maybePullRemoteProgress = function()
+            native_pulls = native_pulls + 1
+        end
+        plugin.maybePullPdfWebProgress = function()
+            pdf_pulls = pdf_pulls + 1
+        end
+        plugin.schedulePendingSync = function() end
+
+        plugin:startSession()
+
+        assert.are.equal(0, native_pulls)
+        assert.are.equal(1, pdf_pulls)
+    end)
+
+    it("uses native progress when opening a PDF with the bridge disabled", function()
+        local plugin = newPlugin({
+            pdf_web_reader_bridge_enabled = false,
+        })
+        plugin.ui.document.file = "/books/demo.pdf"
+        plugin.resolveBookByFilePath = function()
+            return {
+                file_hash = "hash-pdf-native",
+                book_id = 52,
+                book_file_id = 53,
+                title = "Native PDF",
+            }
+        end
+        plugin.resolveBookByHash = function()
+            return {
+                book_id = 52,
+                bookFileId = 53,
+                title = "Native PDF",
+            }
+        end
+        plugin.getCurrentProgressSnapshot = function()
+            return {
+                percentage = 10,
+                currentPage = 10,
+                totalPages = 100,
+                timestamp = 100,
+            }
+        end
+        plugin.isTrackingEnabled = function()
+            return true
+        end
+        local native_pulls = 0
+        local pdf_pulls = 0
+        plugin.maybePullRemoteProgress = function()
+            native_pulls = native_pulls + 1
+        end
+        plugin.maybePullPdfWebProgress = function()
+            pdf_pulls = pdf_pulls + 1
+        end
+        plugin.schedulePendingSync = function() end
+
+        plugin:startSession()
+
+        assert.are.equal(1, native_pulls)
+        assert.are.equal(0, pdf_pulls)
     end)
 
     it("leaves pending queues untouched when the API client is not ready", function()

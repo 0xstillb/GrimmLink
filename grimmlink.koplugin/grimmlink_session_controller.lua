@@ -88,8 +88,13 @@ function Grimmlink:startSession()
             return
         end
         self:invokeSafely("session open sync", function()
-            self:maybePullRemoteProgress(file_hash, file_path, book_id, book_file_id, true)
-            self:maybePullPdfWebProgress(file_hash, file_path, book_id, book_file_id, true)
+            local use_pdf_bridge = self:getBookType(file_path) == "PDF"
+                and self:isPdfWebReaderBridgeEnabled()
+            if use_pdf_bridge then
+                self:maybePullPdfWebProgress(file_hash, file_path, book_id, book_file_id, true)
+            else
+                self:maybePullRemoteProgress(file_hash, file_path, book_id, book_file_id, true)
+            end
             if self:isOnline() then
                 self:schedulePendingSync("session open pending sync", 0.75, {
                     progress_limit = 10,
@@ -121,6 +126,10 @@ function Grimmlink:endSession(options)
     if self._scheduled_session_open_sync and UIManager and type(UIManager.unschedule) == "function" then
         pcall(UIManager.unschedule, UIManager, self._scheduled_session_open_sync)
         self._scheduled_session_open_sync = nil
+    end
+    if self._progress_conflict_dialog and UIManager then
+        pcall(UIManager.close, UIManager, self._progress_conflict_dialog)
+        self._progress_conflict_dialog = nil
     end
 
     local session = self.current_session

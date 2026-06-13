@@ -92,6 +92,9 @@ local function install()
             getLastShown = function()
                 return UIManager.last_shown
             end,
+            getLastClosed = function()
+                return UIManager.last_closed
+            end,
             getDirtyCalls = function()
                 return UIManager.dirty_calls
             end,

@@ -675,13 +675,24 @@ function Grimmlink:buildConflictDialogText(local_snapshot, remote_snapshot, mode
 end
 
 function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, mode)
+    if self._progress_conflict_dialog then
+        pcall(UIManager.close, UIManager, self._progress_conflict_dialog)
+        self._progress_conflict_dialog = nil
+    end
+
     local dialog
+    local function close_dialog()
+        if dialog then
+            pcall(UIManager.close, UIManager, dialog)
+        end
+        if self._progress_conflict_dialog == dialog then
+            self._progress_conflict_dialog = nil
+        end
+    end
     local use_remote_text = mode == "pdf" and _("Use Web Reader page") or _("Use Remote")
     local keep_local_text = mode == "pdf" and _("Keep KOReader position") or _("Keep Local")
     local remote_action = function()
-        if dialog then
-            UIManager:close(dialog)
-        end
+        close_dialog()
         if self:applyRemoteProgress(remote_snapshot, { prefer_page = mode == "pdf" }) then
             self:rememberRemoteSnapshot(file_hash, remote_snapshot, mode == "pdf" and "pdf-remote-use" or "remote-use")
             self:rememberLocalSnapshot(file_hash, remote_snapshot, mode == "pdf" and "pdf-remote-use" or "remote-use")
@@ -692,15 +703,11 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
         end
     end
     local local_action = function()
-        if dialog then
-            UIManager:close(dialog)
-        end
+        close_dialog()
         self:rememberLocalSnapshot(file_hash, local_snapshot, mode == "pdf" and "pdf-keep-local" or "keep-local")
     end
     local ignore_action = function()
-        if dialog then
-            UIManager:close(dialog)
-        end
+        close_dialog()
     end
 
     dialog = ButtonDialog:new{
@@ -722,6 +729,7 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
             },
         },
     }
+    self._progress_conflict_dialog = dialog
     UIManager:show(dialog)
     return dialog
 end
