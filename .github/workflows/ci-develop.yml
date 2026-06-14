@@ -101,15 +101,16 @@ jobs:
     needs: [test, guards]
     if: github.event_name == 'push' && github.ref == 'refs/heads/Develop'
     services:
-      grimmory:
-        image: ghcr.io/0xstillb/grimmory:latest
+      mariadb:
+        image: mariadb:11
         ports:
-          - 8080:8080
+          - 3306:3306
         env:
-          SPRING_PROFILES_ACTIVE: dev
-          BOOKLORE_DATASOURCE_URL: jdbc:h2:mem:testdb
-          BOOKLORE_DATASOURCE_USERNAME: sa
-          BOOKLORE_DATASOURCE_PASSWORD:
+          MARIADB_ROOT_PASSWORD: grimmory
+          MARIADB_DATABASE: grimmory
+          MARIADB_USER: grimmory
+          MARIADB_PASSWORD: grimmory
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=10s --health-timeout=5s --health-retries=5
     steps:
       - uses: actions/checkout@v6
 
@@ -126,10 +127,20 @@ jobs:
           luarocks install lua-term 0.7-1 || true
           luarocks install busted
 
-      - name: Wait for grimmory to be ready
+      - name: Start grimmory container
         run: |
+          docker run -d --name grimmory \
+            --network host \
+            -e DATABASE_URL='jdbc:mariadb://localhost:3306/grimmory?createDatabaseIfNotExist=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true' \
+            -e DATABASE_USERNAME=grimmory \
+            -e DATABASE_PASSWORD=grimmory \
+            -e ALLOWED_ORIGINS='*' \
+            -e API_DOCS_ENABLED=true \
+            -e SPRING_PROFILES_ACTIVE=dev \
+            ghcr.io/0xstillb/grimmory:develop
+          # Wait for it to be ready
           for i in $(seq 1 30); do
-            if curl -s http://localhost:8080/actuator/health > /dev/null 2>&1; then
+            if curl -s http://localhost:6060/actuator/health > /dev/null 2>&1; then
               echo "Grimmory is ready!"
               break
             fi
@@ -139,8 +150,7 @@ jobs:
 
       - name: Run integration tests
         run: |
-          # Set environment for integration tests
-          export GRIMMORY_BASE_URL=http://localhost:8080
+          export GRIMMORY_BASE_URL=http://localhost:6060
           cd grimmlink.koplugin
           busted --tags=integration test/
 
