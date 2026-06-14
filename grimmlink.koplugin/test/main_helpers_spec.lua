@@ -535,6 +535,7 @@ local function newApi()
         next_metadata_batch = { success = true, response = { ok = true, results = { annotations = {}, bookmarks = {} } }, code = 200 },
         next_metadata_pull = { success = true, response = { ok = true, items = {} }, code = 200 },
         next_async_metadata_start_error = nil,
+        async_download_available = true,
         next_async_metadata_polls = {
             { status = "done", response = { ok = true, items = {} }, code = 200 },
         },
@@ -621,6 +622,10 @@ local function newApi()
             item_type = item_type,
         }
         return self.next_metadata_pull.success, self.next_metadata_pull.response, self.next_metadata_pull.code
+    end
+
+    function api:isAsyncDownloadAvailable()
+        return self.async_download_available
     end
 
     function api:startAsyncMetadataPull(book_id, book_hash, book_file_id, cursor, limit, item_type, opts)
@@ -1884,7 +1889,7 @@ describe("GrimmLink helper methods", function()
     it("falls back safely to KOReader HTTP when curl and wget are unavailable", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
         plugin.ui.document.currentHash = "hash-compatibility-pull"
-        plugin.api.next_async_metadata_start_error = "Background HTTP tools are unavailable"
+        plugin.api.async_download_available = false
 
         local result = plugin:pullRemoteMetadataNow(false, 100)
 
@@ -1900,7 +1905,7 @@ describe("GrimmLink helper methods", function()
                 blocking_pulls = blocking_pulls + 1
             end
         end
-        assert.are.equal(1, async_starts)
+        assert.are.equal(0, async_starts)
         assert.are.equal(1, blocking_pulls)
         local joined = table.concat(UIManager.getShownTexts(), "\n")
         assert.is_true(joined:find("Using KOReader's built-in HTTP client", 1, true) ~= nil)
