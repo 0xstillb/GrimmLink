@@ -103,14 +103,31 @@ jobs:
     services:
       mariadb:
         image: mariadb:11
-        ports:
-          - 3306:3306
         env:
           MARIADB_ROOT_PASSWORD: grimmory
           MARIADB_DATABASE: grimmory
           MARIADB_USER: grimmory
           MARIADB_PASSWORD: grimmory
-        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=10s --health-timeout=5s --health-retries=5
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=5
+
+      grimmory:
+        image: ghcr.io/0xstillb/grimmory:develop
+        ports:
+          - 6060:6060
+        env:
+          DATABASE_URL: >-
+            jdbc:mariadb://mariadb:3306/grimmory?createDatabaseIfNotExist=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+          DATABASE_USERNAME: grimmory
+          DATABASE_PASSWORD: grimmory
+          ALLOWED_ORIGINS: '*'
+          API_DOCS_ENABLED: 'true'
+          SPRING_PROFILES_ACTIVE: dev
+        options: >-
+          --health-cmd="wget -q --spider http://localhost:6060/api/v1/healthcheck"
+          --health-interval=15s --health-timeout=10s --health-start-period=90s --health-retries=8
+
     steps:
       - uses: actions/checkout@v6
 
@@ -127,38 +144,36 @@ jobs:
           luarocks install lua-term 0.7-1 || true
           luarocks install busted
 
-      - name: Start grimmory container
+      - name: Wait for grimmory health check
         run: |
-          docker run -d --name grimmory \
-            --network host \
-            -e DATABASE_URL='jdbc:mariadb://localhost:3306/grimmory?createDatabaseIfNotExist=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true' \
-            -e DATABASE_USERNAME=grimmory \
-            -e DATABASE_PASSWORD=grimmory \
-            -e ALLOWED_ORIGINS='*' \
-            -e API_DOCS_ENABLED=true \
-            -e SPRING_PROFILES_ACTIVE=dev \
-            ghcr.io/0xstillb/grimmory:develop
-          # Wait for it to be ready
-          for i in $(seq 1 30); do
-            if curl -s http://localhost:6060/actuator/health > /dev/null 2>&1; then
-              echo "Grimmory is ready!"
+          echo "Waiting for grimmory (up to 3 min)..."
+          for i in $(seq 1 36); do
+            if curl -sf http://localhost:6060/api/v1/healthcheck > /dev/null 2>&1; then
+              echo "Grimmory is ready! ($((i*5))s)"
               break
             fi
-            echo "Waiting for grimmory... ($i/30)"
-            sleep 2
+            if [ "$i" = "36" ]; then
+              echo "❌ Grimmory healthcheck never passed"
+              echo "=== Container logs ==="
+              docker logs "$(docker ps -q --filter name=grimmory)" 2>&1 || true
+              exit 1
+            fi
+            echo "Waiting... ($i/36)"
+            sleep 5
           done
 
-      - name: Run integration smoke test
+      - name: Smoke test API
         run: |
-          # Verify grimmory API responds
-          curl -sf http://localhost:6060/actuator/health | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='UP', f'Not UP: {d}'"
-          echo "Grimmory health check passed"
+          # Verify /api/v1/healthcheck
+          curl -sf http://localhost:6060/api/v1/healthcheck | head -c 200
+          echo ""
+          echo "✅ Healthcheck passed"
 
-          # Smoke test: API client can connect
+          # Verify API v1 is reachable
           curl -sf http://localhost:6060/api/v1/books?limit=1 > /dev/null
-          echo "API v1 reachable"
+          echo "✅ API v1 reachable"
 
-      - name: Run tests (with live grimmory)
+      - name: Run existing tests
         run: |
           export GRIMMORY_BASE_URL=http://localhost:6060
           cd grimmlink.koplugin
