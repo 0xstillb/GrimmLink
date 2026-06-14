@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ secrets.DEPLOY_TOKEN || github.token }}
 
       - name: Read version
         id: ver
@@ -38,15 +39,12 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check merge
+      - name: Check merge commit
         id: merge
         run: |
           N=$(git rev-list --parents -1 HEAD | wc -w)
-          if [ "$N" -gt 2 ]; then
-            echo "detected=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "detected=false" >> "$GITHUB_OUTPUT"
-          fi
+          [ "$N" -gt 2 ] && echo "detected=true" >> "$GITHUB_OUTPUT" \
+                        || echo "detected=false" >> "$GITHUB_OUTPUT"
 
       - name: Check source branch
         id: source
@@ -76,28 +74,29 @@ jobs:
           sed -i 's/version_type = "[^"]*"/version_type = "release"/' grimmlink.koplugin/plugin_version.lua
           sed -i "s/git_commit = \"[^\"]*\"/git_commit = \"$(git rev-parse --short HEAD)\"/" grimmlink.koplugin/plugin_version.lua
           sed -i "s/build_date = \"[^\"]*\"/build_date = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"/" grimmlink.koplugin/plugin_version.lua
-
           if [ -f grimmlink.koplugin/_meta.lua ]; then
             sed -i "s/version = \"$OLD\"/version = \"$NEW\"/" grimmlink.koplugin/_meta.lua
           fi
           echo "Bumped $OLD -> $NEW"
 
-      - name: Commit bump
+      - name: Push bump commit
         if: steps.bump.outputs.new != ''
+        env:
+          GH_TOKEN: ${{ secrets.DEPLOY_TOKEN || github.token }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "0xstillb"
+          git config user.email "0xstillb@users.noreply.github.com"
           git add grimmlink.koplugin/plugin_version.lua grimmlink.koplugin/_meta.lua
           git commit -m "chore(release): bump to ${{ steps.bump.outputs.new }} [skip ci]"
-          git push origin Main
+          git push https://x-access-token:${GH_TOKEN}@github.com/0xstillb/GrimmLink.git Main
 
       - name: Create tag
         if: steps.tag.outputs.exists == 'false'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.DEPLOY_TOKEN || github.token }}
         run: |
           V=${{ steps.ver.outputs.current }}
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "0xstillb"
+          git config user.email "0xstillb@users.noreply.github.com"
           git tag -a "$V" -m "Release $V"
-          git push origin "$V"
+          git push https://x-access-token:${GH_TOKEN}@github.com/0xstillb/GrimmLink.git "$V"
