@@ -1555,19 +1555,13 @@ function Grimmlink:startRemoteMetadataPullAsync(context, limit, item_type, silen
     if not start_ok or not handle then
         local failure_reason = start_ok and start_error or handle
         local failure_text = safeToString(failure_reason) or ""
-        if not silent and failure_text:find("Background HTTP tools are unavailable", 1, true) then
+        self:logWarn("GrimmLink background metadata pull could not start:", failure_text)
+        if not silent then
             return startCompatibilityFallback()
         end
         pending_result.pending = false
         pending_result.failed = 1
         pending_result.reason = "background_start_failed"
-        self:logWarn("GrimmLink background metadata pull could not start:", failure_text)
-        if not silent then
-            self:showMessage(
-                _("Could not start a safe background metadata pull. Check that curl or wget is available."),
-                5
-            )
-        end
         return pending_result
     end
 

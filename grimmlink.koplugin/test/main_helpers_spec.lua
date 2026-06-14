@@ -1930,19 +1930,22 @@ describe("GrimmLink helper methods", function()
         assert.is_true(dialog.text:find("failed safely", 1, true) ~= nil)
     end)
 
-    it("does not use the blocking fallback for unrelated background start failures", function()
+    it("uses the compatibility fallback for any manual background start failure", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
         plugin.ui.document.currentHash = "hash-background-start-failure"
         plugin.api.next_async_metadata_start_error = "Cannot allocate metadata pull temporary files"
 
         local result = plugin:pullRemoteMetadataNow(false, 100)
 
-        assert.is_false(result.pending)
-        assert.are.equal(1, result.failed)
-        assert.are.equal("background_start_failed", result.reason)
+        assert.is_true(result.pending)
+        assert.are.equal("compatibility_fallback", result.reason)
+        local blocking_pulls = 0
         for _, call in ipairs(plugin.api.calls) do
-            assert.is_not.equal("pullMetadata", call.name)
+            if call.name == "pullMetadata" then
+                blocking_pulls = blocking_pulls + 1
+            end
         end
+        assert.are.equal(1, blocking_pulls)
     end)
 
     it("prevents a second manual metadata pull while one is running", function()
