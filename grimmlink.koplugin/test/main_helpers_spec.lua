@@ -3378,15 +3378,17 @@ describe("GrimmLink helper methods", function()
         local top = menu.grimmlink.sub_item_table
         local completion_item = findMenuItem(top, "Reading Completion")
         local pull_item = findMenuItem(top, "Pull Remote Progress")
+        local metadata_item = findMenuItem(top, "Pull Remote Metadata Now")
         local manual_status_item = findMenuItem(top, "Manual Reading Status")
         local toggle_item = findMenuItem(top, "Toggle Tracking (Current Book)")
         assert.is_nil(completion_item)
         assert.is_nil(pull_item)
+        assert.is_nil(metadata_item)
         assert.is_nil(manual_status_item)
         assert.is_nil(toggle_item)
     end)
 
-    it("shows Pull Remote Progress in top menu during active reading session", function()
+    it("shows remote pull actions in top menu during active reading session", function()
         local plugin = newPlugin()
         plugin.current_session = {
             file_path = "/books/demo.epub",
@@ -3397,9 +3399,11 @@ describe("GrimmLink helper methods", function()
         local top = menu.grimmlink.sub_item_table
         local completion_item = findMenuItem(top, "Reading Completion")
         local pull_item = findMenuItem(top, "Pull Remote Progress")
+        local metadata_item = findMenuItem(top, "Pull Remote Metadata Now")
         local manual_status_item = findMenuItem(top, "Manual Reading Status")
         assert.is_not_nil(completion_item)
         assert.is_not_nil(pull_item)
+        assert.is_not_nil(metadata_item)
         assert.is_not_nil(manual_status_item)
     end)
 

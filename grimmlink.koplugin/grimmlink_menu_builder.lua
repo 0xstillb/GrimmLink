@@ -822,11 +822,16 @@ function Grimmlink:addToMainMenu(menu_items)
                 callback = function() self:manualPullProgress() end,
             })
             table.insert(sub_items, 5, {
+                id = "pull_remote_metadata",
+                text = _("Pull Remote Metadata Now"),
+                callback = function() self:pullRemoteMetadataNow(false, 100) end,
+            })
+            table.insert(sub_items, 6, {
                 id = "manual_reading_status",
                 text = _("Manual Reading Status"),
                 callback = function() self:showManualReadStatusMenu() end,
             })
-            table.insert(sub_items, 6, {
+            table.insert(sub_items, 7, {
                 id = "sync_summary",
                 text = _("Sync Summary"),
                 callback = showSyncSummary,
