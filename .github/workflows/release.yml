@@ -3,7 +3,7 @@ name: Create Release
 on:
   push:
     tags:
-      - "*"
+      - 'v*'
 
 jobs:
   release:
@@ -106,10 +106,7 @@ jobs:
           VERSION=${{ steps.release_meta.outputs.version }}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-          # Try to extract changelog section for this version from CHANGELOG.md
           if [ -f CHANGELOG.md ]; then
-            # Extract section between this version and the next version heading
-            # Match lines between # [VERSION] and the next # [
             CHANGELOG=$(awk -v ver="$VERSION" '
               /^# \[/ {
                 if (found) exit;
@@ -118,7 +115,7 @@ jobs:
               }
               found { print }
             ' CHANGELOG.md)
-            
+
             if [ -n "$CHANGELOG" ]; then
               echo "Found changelog for $VERSION in CHANGELOG.md"
               echo "changelog<<EOF" >> $GITHUB_OUTPUT
