@@ -42,6 +42,34 @@ function M.install(Grimmlink, deps)
         return out
     end
 
+    local function isBlankMetadataValue(value)
+        return value == nil or tostring(value) == ""
+    end
+
+    local function firstMetadataValue(...)
+        for i = 1, select("#", ...) do
+            local value = select(i, ...)
+            if not isBlankMetadataValue(value) then
+                return value
+            end
+        end
+        return nil
+    end
+
+    local function mergeMetadataContextMissing(target, source)
+        if type(target) ~= "table" then
+            return target
+        end
+        source = type(source) == "table" and source or {}
+        target.file_path = firstMetadataValue(target.file_path, target.filePath, target.path, target.file, source.file_path, source.filePath, source.path, source.file)
+        target.file_hash = firstMetadataValue(target.file_hash, target.fileHash, target.book_hash, target.bookHash, target.current_hash, target.currentHash, source.file_hash, source.fileHash, source.book_hash, source.bookHash, source.current_hash, source.currentHash)
+        target.initial_hash = firstMetadataValue(target.initial_hash, target.initialHash, source.initial_hash, source.initialHash)
+        target.book_id = firstMetadataValue(target.book_id, target.bookId, source.book_id, source.bookId)
+        target.book_file_id = firstMetadataValue(target.book_file_id, target.bookFileId, source.book_file_id, source.bookFileId)
+        target.file_format = firstMetadataValue(target.file_format, target.fileFormat, target.book_type, target.bookType, source.file_format, source.fileFormat, source.book_type, source.bookType)
+        return target
+    end
+
 function Grimmlink:getMetadataExtractionContext()
     local file_path = nil
     local file_hash = nil
@@ -252,11 +280,47 @@ function Grimmlink:queueMetadataFromContext(context, extracted, reason)
     return result
 end
 
+function Grimmlink:resolveMetadataQueueContext(context_override)
+    local context = type(context_override) == "table" and cloneForMetadata(context_override) or nil
+    local fallback = self:getMetadataExtractionContext()
+
+    if context then
+        mergeMetadataContextMissing(context, fallback)
+    else
+        context = fallback
+    end
+    if type(context) ~= "table" then
+        return nil
+    end
+
+    if (isBlankMetadataValue(context.file_hash) or isBlankMetadataValue(context.book_id) or isBlankMetadataValue(context.book_file_id))
+        and not isBlankMetadataValue(context.file_path)
+        and type(self.resolveBookByFilePath) == "function" then
+        local ok_cached, cached = pcall(self.resolveBookByFilePath, self, context.file_path)
+        if ok_cached and type(cached) == "table" then
+            mergeMetadataContextMissing(context, cached)
+        end
+    end
+
+    if isBlankMetadataValue(context.file_hash) and not isBlankMetadataValue(context.file_path)
+        and type(self.calculateBookHash) == "function" then
+        local ok_hash, computed_hash = pcall(self.calculateBookHash, self, context.file_path)
+        if ok_hash and not isBlankMetadataValue(computed_hash) then
+            context.file_hash = computed_hash
+        end
+    end
+    if isBlankMetadataValue(context.file_hash) and not isBlankMetadataValue(context.initial_hash) then
+        context.file_hash = context.initial_hash
+    end
+
+    return context
+end
+
 function Grimmlink:extractAndQueueCurrentMetadata(reason, context_override)
     if not self.enabled or not self.db then
         return nil
     end
-    local context = context_override or self:getMetadataExtractionContext()
+    local context = self:resolveMetadataQueueContext(context_override)
     if not context then
         return nil
     end
@@ -2010,7 +2074,18 @@ function Grimmlink:syncMetadataNow()
 
     local pending_after_queue = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
     if (tonumber(pending_after_queue) or 0) <= 0 then
-        self:showMessage(T(_("No metadata to sync\nQueue failed: %1"), queue_failed_count), 3)
+        local skipped_synced_count = 0
+        if queued_result and type(queued_result.queued) == "table" then
+            skipped_synced_count = tonumber(queued_result.queued.skipped_synced) or 0
+        end
+        if skipped_synced_count > 0 then
+            self:showMessage(T(
+                _("No new metadata queued\nAlready marked synced: %1\nUse Force Metadata Re-upload if Grimmory/Web Reader is missing it."),
+                skipped_synced_count
+            ), 6)
+        else
+            self:showMessage(T(_("No metadata to sync\nQueue failed: %1"), queue_failed_count), 3)
+        end
         return
     end
 

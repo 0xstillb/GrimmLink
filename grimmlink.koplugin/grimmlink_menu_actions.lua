@@ -195,6 +195,13 @@ function M:applyReaderBookTopLevelOverrides(plugin, sub_items, options)
             end,
         },
         {
+            id = "force_metadata_reupload",
+            text = _("Force Metadata Re-upload"),
+            callback = function()
+                plugin:forceMetadataResyncForCurrentBook()
+            end,
+        },
+        {
             id = "pull_remote_metadata",
             text = _("Pull Remote Metadata Now"),
             callback = function()

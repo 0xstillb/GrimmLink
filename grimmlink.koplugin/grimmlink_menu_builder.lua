@@ -261,6 +261,11 @@ function Grimmlink:addToMainMenu(menu_items)
                 callback = function() self:syncPendingNow(false) end,
             },
             {
+                id = "force_metadata_reupload",
+                text = _("Force Metadata Re-upload"),
+                callback = function() self:forceMetadataResyncForCurrentBook() end,
+            },
+            {
                 id = "sync_shelf_now",
                 text = _("Sync Shelf Now"),
                 callback = function() self:syncShelfNow(false) end,
@@ -698,6 +703,14 @@ function Grimmlink:addToMainMenu(menu_items)
                                 callback = function() self:showMetadataPreview() end,
                             },
                             {
+                                text = _("Sync Metadata Now"),
+                                callback = function() self:syncMetadataNow() end,
+                            },
+                            {
+                                text = _("Force Metadata Re-upload"),
+                                callback = function() self:forceMetadataResyncForCurrentBook() end,
+                            },
+                            {
                                 text = _("Pull Remote Metadata Now"),
                                 callback = function() self:pullRemoteMetadataNow(false, 100) end,
                             },
@@ -832,16 +845,21 @@ function Grimmlink:addToMainMenu(menu_items)
                 callback = function() self:syncMetadataNow() end,
             })
             table.insert(sub_items, 7, {
+                id = "force_metadata_reupload",
+                text = _("Force Metadata Re-upload"),
+                callback = function() self:forceMetadataResyncForCurrentBook() end,
+            })
+            table.insert(sub_items, 8, {
                 id = "pull_remote_metadata",
                 text = _("Pull Remote Metadata Now"),
                 callback = function() self:pullRemoteMetadataNow(false, 100) end,
             })
-            table.insert(sub_items, 8, {
+            table.insert(sub_items, 9, {
                 id = "manual_reading_status",
                 text = _("Manual Reading Status"),
                 callback = function() self:showManualReadStatusMenu() end,
             })
-            table.insert(sub_items, 9, {
+            table.insert(sub_items, 10, {
                 id = "sync_summary",
                 text = _("Sync Summary"),
                 callback = showSyncSummary,

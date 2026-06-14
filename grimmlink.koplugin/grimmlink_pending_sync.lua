@@ -51,7 +51,7 @@ function M:syncPendingNow(plugin, silent, opts)
         if context and not plugin:isTrackingEnabledForContext(context) then
             plugin:showTrackingDisabledMessage()
         else
-            plugin:extractAndQueueCurrentMetadata("manual-sync", context)
+            plugin:extractAndQueueCurrentMetadata("manual-sync")
         end
         if not plugin:isOnline() then
             plugin:maybePromptEnableWifiForManualSync()
