@@ -1,0 +1,51 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - Main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-tag:
+    name: Check & Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      new_version: ${{ steps.check.outputs.new_version }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Read version from plugin_version.lua
+        id: check
+        run: |
+          VERSION=$(grep -oP '(?<=version = ")[^"]+' grimmlink.koplugin/plugin_version.lua)
+          echo "Detected version: $VERSION"
+
+          if git tag -l "$VERSION" | grep -q .; then
+            echo "⚠️  Tag $VERSION already exists — no new release needed"
+            echo "new_version=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ New version $VERSION detected — creating tag"
+            echo "new_version=true" >> "$GITHUB_OUTPUT"
+            echo "new_version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag
+        if: steps.check.outputs.new_version == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.check.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+          echo "✅ Tag $VERSION created and pushed"
