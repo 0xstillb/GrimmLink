@@ -537,7 +537,8 @@ end
 
 local function firstNumber(...)
     for i = 1, select("#", ...) do
-        local value = tonumber(select(i, ...))
+        local candidate = select(i, ...)
+        local value = tonumber(candidate)
         if value then
             return value
         end
@@ -620,6 +621,29 @@ local function annotationListHasRemoteDedupe(annotations, dedupe_key)
         if type(entry) == "table" then
             local existing = entry.grimmlink_dedupe_key or entry.dedupeKey or entry.dedupe_key
             if existing ~= nil and safeToString(existing) == dedupe_key then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function annotationListHasBookmarkLocation(annotations, payload)
+    if type(annotations) ~= "table" or type(payload) ~= "table" then
+        return false
+    end
+    local location = payloadLocation(payload)
+    local page = firstNumber(payload.page, payload.pageno, location.pageno)
+    local anchor = firstNonEmpty(payload.pos0, location.pos0, location.cfi, payload.location, location.raw)
+    for _, entry in pairs(annotations) do
+        if type(entry) == "table" and firstNonEmpty(entry.pos1) == nil then
+            local existing_page = firstNumber(entry.page, entry.pageno)
+            local existing_anchor = firstNonEmpty(entry.pos0, entry.location)
+            if page ~= nil and existing_page == page then
+                return true
+            end
+            if anchor ~= nil and existing_anchor ~= nil
+                and safeToString(existing_anchor) == safeToString(anchor) then
                 return true
             end
         end
@@ -743,6 +767,9 @@ function Grimmlink:appendPulledAnnotationLikeItem(doc_settings, item, payload)
 
     local entry, status
     local item_type = normalizeRemoteMetadataType(item.type)
+    if item_type == "bookmark" and annotationListHasBookmarkLocation(annotations, payload) then
+        return true, "already_at_location"
+    end
     if item_type == "annotation" then
         entry, status = self:buildRemoteAnnotationEntry(item, payload)
     else
@@ -814,6 +841,15 @@ local function addMetadataSkipReason(result, reason)
     result.skipped_reasons[normalized] = (result.skipped_reasons[normalized] or 0) + 1
 end
 
+local function addMetadataFailureReason(result, reason)
+    local normalized = safeToString(reason)
+    if normalized == "" then
+        normalized = "unspecified"
+    end
+    result.failed_reasons = result.failed_reasons or {}
+    result.failed_reasons[normalized] = (result.failed_reasons[normalized] or 0) + 1
+end
+
 function Grimmlink:applyPulledMetadataItems(context, items)
     local result = {
         applied = 0,
@@ -821,6 +857,7 @@ function Grimmlink:applyPulledMetadataItems(context, items)
         failed = 0,
         changed = false,
         skipped_reasons = {},
+        failed_reasons = {},
     }
     if type(items) ~= "table" or #items == 0 then
         return result
@@ -828,6 +865,7 @@ function Grimmlink:applyPulledMetadataItems(context, items)
     if not context or not context.file_hash or context.file_hash == "" then
         result.failed = #items
         result.reason = "missing_file_hash"
+        addMetadataFailureReason(result, result.reason)
         return result
     end
 
@@ -880,6 +918,7 @@ function Grimmlink:applyPulledMetadataItems(context, items)
                 result.failed = result.failed + 1
                 result.reason = context.file_path and context.file_path ~= ""
                     and "doc_settings_unavailable" or "missing_file_path"
+                addMetadataFailureReason(result, result.reason)
                 self:logWarn("GrimmLink metadata pull cannot apply:", result.reason)
             else
                 local ok_apply, applied, status = pcall(self.applyPulledMetadataItem, self, doc_settings, item)
@@ -887,6 +926,7 @@ function Grimmlink:applyPulledMetadataItems(context, items)
                     self:markRemoteMetadataItemApplied(context, item, status or "applied")
                     local normalized_status = safeToString(status)
                     if normalized_status == "already_in_docsettings"
+                        or normalized_status == "already_at_location"
                         or normalized_status:find("disabled", 1, true)
                         or normalized_status:find("skipped_", 1, true) then
                         result.skipped = result.skipped + 1
@@ -897,6 +937,7 @@ function Grimmlink:applyPulledMetadataItems(context, items)
                     end
                 else
                     result.failed = result.failed + 1
+                    addMetadataFailureReason(result, status or applied or (not ok_apply and "apply_exception") or "apply_failed")
                     self:logWarn("GrimmLink metadata pull apply failed type=", item_type,
                         " dedupe=", shortPrefix(dedupe_key, 16), " reason=", safeToString(status or applied or ok_apply))
                 end
@@ -973,6 +1014,7 @@ local function formatMetadataSkipReasons(reasons)
     end
     local labels = {
         already_applied = _("already applied"),
+        already_at_location = _("already present at this location"),
         already_in_docsettings = _("already present locally"),
         annotation_disabled = _("annotation sync disabled"),
         bookmark_disabled = _("bookmark sync disabled"),
@@ -996,6 +1038,31 @@ local function formatMetadataSkipReasons(reasons)
     return table.concat(parts, ", ")
 end
 
+local function formatMetadataFailureReasons(reasons)
+    if type(reasons) ~= "table" then
+        return ""
+    end
+    local labels = {
+        apply_exception = _("apply exception"),
+        apply_failed = _("apply failed"),
+        doc_settings_unavailable = _("book settings unavailable"),
+        invalid_annotation = _("invalid annotation or bookmark"),
+        invalid_item = _("invalid item"),
+        invalid_rating = _("invalid rating"),
+        missing_file_hash = _("missing book hash"),
+        missing_file_path = _("missing book path"),
+        unsupported_item_type = _("unsupported item type"),
+        unspecified = _("unspecified"),
+    }
+    local parts = {}
+    for reason, count in pairs(reasons) do
+        local label = labels[reason] or reason
+        parts[#parts + 1] = T(_("%1 (%2)"), label, count)
+    end
+    table.sort(parts)
+    return table.concat(parts, ", ")
+end
+
 local function newMetadataPullResult()
     return {
         pulled = 0,
@@ -1003,6 +1070,7 @@ local function newMetadataPullResult()
         skipped = 0,
         failed = 0,
         cursor_saved = false,
+        failed_reasons = {},
     }
 end
 
@@ -1093,7 +1161,9 @@ function Grimmlink:processMetadataPullResponse(context, pull, code, silent, item
     result.skipped = apply_result.skipped or 0
     result.failed = apply_result.failed or 0
     result.skipped_reasons = apply_result.skipped_reasons or {}
+    result.failed_reasons = apply_result.failed_reasons or {}
     result.reason = apply_result.reason
+    self._last_metadata_pull_result = result
 
     if result.failed == 0 and pull.nextCursor ~= nil and pull.nextCursor ~= "" then
         result.cursor_saved = self:saveMetadataCursor(
@@ -1118,6 +1188,10 @@ function Grimmlink:processMetadataPullResponse(context, pull, code, silent, item
             local skip_reasons = formatMetadataSkipReasons(result.skipped_reasons)
             if skip_reasons ~= "" then
                 message = message .. "\n" .. T(_("Skipped reasons: %1"), skip_reasons)
+            end
+            local failed_reasons = formatMetadataFailureReasons(result.failed_reasons)
+            if failed_reasons ~= "" then
+                message = message .. "\n" .. T(_("Failed reasons: %1"), failed_reasons)
             end
             self:showMessage(message, 5)
         end
