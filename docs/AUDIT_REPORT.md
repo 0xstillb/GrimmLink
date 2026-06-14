@@ -1,5 +1,7 @@
 # GrimmLink / Grimmory Release-Candidate Audit Report
 
+> Historical report: bridge-related findings describe an older implementation and are not the current plugin contract. See `docs/PLUGIN_SCOPE.md`.
+
 Audit date: 2026-05-01 Asia/Bangkok
 Auditor: Claude (Cowork mode)
 

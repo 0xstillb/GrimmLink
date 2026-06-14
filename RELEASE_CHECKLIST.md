@@ -20,7 +20,7 @@
 3. Conflict prompt appears for newer remote progress.
 4. Reading session sync works.
 5. Continue Reading behavior still works.
-6. PDF bridge (`/api/koreader/books/{bookId}/pdf-progress`) still works.
+6. PDF progress uses the native progress endpoint and restores the expected page.
 
 ## 4. Metadata Sync Verification
 

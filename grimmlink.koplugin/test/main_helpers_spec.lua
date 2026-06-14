@@ -176,10 +176,10 @@ local function newDb()
         return true
     end
 
-    function db:upsertPendingProgress(file_hash, payload_json, kind)
+    function db:upsertPendingProgress(file_hash, payload_json)
         local existing
         for _, item in ipairs(self.pending_progress) do
-            if item.file_hash == file_hash and item.kind == (kind or "native") then
+            if item.file_hash == file_hash and item.kind == "native" then
                 existing = item
                 break
             end
@@ -193,7 +193,7 @@ local function newDb()
         self.pending_progress[#self.pending_progress + 1] = {
             id = #self.pending_progress + 1,
             file_hash = file_hash,
-            kind = kind or "native",
+            kind = "native",
             payload_json = payload_json,
             retry_count = 0,
             last_retry_at = nil,
@@ -1001,17 +1001,19 @@ describe("GrimmLink helper methods", function()
             currentPage = 20,
             totalPages = 100,
             timestamp = 200,
-        }, "native")
+        })
         local second = plugin:showProgressConflictDialog("hash-dialog", local_snapshot, {
             percentage = 30,
             currentPage = 30,
             totalPages = 100,
             timestamp = 300,
-        }, "pdf")
+        })
 
         assert.are.equal(first, UIManager.getLastClosed())
         assert.are.equal(second, plugin._progress_conflict_dialog)
         assert.are.equal(second, UIManager.getLastShown())
+        assert.are.equal("Keep Local", second.buttons[1][1].text)
+        assert.are.equal("Use Remote", second.buttons[1][2].text)
 
         second.buttons[1][3].callback()
         assert.is_nil(plugin._progress_conflict_dialog)
@@ -1080,6 +1082,33 @@ describe("GrimmLink helper methods", function()
 
         assert.is_false(applied)
         assert.are.equal("No KOReader-native location available for this book.", plugin._last_progress_apply_error)
+    end)
+
+    it("applies remote PDF progress using the native page first", function()
+        local plugin = newPlugin()
+        local page_jump = nil
+        local location_jump = nil
+        plugin.jumpToPage = function(_, page)
+            page_jump = page
+            return true
+        end
+        plugin.jumpToLocation = function(_, location)
+            location_jump = location
+            return true
+        end
+
+        local applied = plugin:applyRemoteProgress({
+            fileFormat = "PDF",
+            progress = "42",
+            location = "42",
+            percentage = 42,
+            currentPage = 42,
+            totalPages = 100,
+        })
+
+        assert.is_true(applied)
+        assert.are.equal(42, page_jump)
+        assert.is_nil(location_jump)
     end)
 
     it("queues native progress while offline and replays it later", function()
@@ -1409,29 +1438,6 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(0, full_sync_calls)
         assert.are.equal(1, scheduled_sync_calls)
         assert.are.equal(1, #plugin.db.pending_progress)
-    end)
-
-    it("discards legacy PDF bridge queue entries without sending them", function()
-        local plugin = newPlugin()
-        plugin.db.pending_progress = {
-            {
-                id = 1,
-                file_hash = "hash-6",
-                kind = "pdf_bridge",
-                payload_json = '{"bookHash":"hash-6","bookId":31}',
-                retry_count = 0,
-            },
-        }
-        local update_calls = 0
-        plugin.api.updateProgress = function()
-            update_calls = update_calls + 1
-            return true, {}, 200
-        end
-        local synced, failed = plugin:syncPendingProgress(true)
-        assert.are.equal(0, synced)
-        assert.are.equal(0, failed)
-        assert.are.equal(0, update_calls)
-        assert.are.equal(0, #plugin.db.pending_progress)
     end)
 
     it("uses bookType when batching reading sessions", function()

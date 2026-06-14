@@ -19,8 +19,7 @@
 - [ ] Shelf Sync safety rules remain intact
 - [ ] annotation merge safety remains intact
 - [ ] auto-update still uses `0xstillb/grimmlink` only
-- [ ] Web Reader Bridge is present but default OFF
-- [ ] EPUB CFI conversion is present but default OFF
+- [ ] PDF progress uses the native progress sync path
 
 ## Safety
 
@@ -30,8 +29,7 @@
 - [ ] no user settings/database/cache are deleted by the updater
 - [ ] no downloaded books are deleted by the updater
 - [ ] no `.sdr` files are deleted by the updater by default
-- [ ] bridge failure never blocks reading
-- [ ] failed CFI conversion falls back safely
+- [ ] progress sync failure never blocks reading
 
 ## CI Gate
 
@@ -52,5 +50,5 @@
 ## Known Limitations
 
 - real KOReader runtime validation is still required on device
-- EPUB CFI conversion is best-effort, not guaranteed exact
+- cross-reader progress may resolve to a nearby chapter or page rather than an exact visual position
 - local development may rely on CI for Lua syntax/runtime checks when Lua tooling is unavailable

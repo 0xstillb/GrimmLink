@@ -483,6 +483,9 @@ function Database:repairSchema()
         return false
     end
     self:_migrateShelfSyncSeriesColumns()
+    if not self:_exec("DELETE FROM pending_progress WHERE kind <> 'native'") then
+        return false
+    end
     self:_resetSchemaCache()
     return true
 end
@@ -1117,10 +1120,10 @@ function Database:deletePendingProgressByHash(file_hash)
     return ok
 end
 
-function Database:upsertPendingProgress(file_hash, payload_json, kind)
+function Database:upsertPendingProgress(file_hash, payload_json)
     local sql = [[
         INSERT INTO pending_progress (file_hash, kind, payload_json, retry_count, created_at, last_retry_at)
-        VALUES (?, ?, ?, 0, ?, NULL)
+        VALUES (?, 'native', ?, 0, ?, NULL)
         ON CONFLICT(file_hash, kind) DO UPDATE SET
             payload_json = excluded.payload_json,
             retry_count = 0,
@@ -1131,7 +1134,7 @@ function Database:upsertPendingProgress(file_hash, payload_json, kind)
     if not stmt then
         return false
     end
-    stmt:bind(file_hash, kind or "native", payload_json, nowEpoch())
+    stmt:bind(file_hash, payload_json, nowEpoch())
     local ok = stmt:step() == SQ3.DONE
     stmt:close()
     return ok
@@ -1141,17 +1144,17 @@ local function mapPendingProgressRow(row)
     return {
         id = row[1],
         file_hash = row[2],
-        kind = row[3],
-        payload_json = row[4],
-        retry_count = row[5],
-        created_at = row[6],
-        last_retry_at = row[7],
+        payload_json = row[3],
+        retry_count = row[4],
+        created_at = row[5],
+        last_retry_at = row[6],
     }
 end
 
 function Database:getPendingProgress(limit)
     local stmt = self.conn and self.conn:prepare(
-        "SELECT id, file_hash, kind, payload_json, retry_count, created_at, last_retry_at FROM pending_progress ORDER BY created_at ASC LIMIT ?"
+        "SELECT id, file_hash, payload_json, retry_count, created_at, last_retry_at " ..
+        "FROM pending_progress WHERE kind = 'native' ORDER BY created_at ASC LIMIT ?"
     )
     if not stmt then
         return {}

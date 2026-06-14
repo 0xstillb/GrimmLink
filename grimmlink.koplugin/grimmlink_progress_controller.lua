@@ -567,8 +567,7 @@ function Grimmlink:documentHasPages()
     return self.ui and self.ui.paging ~= nil or false
 end
 
-function Grimmlink:applyRemoteProgress(remote_snapshot, opts)
-    opts = opts or {}
+function Grimmlink:applyRemoteProgress(remote_snapshot)
     if not remote_snapshot then
         return false
     end
@@ -596,9 +595,7 @@ function Grimmlink:applyRemoteProgress(remote_snapshot, opts)
     end
 
     local target_page = self:getRemotePageTarget(remote_snapshot)
-    local prefer_page = opts.prefer_page == true or file_format == "PDF"
-
-    if prefer_page and target_page and self:jumpToPage(target_page) then
+    if file_format == "PDF" and target_page and self:jumpToPage(target_page) then
         return true
     end
 
@@ -630,10 +627,7 @@ function Grimmlink:progressLabel(snapshot)
     return T(_("%1, page %2"), percent, page)
 end
 
-function Grimmlink:sourceLabel(snapshot, mode)
-    if mode == "pdf" then
-        return _("Grimmory Web Reader")
-    end
+function Grimmlink:sourceLabel(snapshot)
     if snapshot and isNonEmpty(snapshot.source) then
         return snapshot.source
     end
@@ -643,7 +637,7 @@ function Grimmlink:sourceLabel(snapshot, mode)
     return _("KOReader")
 end
 
-function Grimmlink:buildConflictDialogText(local_snapshot, remote_snapshot, mode)
+function Grimmlink:buildConflictDialogText(local_snapshot, remote_snapshot)
     local local_percent = local_snapshot.percentage and string.format("%.1f%%", local_snapshot.percentage) or _("unknown")
     local remote_percent = remote_snapshot.percentage and string.format("%.1f%%", remote_snapshot.percentage) or _("unknown")
     local local_page = local_snapshot.currentPage and local_snapshot.totalPages
@@ -652,13 +646,8 @@ function Grimmlink:buildConflictDialogText(local_snapshot, remote_snapshot, mode
     local remote_page = remote_snapshot.currentPage and remote_snapshot.totalPages
         and string.format("%s / %s", remote_snapshot.currentPage, remote_snapshot.totalPages)
         or _("unknown")
-    local remote_heading = mode == "pdf" and _("Web Reader:") or _("Remote:")
-    local title = mode == "pdf"
-        and _("Found newer Web Reader page")
-        or _("Found different reading positions")
-
     return table.concat({
-        title,
+        _("Found different reading positions"),
         "",
         _("Local:"),
         T(_("- progress: %1"), local_percent),
@@ -666,15 +655,15 @@ function Grimmlink:buildConflictDialogText(local_snapshot, remote_snapshot, mode
         T(_("- updated: %1"), formatTimestamp(local_snapshot.timestamp)),
         T(_("- device: %1"), local_snapshot.device or _("unknown")),
         "",
-        remote_heading,
+        _("Remote:"),
         T(_("- progress: %1"), remote_percent),
         T(_("- page: %1"), remote_page),
         T(_("- updated: %1"), formatTimestamp(remote_snapshot.timestamp)),
-        T(_("- source: %1"), self:sourceLabel(remote_snapshot, mode)),
+        T(_("- source: %1"), self:sourceLabel(remote_snapshot)),
     }, "\n")
 end
 
-function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, mode)
+function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot)
     if self._progress_conflict_dialog then
         pcall(UIManager.close, UIManager, self._progress_conflict_dialog)
         self._progress_conflict_dialog = nil
@@ -689,13 +678,11 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
             self._progress_conflict_dialog = nil
         end
     end
-    local use_remote_text = mode == "pdf" and _("Use Web Reader page") or _("Use Remote")
-    local keep_local_text = mode == "pdf" and _("Keep KOReader position") or _("Keep Local")
     local remote_action = function()
         close_dialog()
-        if self:applyRemoteProgress(remote_snapshot, { prefer_page = mode == "pdf" }) then
-            self:rememberRemoteSnapshot(file_hash, remote_snapshot, mode == "pdf" and "pdf-remote-use" or "remote-use")
-            self:rememberLocalSnapshot(file_hash, remote_snapshot, mode == "pdf" and "pdf-remote-use" or "remote-use")
+        if self:applyRemoteProgress(remote_snapshot) then
+            self:rememberRemoteSnapshot(file_hash, remote_snapshot, "remote-use")
+            self:rememberLocalSnapshot(file_hash, remote_snapshot, "remote-use")
         else
             local message = self._last_progress_apply_error or _("Failed to jump to remote position")
             self._last_progress_apply_error = nil
@@ -704,22 +691,22 @@ function Grimmlink:showProgressConflictDialog(file_hash, local_snapshot, remote_
     end
     local local_action = function()
         close_dialog()
-        self:rememberLocalSnapshot(file_hash, local_snapshot, mode == "pdf" and "pdf-keep-local" or "keep-local")
+        self:rememberLocalSnapshot(file_hash, local_snapshot, "keep-local")
     end
     local ignore_action = function()
         close_dialog()
     end
 
     dialog = ButtonDialog:new{
-        title = self:buildConflictDialogText(local_snapshot, remote_snapshot, mode),
+        title = self:buildConflictDialogText(local_snapshot, remote_snapshot),
         buttons = {
             {
                 {
-                    text = keep_local_text,
+                    text = _("Keep Local"),
                     callback = local_action,
                 },
                 {
-                    text = use_remote_text,
+                    text = _("Use Remote"),
                     callback = remote_action,
                 },
                 {
@@ -771,24 +758,10 @@ function Grimmlink:prepareNativeProgressPayload(snapshot)
         timestamp = snapshot.timestamp,
     }
     self:applyFormatProgressPolicy(payload)
-    return {
-        document = payload.document,
-        bookHash = payload.bookHash,
-        bookId = payload.bookId,
-        bookFileId = payload.bookFileId,
-        fileFormat = payload.fileFormat,
-        progress = payload.progress,
-        location = payload.location,
-        percentage = payload.percentage,
-        currentPage = payload.currentPage,
-        totalPages = payload.totalPages,
-        device = payload.device,
-        deviceId = payload.deviceId,
-        timestamp = payload.timestamp,
-    }
+    return payload
 end
 
-function Grimmlink:queueProgressSnapshot(snapshot, kind, payload)
+function Grimmlink:queueProgressSnapshot(snapshot, payload)
     if not self.db or not self.offline_queue_enabled or not snapshot or not snapshot.bookHash then
         return false
     end
@@ -802,7 +775,7 @@ function Grimmlink:queueProgressSnapshot(snapshot, kind, payload)
         end
         encoded = json_payload
     end
-    self.db:upsertPendingProgress(snapshot.bookHash, encoded, kind or "native")
+    self.db:upsertPendingProgress(snapshot.bookHash, encoded)
     return true
 end
 
@@ -818,14 +791,14 @@ function Grimmlink:pushProgressSnapshot(snapshot, reason, silent)
     end
 
     if not self:isApiReady({ "updateProgress" }) then
-        self:queueProgressSnapshot(snapshot, "native", self:prepareNativeProgressPayload(snapshot))
+        self:queueProgressSnapshot(snapshot, self:prepareNativeProgressPayload(snapshot))
         return false
     end
     if not self:refreshApiClient() then
         return false
     end
     if not self:isOnline() then
-        self:queueProgressSnapshot(snapshot, "native", self:prepareNativeProgressPayload(snapshot))
+        self:queueProgressSnapshot(snapshot, self:prepareNativeProgressPayload(snapshot))
         if not silent then
             self:showMessage(_("Saved progress to offline queue"), 2)
         end
@@ -852,7 +825,7 @@ function Grimmlink:pushProgressSnapshot(snapshot, reason, silent)
         return false
     end
 
-    self:queueProgressSnapshot(snapshot, "native", payload)
+    self:queueProgressSnapshot(snapshot, payload)
     if not silent then
         self:showMessage(T(_("Progress sync failed:\n%1"), safeToString(response)), 4)
     end
@@ -897,53 +870,49 @@ function Grimmlink:syncPendingProgress(silent, limit)
             end
 
             if can_try then
-                if item.kind == "pdf_bridge" then
+                local ok, payload = pcall(json.decode, item.payload_json)
+                if not ok or type(payload) ~= "table" then
                     self.db:deletePendingProgress(item.id)
+                    failed = failed + 1
                 else
-                    local ok, payload = pcall(json.decode, item.payload_json)
-                    if not ok or type(payload) ~= "table" then
-                        self.db:deletePendingProgress(item.id)
-                        failed = failed + 1
-                    else
-                        local success, response, code = self.api:updateProgress(payload)
+                    local success, response, code = self.api:updateProgress(payload)
 
-                        if success then
+                    if success then
+                        self.db:deletePendingProgress(item.id)
+                        synced = synced + 1
+                        self:rememberLocalSnapshot(item.file_hash, {
+                            file_path = payload.file_path,
+                            bookId = payload.bookId,
+                            document = payload.document,
+                            bookType = payload.bookType or payload.fileFormat,
+                            progress = payload.progress,
+                            location = payload.location,
+                            percentage = normalizePercent(payload.percentage),
+                            currentPage = payload.currentPage,
+                            totalPages = payload.totalPages,
+                            timestamp = payload.timestamp or nowUtc(),
+                        }, "queued-progress-pushed")
+                        self:rememberRemoteSnapshot(item.file_hash, {
+                            bookId = payload.bookId,
+                            document = payload.document,
+                            bookType = payload.bookType or payload.fileFormat,
+                            progress = payload.progress,
+                            location = payload.location,
+                            percentage = normalizePercent(payload.percentage),
+                            currentPage = payload.currentPage,
+                            totalPages = payload.totalPages,
+                            device = payload.device,
+                            deviceId = payload.deviceId or payload.device_id,
+                            timestamp = payload.timestamp or nowUtc(),
+                        }, "queued-progress-pushed")
+                    else
+                        local _, api_error_class = self:classifyApiOutcome(code, response)
+                        if api_error_class == "permanent_not_found" or api_error_class == "permanent_invalid" then
                             self.db:deletePendingProgress(item.id)
-                            synced = synced + 1
-                            self:rememberLocalSnapshot(item.file_hash, {
-                                file_path = payload.file_path,
-                                bookId = payload.bookId,
-                                document = payload.document,
-                                bookType = payload.bookType or payload.fileFormat,
-                                progress = payload.progress,
-                                location = payload.location,
-                                percentage = normalizePercent(payload.percentage),
-                                currentPage = payload.currentPage,
-                                totalPages = payload.totalPages,
-                                timestamp = payload.timestamp or nowUtc(),
-                            }, "queued-progress-pushed")
-                            self:rememberRemoteSnapshot(item.file_hash, {
-                                bookId = payload.bookId,
-                                document = payload.document,
-                                bookType = payload.bookType or payload.fileFormat,
-                                progress = payload.progress,
-                                location = payload.location,
-                                percentage = normalizePercent(payload.percentage),
-                                currentPage = payload.currentPage,
-                                totalPages = payload.totalPages,
-                                device = payload.device,
-                                deviceId = payload.deviceId or payload.device_id,
-                                timestamp = payload.timestamp or nowUtc(),
-                            }, "queued-progress-pushed")
                         else
-                            local _, api_error_class = self:classifyApiOutcome(code, response)
-                            if api_error_class == "permanent_not_found" or api_error_class == "permanent_invalid" then
-                                self.db:deletePendingProgress(item.id)
-                            else
-                                self.db:incrementPendingProgressRetry(item.id)
-                            end
-                            failed = failed + 1
+                            self.db:incrementPendingProgressRetry(item.id)
                         end
+                        failed = failed + 1
                     end
                 end
             end
@@ -1110,7 +1079,7 @@ function Grimmlink:maybePullRemoteProgress(file_hash, file_path, book_id, book_f
 
     local decision = self:compareOpenProgress(comparison_local, remote_snapshot, state)
     if decision == "remote_newer" or decision == "conflict" then
-        self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, "native")
+        self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot)
     elseif decision == "local_newer" or decision == "same" then
         return
     end
@@ -1175,7 +1144,7 @@ function Grimmlink:manualPullProgress()
 
     local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id, book_file_id)
 
-    self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, "native")
+    self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot)
 end
 
 function Grimmlink:resolveCurrentDocumentBookId(preferred_book_id)

@@ -8,6 +8,7 @@
 - Made manual remote metadata pulls resolve the open/current book instead of sweeping cached books, using the existing `GET /api/grimmlink/v1/syncs/metadata` endpoint.
 - Moved manual metadata pulls to a background curl/wget request with staged progress, duplicate-run protection, and guarded request/apply errors so slow networks do not block or crash the KOReader UI.
 - Removed the PDF Web Reader bridge and now use native GrimmLink progress as the single sync path for every supported format, including PDFs.
+- Simplified native progress queueing and conflict dialogs after removing the bridge, and discard unsupported legacy progress queue rows during database repair.
 - Prevented duplicate remote-jump prompts by replacing any stale conflict dialog before showing another.
 - Scoped metadata cursors per server, user, book, and metadata type, and only advance them after a successful pull/apply pass.
 - Added clear metadata pull outcomes for missing book context, authentication, connectivity, missing/forbidden books, malformed responses, empty results, and applied/skipped counts.

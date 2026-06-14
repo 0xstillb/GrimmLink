@@ -15,15 +15,13 @@ The supported stable scope includes:
 - Grimmory Server URL, Username, and Password configuration
 - internal `x-auth-user` and `x-auth-key` generation
 - hash-based book matching
-- KOReader-native progress pull/push
+- KOReader-native progress pull/push for EPUB, PDF, and other supported formats
 - reading session upload and offline replay
 - Shelf Sync with tracked-download safety rules
-- PDF-only Web Reader Bridge
 - opt-in auto-update
 
 ## Required Safe Defaults
 
-- `pdf_web_reader_bridge_enabled = false`
 - `two_way_shelf_delete_sync = false`
 - `delete_sdr_on_book_delete = false`
 - `auto_update_enabled = false`
@@ -37,7 +35,6 @@ Active endpoint families:
 - `/api/grimmlink/v1/books/by-hash/{bookHash}`
 - `/api/grimmlink/v1/syncs/progress/{bookHash}`
 - `/api/grimmlink/v1/syncs/progress`
-- `/api/grimmlink/v1/books/{bookId}/pdf-progress`
 - `/api/grimmlink/v1/reading-sessions`
 - `/api/grimmlink/v1/reading-sessions/batch`
 - `/api/grimmlink/v1/syncs/metadata`
@@ -51,17 +48,13 @@ Active endpoint families:
 - no Grimmory book records are deleted
 - local Shelf Sync deletion only targets GrimmLink-tracked downloads
 - `.sdr` deletion stays optional and default OFF
-- native KOReader sync remains independent of the PDF Web Reader Bridge
-- PDF Web Reader Bridge stays optional and default OFF
+- all reading progress uses the native GrimmLink progress contract
 - remote progress is never applied silently
-- EPUB Web Reader Bridge is intentionally out of scope
 
 ## Out Of Scope
 
-- EPUB CFI conversion
-- `/api/grimmlink/v1/books/{bookId}/cfi/resolve`
-- `/api/grimmlink/v1/books/{bookId}/web-progress`
-- any automatic EPUB Web Reader Bridge flow
+- dedicated Web Reader progress endpoints
+- automatic Web Reader progress flows
 - new major sync features
 - library delete behavior
 - book-record delete behavior

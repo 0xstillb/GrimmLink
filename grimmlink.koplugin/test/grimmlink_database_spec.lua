@@ -96,6 +96,7 @@ describe("GrimmLink database helpers", function()
         assert.is_true(joined:find("synced_metadata_items", 1, true) ~= nil)
         assert.is_true(joined:find("book_tracking_state", 1, true) ~= nil)
         assert.is_true(joined:find("historical_import_sessions", 1, true) ~= nil)
+        assert.is_true(joined:find("DELETE FROM pending_progress WHERE kind <> 'native'", 1, true) ~= nil)
     end)
 
     it("returns false when shelf sync schema migration fails", function()
@@ -238,6 +239,62 @@ describe("GrimmLink database helpers", function()
         assert.is_true(db:deletePendingMetadataByFileHash("hash-1"))
         assert.is_true(db:clearSyncedMetadataHistory())
         assert.is_true(db:clearSyncedMetadataHistoryForFileHash("hash-1"))
+    end)
+
+    it("stores and reads only native pending progress", function()
+        local prepared_sql = {}
+        local bound_values = {}
+
+        local function stmtFor(sql)
+            prepared_sql[#prepared_sql + 1] = sql
+            local stmt = {}
+            function stmt:bind(...)
+                bound_values[sql] = { ... }
+            end
+            function stmt:step()
+                return 101
+            end
+            function stmt:rows()
+                local emitted = false
+                return function()
+                    if emitted then return nil end
+                    emitted = true
+                    return { 1, "hash-1", "{\"percentage\":42}", 0, 100, nil }
+                end
+            end
+            function stmt:close() end
+            return stmt
+        end
+
+        local db = setmetatable({
+            conn = {
+                prepare = function(_, sql)
+                    return stmtFor(sql)
+                end,
+            },
+        }, { __index = Database })
+
+        assert.is_true(db:upsertPendingProgress("hash-1", "{\"percentage\":42}"))
+        local rows = db:getPendingProgress(10)
+
+        local joined = table.concat(prepared_sql, "\n")
+        assert.is_true(joined:find("VALUES (?, 'native', ?, 0, ?, NULL)", 1, true) ~= nil)
+        assert.is_true(joined:find("WHERE kind = 'native'", 1, true) ~= nil)
+        assert.are.equal("hash-1", rows[1].file_hash)
+        assert.are.equal("{\"percentage\":42}", rows[1].payload_json)
+
+        local insert_sql
+        for sql in pairs(bound_values) do
+            if sql:find("INSERT INTO pending_progress", 1, true) then
+                insert_sql = sql
+                break
+            end
+        end
+        assert.is_not_nil(insert_sql)
+        assert.are.same({ "hash-1", "{\"percentage\":42}" }, {
+            bound_values[insert_sql][1],
+            bound_values[insert_sql][2],
+        })
     end)
 
     it("supports shelf maintenance counters and clear helpers", function()

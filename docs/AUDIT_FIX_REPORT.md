@@ -1,5 +1,7 @@
 # GrimmLink Audit-Fix Report
 
+> Historical report: bridge-related changes describe an older implementation and are not the current plugin contract. See `docs/PLUGIN_SCOPE.md`.
+
 Date: 2026-05-01 Asia/Bangkok
 Editor: Claude (Cowork mode)
 Scope: Close all findings raised in `AUDIT_REPORT.md` (F-1, F-2, F-3). All three were Low severity; no blockers.

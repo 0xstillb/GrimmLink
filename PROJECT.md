@@ -95,8 +95,6 @@ Known caveat:
 - `POST /api/grimmlink/v1/shelves/{id}/books/{bookId}/remove` (fallback path)
 - `GET /api/grimmlink/v1/books/read-statuses`
 - `PUT /api/grimmlink/v1/books/{bookId}/status`
-- `GET /api/grimmlink/v1/books/{bookId}/pdf-progress`
-- `PUT /api/grimmlink/v1/books/{bookId}/pdf-progress`
 
 ## High-Level Module Map
 

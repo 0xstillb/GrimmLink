@@ -186,7 +186,7 @@ function Grimmlink:endSession(options)
         local reason = options.reason or "close"
         if reason == "close" or reason == "suspend" or reason == "exit" then
             local native_payload = self:prepareNativeProgressPayload(end_snapshot)
-            local queued = self:queueProgressSnapshot(end_snapshot, "native", native_payload)
+            local queued = self:queueProgressSnapshot(end_snapshot, native_payload)
             if not queued then
                 self:pushProgressSnapshot(end_snapshot, reason, true)
             end
