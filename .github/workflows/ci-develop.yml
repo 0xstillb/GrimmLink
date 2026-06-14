@@ -148,11 +148,21 @@ jobs:
             sleep 2
           done
 
-      - name: Run integration tests
+      - name: Run integration smoke test
+        run: |
+          # Verify grimmory API responds
+          curl -sf http://localhost:6060/actuator/health | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='UP', f'Not UP: {d}'"
+          echo "Grimmory health check passed"
+
+          # Smoke test: API client can connect
+          curl -sf http://localhost:6060/api/v1/books?limit=1 > /dev/null
+          echo "API v1 reachable"
+
+      - name: Run tests (with live grimmory)
         run: |
           export GRIMMORY_BASE_URL=http://localhost:6060
           cd grimmlink.koplugin
-          busted --tags=integration test/
+          busted test/
 
   package:
     name: Package & Notarize
