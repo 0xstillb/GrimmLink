@@ -94,6 +94,9 @@ describe("grimmlink_menu_actions", function()
         local plugin = {
             showReadingCompletionMenu = function() called.completion = true end,
             manualPullProgress = function() called.pull = true end,
+            pullRemoteMetadataNow = function(_, silent, limit)
+                called.metadata = silent == false and limit == 100
+            end,
             showManualReadStatusMenu = function() called.status = true end,
             showMessage = function() called.summary = true end,
             db = {
@@ -122,6 +125,7 @@ describe("grimmlink_menu_actions", function()
             "sync_pending_now",
             "reading_completion",
             "pull_remote_progress",
+            "pull_remote_metadata",
             "manual_reading_status",
             "sync_summary",
         }, ids)
@@ -130,8 +134,10 @@ describe("grimmlink_menu_actions", function()
         sub_items[4].callback()
         sub_items[5].callback()
         sub_items[6].callback()
+        sub_items[7].callback()
         assert.is_true(called.completion == true)
         assert.is_true(called.pull == true)
+        assert.is_true(called.metadata == true)
         assert.is_true(called.status == true)
         assert.is_true(called.summary == true)
     end)
