@@ -788,32 +788,6 @@ function Grimmlink:prepareNativeProgressPayload(snapshot)
     }
 end
 
-function Grimmlink:preparePdfBridgePayload(snapshot, opts)
-    opts = opts or {}
-    local payload = {
-        bookHash = snapshot.bookHash,
-        bookFileId = snapshot.bookFileId,
-        fileFormat = "PDF",
-        currentPage = snapshot.currentPage,
-        totalPages = snapshot.totalPages,
-        percentage = snapshot.percentage,
-        rawKoreaderLocation = snapshot.location,
-        rawKoreaderProgress = snapshot.progress,
-        source = "KOReader",
-        device = snapshot.device,
-        deviceId = snapshot.deviceId,
-        timestamp = snapshot.timestamp,
-    }
-    if opts.expectedUpdatedAt then
-        payload.expectedUpdatedAt = opts.expectedUpdatedAt
-    end
-    if opts.force ~= nil then
-        payload.force = opts.force
-    end
-    return payload
-end
-
-
 function Grimmlink:queueProgressSnapshot(snapshot, kind, payload)
     if not self.db or not self.offline_queue_enabled or not snapshot or not snapshot.bookHash then
         return false
@@ -885,71 +859,6 @@ function Grimmlink:pushProgressSnapshot(snapshot, reason, silent)
     return false
 end
 
-function Grimmlink:pushPdfWebProgress(snapshot, reason, silent)
-    if not snapshot or not snapshot.bookHash or not snapshot.bookId then
-        return false
-    end
-    if not self:isTrackingEnabled(snapshot.bookHash, snapshot.file_path) then
-        if not silent then
-            self:showTrackingDisabledMessage()
-        end
-        return false
-    end
-    if not self:isPdfWebReaderBridgeEnabled() then
-        return false
-    end
-    if snapshot.fileFormat ~= "PDF" then
-        return false
-    end
-
-    if not self:isApiReady({ "updatePdfProgress" }) then
-        self:queueProgressSnapshot(snapshot, "pdf_bridge", {
-            bookId = snapshot.bookId,
-            bookHash = snapshot.bookHash,
-            request = self:preparePdfBridgePayload(snapshot, {
-                force = reason == "manual" or reason == "close",
-            }),
-        })
-        return false
-    end
-    if not self:refreshApiClient() then
-        return false
-    end
-    local payload = self:preparePdfBridgePayload(snapshot, {
-        force = reason == "manual" or reason == "close",
-    })
-
-    if not self:isOnline() then
-        self:queueProgressSnapshot(snapshot, "pdf_bridge", {
-            bookId = snapshot.bookId,
-            bookHash = snapshot.bookHash,
-            request = payload,
-        })
-        if not silent then
-            self:showMessage(_("Saved PDF bridge progress to offline queue"), 2)
-        end
-        return false
-    end
-
-    local success, response, code = self.api:updatePdfProgress(snapshot.bookId, payload)
-    if success then
-        local normalized = self:normalizeRemoteProgress(response or payload)
-        normalized.source = "WEB_READER"
-        self:rememberRemoteSnapshot(snapshot.bookHash, normalized, reason or "pdf-bridge-push")
-        return true
-    end
-
-    local _, api_error_class = self:classifyApiOutcome(code, response)
-    self:logWarn("GrimmLink PDF bridge push failed:", response)
-    if api_error_class ~= "permanent_not_found" and api_error_class ~= "permanent_invalid" then
-        self:queueProgressSnapshot(snapshot, "pdf_bridge", payload)
-    end
-    if not silent then
-        self:showMessage(T(_("PDF bridge sync failed:\n%1"), safeToString(response)), 4)
-    end
-    return false
-end
-
 function Grimmlink:syncPendingProgress(silent, limit)
     local synced = 0
     local failed = 0
@@ -960,7 +869,7 @@ function Grimmlink:syncPendingProgress(silent, limit)
         return synced, failed
     end
 
-    if not self:isApiReady({ "updateProgress", "updatePdfProgress" }) then
+    if not self:isApiReady({ "updateProgress" }) then
         return synced, failed
     end
     if not self:refreshApiClient() then
@@ -988,39 +897,19 @@ function Grimmlink:syncPendingProgress(silent, limit)
             end
 
             if can_try then
-                local ok, payload = pcall(json.decode, item.payload_json)
-                if not ok or type(payload) ~= "table" then
+                if item.kind == "pdf_bridge" then
                     self.db:deletePendingProgress(item.id)
-                    failed = failed + 1
                 else
-                    local success, response, code
-                    if item.kind == "pdf_bridge" then
-                        local request_payload = payload.request or payload
-                        local book_id = payload.bookId or request_payload.bookId
-                        if not book_id and (payload.bookHash or request_payload.bookHash) then
-                            local matched = self:resolveBookByHash(nil, payload.bookHash or request_payload.bookHash, true)
-                            book_id = matched and matched.book_id or nil
-                        end
-                        if book_id then
-                            success, response, code = self.api:updatePdfProgress(book_id, request_payload)
-                        else
-                            success = false
-                            response = "Book ID not resolved"
-                            code = 400
-                        end
-                    else
-                        success, response, code = self.api:updateProgress(payload)
-                    end
-
-                    if success then
+                    local ok, payload = pcall(json.decode, item.payload_json)
+                    if not ok or type(payload) ~= "table" then
                         self.db:deletePendingProgress(item.id)
-                        synced = synced + 1
-                        if item.kind == "pdf_bridge" then
-                            local request_payload = payload.request or payload
-                            local normalized = self:normalizeRemoteProgress(request_payload)
-                            normalized.source = "WEB_READER"
-                            self:rememberRemoteSnapshot(item.file_hash, normalized, "queued-pdf-bridge-pushed")
-                        else
+                        failed = failed + 1
+                    else
+                        local success, response, code = self.api:updateProgress(payload)
+
+                        if success then
+                            self.db:deletePendingProgress(item.id)
+                            synced = synced + 1
                             self:rememberLocalSnapshot(item.file_hash, {
                                 file_path = payload.file_path,
                                 bookId = payload.bookId,
@@ -1046,15 +935,15 @@ function Grimmlink:syncPendingProgress(silent, limit)
                                 deviceId = payload.deviceId or payload.device_id,
                                 timestamp = payload.timestamp or nowUtc(),
                             }, "queued-progress-pushed")
-                        end
-                    else
-                        local _, api_error_class = self:classifyApiOutcome(code, response)
-                        if api_error_class == "permanent_not_found" or api_error_class == "permanent_invalid" then
-                            self.db:deletePendingProgress(item.id)
                         else
-                            self.db:incrementPendingProgressRetry(item.id)
+                            local _, api_error_class = self:classifyApiOutcome(code, response)
+                            if api_error_class == "permanent_not_found" or api_error_class == "permanent_invalid" then
+                                self.db:deletePendingProgress(item.id)
+                            else
+                                self.db:incrementPendingProgressRetry(item.id)
+                            end
+                            failed = failed + 1
                         end
-                        failed = failed + 1
                     end
                 end
             end
@@ -1289,77 +1178,6 @@ function Grimmlink:manualPullProgress()
     self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, "native")
 end
 
-function Grimmlink:maybePullPdfWebProgress(file_hash, file_path, book_id, book_file_id, silent)
-    if not self.db or not self:isPdfWebReaderBridgeEnabled() or not file_hash or file_hash == "" or not book_id then
-        return
-    end
-    if not self:isTrackingEnabled(file_hash, file_path) then
-        return
-    end
-    local normalized_book_id = maybeNumber(book_id) or book_id
-    if not normalized_book_id then
-        return
-    end
-    if self:getBookType(file_path) ~= "PDF" then
-        return
-    end
-    if not self:isOnline() then
-        return
-    end
-
-    if not self:isApiReady({ "getPdfProgress" }) or not self:refreshApiClient() then
-        return
-    end
-    local state = self.db:getProgressState(file_hash)
-    local local_snapshot = self:getCurrentProgressSnapshot(file_hash, file_path, book_id, book_file_id)
-    local success, remote, code = self.api:getPdfProgress(normalized_book_id)
-    if not success then
-        local _, api_error_class = self:classifyApiOutcome(code, remote)
-        if not silent and api_error_class ~= "permanent_not_found" then
-            self:showMessage(T(_("PDF bridge fetch failed:\n%1"), safeToString(remote)), 4)
-        end
-        return
-    end
-
-    local remote_snapshot = self:normalizeRemoteProgress(remote)
-    if remote_snapshot then
-        remote_snapshot.bookHash = file_hash
-        remote_snapshot.bookId = normalized_book_id
-        remote_snapshot.bookFileId = remote_snapshot.bookFileId or book_file_id
-        remote_snapshot.fileFormat = "PDF"
-        remote_snapshot.document = remote_snapshot.document or file_hash
-        remote_snapshot.file_path = file_path
-        remote_snapshot.source = remote_snapshot.source or "WEB_READER"
-    end
-
-    local decision = self:compareOpenProgress(local_snapshot, remote_snapshot, state)
-    if decision == "remote_newer" or decision == "conflict" then
-        self:showProgressConflictDialog(file_hash, local_snapshot, remote_snapshot, "pdf")
-    end
-end
-
-
-function Grimmlink:isPdfWebReaderBridgeEnabled()
-    return self.enabled == true and self.pdf_web_reader_bridge_enabled == true
-end
-
-function Grimmlink:syncPdfWebProgress(silent)
-    if not self:isPdfWebReaderBridgeEnabled() or not self.current_session then
-        return false
-    end
-
-    local snapshot = self:getCurrentProgressSnapshot(
-        self.current_session.file_hash,
-        self.current_session.file_path,
-        self.current_session.book_id,
-        self.current_session.book_file_id
-    )
-    if snapshot and snapshot.fileFormat == "PDF" then
-        return self:pushPdfWebProgress(snapshot, "manual", silent)
-    end
-    return false
-end
-
 function Grimmlink:resolveCurrentDocumentBookId(preferred_book_id)
     if preferred_book_id then
         return maybeNumber(preferred_book_id) or preferred_book_id
@@ -1374,22 +1192,6 @@ function Grimmlink:resolveCurrentDocumentBookId(preferred_book_id)
         end
     end
     return nil
-end
-
-function Grimmlink:pushPdfWebProgressForCurrentDocument(reason, silent)
-    if not self.current_session then
-        return false
-    end
-    local snapshot = self:getCurrentProgressSnapshot(
-        self.current_session.file_hash,
-        self.current_session.file_path,
-        self.current_session.book_id,
-        self.current_session.book_file_id
-    )
-    if not snapshot or snapshot.fileFormat ~= "PDF" then
-        return false
-    end
-    return self:pushPdfWebProgress(snapshot, reason or "manual", silent)
 end
 
 end

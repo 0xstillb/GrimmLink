@@ -88,13 +88,7 @@ function Grimmlink:startSession()
             return
         end
         self:invokeSafely("session open sync", function()
-            local use_pdf_bridge = self:getBookType(file_path) == "PDF"
-                and self:isPdfWebReaderBridgeEnabled()
-            if use_pdf_bridge then
-                self:maybePullPdfWebProgress(file_hash, file_path, book_id, book_file_id, true)
-            else
-                self:maybePullRemoteProgress(file_hash, file_path, book_id, book_file_id, true)
-            end
+            self:maybePullRemoteProgress(file_hash, file_path, book_id, book_file_id, true)
             if self:isOnline() then
                 self:schedulePendingSync("session open pending sync", 0.75, {
                     progress_limit = 10,
@@ -196,23 +190,8 @@ function Grimmlink:endSession(options)
             if not queued then
                 self:pushProgressSnapshot(end_snapshot, reason, true)
             end
-
-            if self:isPdfWebReaderBridgeEnabled() and end_snapshot.fileFormat == "PDF" and end_snapshot.bookId then
-                local bridge_payload = self:preparePdfBridgePayload(end_snapshot, {
-                    force = reason == "close" or reason == "exit",
-                })
-                local bridge_queued = self:queueProgressSnapshot(end_snapshot, "pdf_bridge", {
-                    bookId = end_snapshot.bookId,
-                    bookHash = end_snapshot.bookHash,
-                    request = bridge_payload,
-                })
-                if not bridge_queued then
-                    self:pushPdfWebProgress(end_snapshot, reason, true)
-                end
-            end
         else
             self:pushProgressSnapshot(end_snapshot, reason, true)
-            self:pushPdfWebProgress(end_snapshot, reason, true)
         end
     end
 

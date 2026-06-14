@@ -26,9 +26,6 @@ function M:syncThisBookFromPath(plugin, file_path)
             plugin.current_session.book_file_id
         )
         plugin:pushProgressSnapshot(snapshot, "manual", false)
-        if plugin:isPdfWebReaderBridgeEnabled() then
-            plugin:pushPdfWebProgress(snapshot, "manual", true)
-        end
         plugin:syncPendingNow(false, { progress_limit = 20, session_limit = 50 })
     else
         plugin:showMessage(_("Open the book to sync progress"), 3)

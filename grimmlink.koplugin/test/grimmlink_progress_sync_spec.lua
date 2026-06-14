@@ -35,7 +35,7 @@ describe("grimmlink_progress_sync", function()
     end)
 
     it("pushes current session progress for selected file", function()
-        local calls = { push = 0, pdf = 0, pending = 0 }
+        local calls = { push = 0, pending = 0 }
         local plugin = {
             resolveBookContextByPath = function()
                 return { file_path = "/books/a.epub", file_hash = "h1" }
@@ -53,10 +53,6 @@ describe("grimmlink_progress_sync", function()
             pushProgressSnapshot = function()
                 calls.push = calls.push + 1
             end,
-            isPdfWebReaderBridgeEnabled = function() return true end,
-            pushPdfWebProgress = function()
-                calls.pdf = calls.pdf + 1
-            end,
             syncPendingNow = function()
                 calls.pending = calls.pending + 1
             end,
@@ -66,7 +62,6 @@ describe("grimmlink_progress_sync", function()
 
         progress_sync:syncThisBookFromPath(plugin, "/books/a.epub")
         assert.are.equal(1, calls.push)
-        assert.are.equal(1, calls.pdf)
         assert.are.equal(1, calls.pending)
     end)
 

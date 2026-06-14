@@ -1558,32 +1558,4 @@ function APIClient:updateBookReadStatus(book_id, status)
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
-function APIClient:getPdfProgress(book_id, timeout_sec)
-    local normalized_book_id = normalizeNumericId(book_id)
-    local success, code, response = self:request(
-        "GET",
-        self:_apiPath("/books/" .. normalized_book_id .. "/pdf-progress"),
-        nil,
-        nil,
-        timeout_sec
-    )
-    if success and type(response) == "table" then
-        return true, response, code
-    end
-    return false, response or ("HTTP " .. tostring(code or "?")), code
-end
-
-function APIClient:updatePdfProgress(book_id, progress_payload)
-    local normalized_book_id = normalizeNumericId(book_id)
-    local success, code, response = self:request(
-        "PUT",
-        self:_apiPath("/books/" .. normalized_book_id .. "/pdf-progress"),
-        progress_payload
-    )
-    if success then
-        return true, response, code
-    end
-    return false, response or ("HTTP " .. tostring(code or "?")), code
-end
-
 return APIClient

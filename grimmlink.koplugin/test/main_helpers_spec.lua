@@ -567,16 +567,6 @@ local function newApi()
         return self.next_update_progress.success, self.next_update_progress.response, self.next_update_progress.code
     end
 
-    function api:getPdfProgress(book_id)
-        self.calls[#self.calls + 1] = { name = "getPdfProgress", book_id = book_id }
-        return self.next_pdf.success, self.next_pdf.response, self.next_pdf.code
-    end
-
-    function api:updatePdfProgress(book_id, payload)
-        self.calls[#self.calls + 1] = { name = "updatePdfProgress", book_id = book_id, payload = payload }
-        return self.next_update_pdf.success, self.next_update_pdf.response, self.next_update_pdf.code
-    end
-
     function api:submitSession(payload)
         self.calls[#self.calls + 1] = { name = "submitSession", payload = payload }
         return self.next_session.success, self.next_session.response, self.next_session.code
@@ -678,7 +668,6 @@ local function newPlugin(overrides)
         threshold_minutes = 5,
         threshold_pages = 5,
         session_min_seconds = 30,
-        pdf_web_reader_bridge_enabled = false,
         shelf_sync_enabled = false,
         shelf_id = 9,
         shelf_use_original_filename = true,
@@ -766,13 +755,6 @@ describe("GrimmLink helper methods", function()
         NetworkMgr.getSSID = nil
     end)
 
-    it("keeps the PDF Web Reader Bridge disabled by default", function()
-        local plugin = newPlugin()
-        assert.is_false(plugin:isPdfWebReaderBridgeEnabled())
-        plugin.pdf_web_reader_bridge_enabled = true
-        assert.is_true(plugin:isPdfWebReaderBridgeEnabled())
-    end)
-
     it("builds native EPUB progress payloads without bridge-specific fields or percentage", function()
         local plugin = newPlugin()
         plugin.send_reflowable_percentage = false
@@ -845,34 +827,6 @@ describe("GrimmLink helper methods", function()
 
         assert.are.equal("PDF", payload.fileFormat)
         assert.are.equal(40.0, payload.percentage)
-    end)
-
-    it("builds PDF bridge payloads with page metadata only", function()
-        local plugin = newPlugin({ pdf_web_reader_bridge_enabled = true })
-        local payload = plugin:preparePdfBridgePayload({
-            bookHash = "hash-2",
-            bookFileId = 11,
-            currentPage = 40,
-            totalPages = 120,
-            percentage = 33.3,
-            location = "/p/40",
-            progress = "/p/40",
-            device = "KOReader",
-            deviceId = "device-1",
-            timestamp = 555,
-        }, {
-            force = true,
-        })
-
-        assert.are.equal("hash-2", payload.bookHash)
-        assert.are.equal("PDF", payload.fileFormat)
-        assert.are.equal(40, payload.currentPage)
-        assert.are.equal(120, payload.totalPages)
-        assert.are.equal(33.3, payload.percentage)
-        assert.are.equal("/p/40", payload.rawKoreaderLocation)
-        assert.are.equal("/p/40", payload.rawKoreaderProgress)
-        assert.are.equal("KOReader", payload.source)
-        assert.is_true(payload.force)
     end)
 
     it("formats durations and detects book types", function()
@@ -1032,36 +986,6 @@ describe("GrimmLink helper methods", function()
         assert.is_true(tostring(dialog.title):find("Local:") ~= nil)
         dialog.buttons[1][2].callback()
         assert.are.equal("/remote", jumped_location)
-    end)
-
-    it("presents a PDF bridge prompt before jumping to a newer Web Reader page", function()
-        local plugin = newPlugin({
-            pdf_web_reader_bridge_enabled = true,
-        })
-        local jumped_page = nil
-        plugin.jumpToPage = function(_, page)
-            jumped_page = page
-            return true
-        end
-        plugin.api.next_pdf = {
-            success = true,
-            response = {
-                currentPage = 80,
-                totalPages = 100,
-                percentage = 80,
-                timestamp = 600,
-                source = "WEB_READER",
-            },
-            code = 200,
-        }
-
-        plugin:maybePullPdfWebProgress("hash-4", "/books/demo.pdf", 42, nil, true)
-        assert.are.equal("getPdfProgress", plugin.api.calls[1].name)
-        local dialog = UIManager.getLastShown()
-        assert.is_not_nil(dialog)
-        assert.is_true(tostring(dialog.title):find("Web Reader") ~= nil)
-        dialog.buttons[1][2].callback()
-        assert.are.equal(80, jumped_page)
     end)
 
     it("replaces an existing remote progress prompt instead of stacking dialogs", function()
@@ -1291,57 +1215,8 @@ describe("GrimmLink helper methods", function()
         assert.are.equal("native", plugin.db.pending_progress[1].kind)
     end)
 
-    it("uses only the PDF bridge progress source when opening a PDF with the bridge enabled", function()
-        local plugin = newPlugin({
-            pdf_web_reader_bridge_enabled = true,
-        })
-        plugin.ui.document.file = "/books/demo.pdf"
-        plugin.resolveBookByFilePath = function()
-            return {
-                file_hash = "hash-pdf-open",
-                book_id = 42,
-                book_file_id = 43,
-                title = "Demo PDF",
-            }
-        end
-        plugin.resolveBookByHash = function()
-            return {
-                book_id = 42,
-                bookFileId = 43,
-                title = "Demo PDF",
-            }
-        end
-        plugin.getCurrentProgressSnapshot = function()
-            return {
-                percentage = 10,
-                currentPage = 10,
-                totalPages = 100,
-                timestamp = 100,
-            }
-        end
-        plugin.isTrackingEnabled = function()
-            return true
-        end
-        local native_pulls = 0
-        local pdf_pulls = 0
-        plugin.maybePullRemoteProgress = function()
-            native_pulls = native_pulls + 1
-        end
-        plugin.maybePullPdfWebProgress = function()
-            pdf_pulls = pdf_pulls + 1
-        end
-        plugin.schedulePendingSync = function() end
-
-        plugin:startSession()
-
-        assert.are.equal(0, native_pulls)
-        assert.are.equal(1, pdf_pulls)
-    end)
-
-    it("uses native progress when opening a PDF with the bridge disabled", function()
-        local plugin = newPlugin({
-            pdf_web_reader_bridge_enabled = false,
-        })
+    it("uses native progress when opening a PDF", function()
+        local plugin = newPlugin()
         plugin.ui.document.file = "/books/demo.pdf"
         plugin.resolveBookByFilePath = function()
             return {
@@ -1370,19 +1245,14 @@ describe("GrimmLink helper methods", function()
             return true
         end
         local native_pulls = 0
-        local pdf_pulls = 0
         plugin.maybePullRemoteProgress = function()
             native_pulls = native_pulls + 1
-        end
-        plugin.maybePullPdfWebProgress = function()
-            pdf_pulls = pdf_pulls + 1
         end
         plugin.schedulePendingSync = function() end
 
         plugin:startSession()
 
         assert.are.equal(1, native_pulls)
-        assert.are.equal(0, pdf_pulls)
     end)
 
     it("leaves pending queues untouched when the API client is not ready", function()
@@ -1541,49 +1411,26 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(1, #plugin.db.pending_progress)
     end)
 
-    it("queues PDF bridge progress while offline and replays it later", function()
-        local plugin = newPlugin({
-            pdf_web_reader_bridge_enabled = true,
-        })
-        plugin.isOnline = function()
-            return false
-        end
-
-        local snapshot = {
-            document = "hash-6",
-            bookHash = "hash-6",
-            bookId = 31,
-            bookFileId = 41,
-            fileFormat = "PDF",
-            progress = "41",
-            location = "41",
-            percentage = 41,
-            currentPage = 41,
-            totalPages = 100,
-            device = "KOReader",
-            deviceId = "device-1",
-            timestamp = 800,
+    it("discards legacy PDF bridge queue entries without sending them", function()
+        local plugin = newPlugin()
+        plugin.db.pending_progress = {
+            {
+                id = 1,
+                file_hash = "hash-6",
+                kind = "pdf_bridge",
+                payload_json = '{"bookHash":"hash-6","bookId":31}',
+                retry_count = 0,
+            },
         }
-
-        assert.is_false(plugin:pushPdfWebProgress(snapshot, "close", true))
-        assert.are.equal(1, #plugin.db.pending_progress)
-        assert.are.equal("pdf_bridge", plugin.db.pending_progress[1].kind)
-
-        plugin.isOnline = function()
-            return true
+        local update_calls = 0
+        plugin.api.updateProgress = function()
+            update_calls = update_calls + 1
+            return true, {}, 200
         end
-        local update_calls = {}
-        plugin.api.updatePdfProgress = function(_, book_id, payload)
-            update_calls[#update_calls + 1] = { book_id = book_id, payload = payload }
-            return true, { currentPage = 41, totalPages = 100, percentage = 41, timestamp = 900 }, 200
-        end
-
         local synced, failed = plugin:syncPendingProgress(true)
-        assert.are.equal(1, synced)
+        assert.are.equal(0, synced)
         assert.are.equal(0, failed)
-        assert.are.equal(1, #update_calls)
-        assert.are.equal(31, update_calls[1].book_id)
-        assert.are.equal("hash-6", update_calls[1].payload.bookHash)
+        assert.are.equal(0, update_calls)
         assert.are.equal(0, #plugin.db.pending_progress)
     end)
 

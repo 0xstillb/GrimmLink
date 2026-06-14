@@ -139,9 +139,7 @@ describe("grimmlink_menu_actions", function()
     it("builds Maintenance menu sections", function()
         local plugin = {
             current_session = { book_id = 1 },
-            isPdfWebReaderBridgeEnabled = function() return true end,
             syncMetadataNow = function() end,
-            syncPdfWebProgress = function() end,
             showDatabaseStatus = function() end,
             promptHistoricalImport = function() end,
             exportLocalDiagnosticsBundle = function() end,

@@ -412,7 +412,6 @@ Core endpoint groups include:
 /api/grimmlink/v1/shelves/{shelfId}/books/{bookId}/remove
 /api/grimmlink/v1/books/read-statuses
 /api/grimmlink/v1/books/{bookId}/status
-/api/grimmlink/v1/books/{bookId}/pdf-progress
 ```
 
 Authentication for the GrimmLink v1 API uses KOReader companion-style headers:

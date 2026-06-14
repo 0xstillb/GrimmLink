@@ -219,13 +219,6 @@ function M:buildMaintenanceItem(plugin)
                         callback = function() plugin:pullRemoteMetadataNow(false, 100) end,
                     },
                     {
-                        text = _("Sync PDF Bridge Now"),
-                        enabled_func = function()
-                            return plugin.current_session and plugin.current_session.book_id ~= nil and plugin:isPdfWebReaderBridgeEnabled()
-                        end,
-                        callback = function() plugin:syncPdfWebProgress(false) end,
-                    },
-                    {
                         text = _("Show DB Status / Pending Counts"),
                         callback = function() plugin:showDatabaseStatus() end,
                     },

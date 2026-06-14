@@ -473,13 +473,8 @@ function Grimmlink:showAbout()
         _("GrimmLink"),
         version_info and T(_("Version: %1"), version_info.version or _("unknown")) or _("Version: unknown"),
         _("Stable minimal companion for Grimmory."),
-        _("EPUB Web Reader Bridge is intentionally disabled."),
     }
     self:showMessage(table.concat(lines, "\n"), 5)
-end
-
-function Grimmlink:showPdfBridgeStatus()
-    self:showMessage(self:isPdfWebReaderBridgeEnabled() and _("PDF Web Reader Bridge enabled") or _("PDF Web Reader Bridge disabled"), 2)
 end
 
 end

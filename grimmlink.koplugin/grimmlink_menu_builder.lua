@@ -715,25 +715,6 @@ function Grimmlink:addToMainMenu(menu_items)
                         },
                     },
                     {
-                        text = _("PDF Web Reader Bridge"),
-                        sub_item_table = {
-                            {
-                                text = _("Enable PDF Bridge"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.pdf_web_reader_bridge_enabled end,
-                                callback = function()
-                                    self.pdf_web_reader_bridge_enabled = not self.pdf_web_reader_bridge_enabled
-                                    self:saveSetting("pdf_web_reader_bridge_enabled", self.pdf_web_reader_bridge_enabled)
-                                end,
-                            },
-                            {
-                                text = _("PDF Bridge Status"),
-                                keep_menu_open = true,
-                                callback = function() self:showPdfBridgeStatus() end,
-                            },
-                        },
-                    },
-                    {
                         text = _("Auto Update"),
                         sub_item_table = {
                             {

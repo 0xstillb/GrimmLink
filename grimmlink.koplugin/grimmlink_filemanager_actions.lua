@@ -57,9 +57,6 @@ function Grimmlink:syncThisBookFromPath(file_path)
             self.current_session.book_file_id
         )
         self:pushProgressSnapshot(snapshot, "manual", false)
-        if self:isPdfWebReaderBridgeEnabled() then
-            self:pushPdfWebProgress(snapshot, "manual", true)
-        end
         self:syncPendingNow(false, { progress_limit = 20, session_limit = 50 })
     else
         self:showMessage(_("Open the book to sync progress"), 3)

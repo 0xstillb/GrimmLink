@@ -171,14 +171,6 @@ describe("GrimmLink API client", function()
         assert.are.equal("5f4dcc3b5aa765d61d8327deb882cf99", captured_request.headers["x-auth-key"])
     end)
 
-    it("uses the canonical PDF bridge endpoint", function()
-        client:getPdfProgress(123)
-        assert.are.equal("/api/grimmlink/v1/books/123/pdf-progress", captured_request.url:match("/api/grimmlink/v1/books/123/pdf%-progress$") and "/api/grimmlink/v1/books/123/pdf-progress" or nil)
-
-        client:updatePdfProgress(123, { currentPage = 9 })
-        assert.are.equal("/api/grimmlink/v1/books/123/pdf-progress", captured_request.url:match("/api/grimmlink/v1/books/123/pdf%-progress$") and "/api/grimmlink/v1/books/123/pdf-progress" or nil)
-    end)
-
     it("returns useful auth errors", function()
         client:init("http://example.com", "", "", false)
         local success, message = client:testAuth()

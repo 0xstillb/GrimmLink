@@ -3,11 +3,12 @@
 # [Unreleased]
 
 ### Improvements
-- Cut normal GrimmLink sync traffic over to the backend v1 API island at `/api/grimmlink/v1`, including auth, progress, sessions, metadata, shelves, downloads, read status, and PDF progress.
+- Cut normal GrimmLink sync traffic over to the backend v1 API island at `/api/grimmlink/v1`, including auth, progress, sessions, metadata, shelves, downloads, and read status.
 - Moved metadata queue flushes to the GrimmLink v1 push-pull batch endpoint while preserving existing per-item queue result handling.
 - Made manual remote metadata pulls resolve the open/current book instead of sweeping cached books, using the existing `GET /api/grimmlink/v1/syncs/metadata` endpoint.
 - Moved manual metadata pulls to a background curl/wget request with staged progress, duplicate-run protection, and guarded request/apply errors so slow networks do not block or crash the KOReader UI.
-- Prevented duplicate remote-jump prompts for PDFs by using the Web Reader bridge as the single open-time progress source when enabled and replacing any stale conflict dialog before showing another.
+- Removed the PDF Web Reader bridge and now use native GrimmLink progress as the single sync path for every supported format, including PDFs.
+- Prevented duplicate remote-jump prompts by replacing any stale conflict dialog before showing another.
 - Scoped metadata cursors per server, user, book, and metadata type, and only advance them after a successful pull/apply pass.
 - Added clear metadata pull outcomes for missing book context, authentication, connectivity, missing/forbidden books, malformed responses, empty results, and applied/skipped counts.
 
