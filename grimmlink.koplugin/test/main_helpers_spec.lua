@@ -2103,6 +2103,54 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(2, #doc_settings._store.annotations)
     end)
 
+    it("does not duplicate a pulled bookmark already present at the same page", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.doc_settings = newDocSettings({
+            annotations = {
+                {
+                    page = 42,
+                    pageno = 42,
+                    title = "Local bookmark",
+                },
+            },
+        })
+        plugin.ui.document.file = "/books/demo.pdf"
+        plugin.api.next_metadata_pull = {
+            success = true,
+            response = {
+                ok = true,
+                nextCursor = "2026-06-14T12:30:00Z",
+                items = {
+                    {
+                        id = "grimmory-bookmark:17",
+                        type = "bookmark",
+                        dedupeKey = "grimmory-bookmark:17:2",
+                        device = "Grimmory Web",
+                        payload = {
+                            title = "Local bookmark",
+                            page = 42,
+                            location = { pageno = 42 },
+                        },
+                    },
+                },
+            },
+            code = 200,
+        }
+
+        local result = plugin:pullRemoteMetadataForContext({
+            file_path = "/books/demo.pdf",
+            file_hash = "hash-existing-bookmark",
+            book_id = 70,
+            book_file_id = 71,
+        }, true, 100)
+
+        assert.are.equal(0, result.applied)
+        assert.are.equal(1, result.skipped)
+        assert.are.equal(0, result.failed)
+        assert.are.equal(1, result.skipped_reasons.already_at_location)
+        assert.are.equal(1, #plugin.ui.doc_settings._store.annotations)
+    end)
+
     it("applies good metadata items without advancing the cursor past a failed item", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
         plugin.ui.doc_settings = newDocSettings({ annotations = {} })
@@ -2138,6 +2186,7 @@ describe("GrimmLink helper methods", function()
         local result = plugin:pullRemoteMetadataForContext(context, true, 100)
         assert.are.equal(1, result.applied)
         assert.are.equal(1, result.failed)
+        assert.are.equal(1, result.failed_reasons.invalid_rating)
         assert.is_false(result.cursor_saved)
         assert.is_nil(plugin.db.settings[plugin:metadataCursorKey("hash-partial-failure", 70, 71)])
         assert.are.equal(1, #plugin.ui.doc_settings._store.annotations)
