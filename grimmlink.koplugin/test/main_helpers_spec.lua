@@ -534,6 +534,7 @@ local function newApi()
         next_session_batch = { success = true, response = { status = "ok" }, code = 200 },
         next_metadata_batch = { success = true, response = { ok = true, results = { annotations = {}, bookmarks = {} } }, code = 200 },
         next_metadata_pull = { success = true, response = { ok = true, items = {} }, code = 200 },
+        next_async_metadata_start_error = nil,
         next_async_metadata_polls = {
             { status = "done", response = { ok = true, items = {} }, code = 200 },
         },
@@ -633,6 +634,9 @@ local function newApi()
             item_type = item_type,
             opts = opts,
         }
+        if self.next_async_metadata_start_error then
+            return nil, self.next_async_metadata_start_error
+        end
         return { id = "async-metadata-pull" }
     end
 
@@ -1875,6 +1879,65 @@ describe("GrimmLink helper methods", function()
         assert.is_true(joined:find("Step 3 of 3", 1, true) ~= nil)
         assert.is_true(joined:find("KOReader will remain responsive", 1, true) ~= nil)
         assert.is_true(joined:find("No remote metadata for this book", 1, true) ~= nil)
+    end)
+
+    it("falls back safely to KOReader HTTP when curl and wget are unavailable", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.document.currentHash = "hash-compatibility-pull"
+        plugin.api.next_async_metadata_start_error = "Background HTTP tools are unavailable"
+
+        local result = plugin:pullRemoteMetadataNow(false, 100)
+
+        assert.is_true(result.pending, result.reason)
+        assert.are.equal("compatibility_fallback", result.reason)
+        assert.is_false(plugin._metadata_pull_running == true)
+        local async_starts = 0
+        local blocking_pulls = 0
+        for _, call in ipairs(plugin.api.calls) do
+            if call.name == "startAsyncMetadataPull" then
+                async_starts = async_starts + 1
+            elseif call.name == "pullMetadata" then
+                blocking_pulls = blocking_pulls + 1
+            end
+        end
+        assert.are.equal(1, async_starts)
+        assert.are.equal(1, blocking_pulls)
+        local joined = table.concat(UIManager.getShownTexts(), "\n")
+        assert.is_true(joined:find("Using KOReader's built-in HTTP client", 1, true) ~= nil)
+        assert.is_true(joined:find("UI may pause briefly", 1, true) ~= nil)
+        assert.is_true(joined:find("No remote metadata for this book", 1, true) ~= nil)
+    end)
+
+    it("contains compatibility metadata pull exceptions without crashing the UI", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.document.currentHash = "hash-compatibility-exception"
+        plugin.api.next_async_metadata_start_error = "Background HTTP tools are unavailable"
+        plugin.pullRemoteMetadataForContext = function()
+            error("simulated compatibility failure")
+        end
+
+        local result = plugin:pullRemoteMetadataNow(false, 100)
+
+        assert.is_true(result.pending, result.reason)
+        assert.are.equal("compatibility_fallback", result.reason)
+        assert.is_false(plugin._metadata_pull_running == true)
+        local dialog = UIManager.getLastShown()
+        assert.is_true(dialog.text:find("failed safely", 1, true) ~= nil)
+    end)
+
+    it("does not use the blocking fallback for unrelated background start failures", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        plugin.ui.document.currentHash = "hash-background-start-failure"
+        plugin.api.next_async_metadata_start_error = "Cannot allocate metadata pull temporary files"
+
+        local result = plugin:pullRemoteMetadataNow(false, 100)
+
+        assert.is_false(result.pending)
+        assert.are.equal(1, result.failed)
+        assert.are.equal("background_start_failed", result.reason)
+        for _, call in ipairs(plugin.api.calls) do
+            assert.is_not.equal("pullMetadata", call.name)
+        end
     end)
 
     it("prevents a second manual metadata pull while one is running", function()

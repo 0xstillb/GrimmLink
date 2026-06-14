@@ -1036,6 +1036,28 @@ function Grimmlink:showMetadataPullProgress(stage, detail)
     end
 end
 
+function Grimmlink:showMetadataPullCompatibilityProgress()
+    if not UIManager or not InfoMessage then
+        return
+    end
+    self:closeMetadataPullProgress()
+    local widget = InfoMessage:new{
+        text = table.concat({
+            _("Pulling remote metadata"),
+            "",
+            _("Please wait..."),
+            _("Background HTTP tools are unavailable."),
+            _("Using KOReader's built-in HTTP client; the UI may pause briefly."),
+        }, "\n"),
+        timeout = 90,
+    }
+    self._metadata_pull_progress_widget = widget
+    UIManager:show(widget)
+    if type(UIManager.forceRePaint) == "function" then
+        pcall(UIManager.forceRePaint, UIManager)
+    end
+end
+
 function Grimmlink:processMetadataPullResponse(context, pull, code, silent, item_type)
     local result = newMetadataPullResult()
     if type(pull) ~= "table" then
@@ -1500,10 +1522,36 @@ function Grimmlink:startRemoteMetadataPullAsync(context, limit, item_type, silen
         { timeout = 25 }
     )
     if not start_ok or not handle then
+        local failure_reason = start_ok and start_error or handle
+        local failure_text = safeToString(failure_reason) or ""
+        if not silent and failure_text:find("Background HTTP tools are unavailable", 1, true) then
+            pending_result.reason = "compatibility_fallback"
+            self._metadata_pull_running = true
+            self._metadata_pull_handle = nil
+            self:showMetadataPullCompatibilityProgress()
+            UIManager:scheduleIn(0.1, function()
+                local pull_ok, pull_result = pcall(
+                    self.pullRemoteMetadataForContext,
+                    self,
+                    context,
+                    false,
+                    limit,
+                    item_type
+                )
+                self._metadata_pull_running = false
+                self._metadata_pull_handle = nil
+                self:closeMetadataPullProgress()
+                if not pull_ok then
+                    self:logWarn("GrimmLink compatibility metadata pull failed:", safeToString(pull_result))
+                    self:showMessage(_("Remote metadata pull failed safely. Please try again."), 5)
+                end
+            end)
+            return pending_result
+        end
         pending_result.pending = false
         pending_result.failed = 1
         pending_result.reason = "background_start_failed"
-        self:logWarn("GrimmLink background metadata pull could not start:", safeToString(start_error or handle))
+        self:logWarn("GrimmLink background metadata pull could not start:", failure_text)
         if not silent then
             self:showMessage(
                 _("Could not start a safe background metadata pull. Check that curl or wget is available."),
