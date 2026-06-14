@@ -1,0 +1,121 @@
+name: Feature Preview
+
+on:
+  push:
+    tags:
+      - 'feature-*'
+
+jobs:
+  preview:
+    name: Preview Build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Derive tag metadata
+        id: meta
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          # Tag format: feature-<branch-slug>-<N>
+          # branch-slug = branch name with / replaced by -
+          # z.B. tag=feature-grimmlink-v1-api-cutover-1
+          #   → branch_slug=grimmlink-v1-api-cutover
+          #   → branch=feature/grimmlink-v1-api-cutover
+          BRANCH_SLUG="${TAG#feature-}"
+          BRANCH_SLUG="${BRANCH_SLUG%-*}"
+          echo "branch_slug=$BRANCH_SLUG" >> $GITHUB_OUTPUT
+          echo "branch=feature/$BRANCH_SLUG" >> $GITHUB_OUTPUT
+
+          # Sequence number
+          SEQ="${TAG##*-}"
+          echo "seq=$SEQ" >> $GITHUB_OUTPUT
+
+      - name: Verify tag is reachable from its feature branch
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          BRANCH: ${{ steps.meta.outputs.branch }}
+        run: |
+          TAG_COMMIT=$(git rev-list -n 1 "$TAG")
+          if git branch -r --contains "$TAG_COMMIT" | grep -q "^ *origin/$BRANCH$"; then
+            echo "✅ Tag matches $BRANCH"
+          else
+            echo "⚠️  Tag $TAG not reachable from $BRANCH — preview may be orphaned"
+            echo "   Reachable from:"
+            git branch -r --contains "$TAG_COMMIT" 2>/dev/null || true
+          fi
+
+      - name: Generate version info
+        env:
+          VERSION_OVERRIDE: preview-${{ steps.meta.outputs.tag }}
+          GIT_COMMIT_OVERRIDE: ${{ github.sha }}
+        run: |
+          if [ -x generate-version.sh ]; then
+            ./generate-version.sh
+          fi
+
+      - name: Compile gettext translations
+        run: |
+          if [ -d grimmlink.koplugin/locale ]; then
+            sudo apt-get install -y gettext
+            find grimmlink.koplugin/locale -name "*.po" | while read po; do
+              mo="${po%.po}.mo"
+              echo "Compiling $po -> $mo"
+              msgfmt "$po" -o "$mo"
+            done
+          else
+            echo "No locale directory found, skipping translations"
+          fi
+
+      - name: Create plugin archives
+        id: assets
+        run: |
+          TAG=${{ steps.meta.outputs.tag }}
+          zip -r grimmlink.koplugin.zip grimmlink.koplugin/
+          cp grimmlink.koplugin.zip "${TAG}.zip"
+          echo "asset=$TAG.zip" >> $GITHUB_OUTPUT
+
+      - name: Check if release already exists
+        id: check_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=${{ steps.meta.outputs.tag }}
+          if gh release view "$TAG" --json id 2>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release (preview)
+        if: steps.check_release.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: 🔬 Preview ${{ steps.meta.outputs.tag }}
+          body: |
+            ## 🔬 Feature Preview
+            
+            **Tag:** \`${{ steps.meta.outputs.tag }}\`
+            **Branch:** \`${{ steps.meta.outputs.branch }}\`
+            **Sequence:** \`#${{ steps.meta.outputs.seq }}\`
+            **Commit:** ${{ github.sha }}
+            
+            > This is a preview build for testing. Not for production use.
+          files: |
+            grimmlink.koplugin.zip
+            ${{ steps.meta.outputs.tag }}.zip
+          draft: false
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
