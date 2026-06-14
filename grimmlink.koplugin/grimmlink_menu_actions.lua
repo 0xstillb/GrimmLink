@@ -181,6 +181,13 @@ function M:applyReaderBookTopLevelOverrides(plugin, sub_items, options)
             end,
         },
         {
+            id = "pull_remote_metadata",
+            text = _("Pull Remote Metadata Now"),
+            callback = function()
+                plugin:pullRemoteMetadataNow(false, 100)
+            end,
+        },
+        {
             id = "manual_reading_status",
             text = _("Manual Reading Status"),
             callback = function()
