@@ -266,6 +266,21 @@ function Grimmlink:onEndOfBook()
     end, {}, { silent = true })
 end
 
+function Grimmlink:onAnnotationsModified()
+    if not self.enabled or not self.metadata_sync_enabled then
+        return
+    end
+    self:runAfterUiSettles(function()
+        local queued = self:extractAndQueueCurrentMetadata("annotations-modified")
+        local queued_count = queued and queued.queued and tonumber(queued.queued.queued) or 0
+        if queued_count > 0 and self:isOnline() then
+            self:schedulePendingSync("annotations modified metadata sync", 0.75, {
+                metadata_limit = 20,
+            })
+        end
+    end)
+end
+
 function Grimmlink:onCloseDocument()
     self:invokeSafely("close document", function()
         self:endSession({ reason = "close" })

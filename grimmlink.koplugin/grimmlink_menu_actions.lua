@@ -181,6 +181,20 @@ function M:applyReaderBookTopLevelOverrides(plugin, sub_items, options)
             end,
         },
         {
+            id = "preview_metadata",
+            text = _("Preview Metadata"),
+            callback = function()
+                plugin:showMetadataPreview()
+            end,
+        },
+        {
+            id = "sync_metadata_now",
+            text = _("Sync Metadata Now"),
+            callback = function()
+                plugin:syncMetadataNow()
+            end,
+        },
+        {
             id = "pull_remote_metadata",
             text = _("Pull Remote Metadata Now"),
             callback = function()

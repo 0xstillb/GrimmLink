@@ -68,6 +68,35 @@ describe("GrimmLink metadata extractor", function()
         assert.are.equal(1, extracted.counts.bookmarks_count)
     end)
 
+    it("prefers live ReaderUI annotations over a stale doc settings snapshot", function()
+        local Extractor = require("grimmlink_metadata_extractor")
+        local doc_settings = {
+            readSetting = function(_, key)
+                if key == "annotations" then
+                    return {}
+                end
+                return nil
+            end,
+        }
+
+        local extracted = Extractor.extract({
+            file_path = "/books/demo.pdf",
+            doc_settings = doc_settings,
+            annotations = {
+                {
+                    datetime = "2026-06-14 19:05:52",
+                    page = 40,
+                    pageno = 40,
+                },
+            },
+        })
+
+        assert.are.equal(1, #extracted.bookmarks)
+        assert.are.equal("40", extracted.bookmarks[1].page)
+        assert.are.equal("40", extracted.bookmarks[1].pageno)
+        assert.are.equal(1, extracted.counts.bookmarks_count)
+    end)
+
     it("falls back to loading doc settings by file path", function()
         package.preload["docsettings"] = function()
             return {

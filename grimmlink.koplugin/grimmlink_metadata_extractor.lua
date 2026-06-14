@@ -182,8 +182,11 @@ local function classifyEntry(entry)
     return nil
 end
 
-local function extractAnnotations(doc_settings)
-    local raw_annotations = safeReadSetting(doc_settings, "annotations")
+local function extractAnnotations(doc_settings, live_annotations)
+    local raw_annotations = live_annotations
+    if type(raw_annotations) ~= "table" then
+        raw_annotations = safeReadSetting(doc_settings, "annotations")
+    end
     if type(raw_annotations) ~= "table" then
         raw_annotations = doc_settings and doc_settings.annotations or nil
     end
@@ -253,6 +256,7 @@ end
 function Extractor.extract(opts)
     opts = opts or {}
     local live_doc_settings = opts.doc_settings
+    local live_annotations = opts.annotations
     local file_path = opts.file_path
 
     local rating = nil
@@ -266,7 +270,7 @@ function Extractor.extract(opts)
             return false
         end
         rating = extractRating(doc_settings)
-        highlights, bookmarks, notes_count = extractAnnotations(doc_settings)
+        highlights, bookmarks, notes_count = extractAnnotations(doc_settings, live_annotations)
         return true
     end
 

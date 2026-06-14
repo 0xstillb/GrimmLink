@@ -2880,6 +2880,39 @@ describe("GrimmLink helper methods", function()
         assert.are.same({ "close", "suspend" }, reasons)
     end)
 
+    it("queues and schedules metadata sync when annotations change", function()
+        local plugin = newPlugin({
+            enabled = true,
+            metadata_sync_enabled = true,
+        })
+        local queued_reasons = {}
+        local scheduled = {}
+        plugin.runAfterUiSettles = function(_, callback)
+            callback()
+        end
+        plugin.extractAndQueueCurrentMetadata = function(_, reason)
+            queued_reasons[#queued_reasons + 1] = reason
+            return { queued = { queued = 1 } }
+        end
+        plugin.isOnline = function()
+            return true
+        end
+        plugin.schedulePendingSync = function(_, label, delay, opts)
+            scheduled = {
+                label = label,
+                delay = delay,
+                opts = opts,
+            }
+        end
+
+        plugin:onAnnotationsModified()
+
+        assert.are.same({ "annotations-modified" }, queued_reasons)
+        assert.are.equal("annotations modified metadata sync", scheduled.label)
+        assert.are.equal(0.75, scheduled.delay)
+        assert.are.equal(20, scheduled.opts.metadata_limit)
+    end)
+
     it("schedules the end-of-book Reading Completion prompt from the current session context", function()
         local plugin = newPlugin()
         local context = {
