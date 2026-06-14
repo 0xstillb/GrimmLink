@@ -10,42 +10,94 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-and-tag:
-    name: Check & Tag
+  release:
+    name: Auto Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    outputs:
-      new_version: ${{ steps.check.outputs.new_version }}
 
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Read version from plugin_version.lua
-        id: check
+      - name: Read version
+        id: ver
         run: |
-          VERSION=$(grep -oP '(?<=version = ")[^"]+' grimmlink.koplugin/plugin_version.lua)
-          echo "Detected version: $VERSION"
+          V=$(grep -oP '(?<=version = ")[^"]+' grimmlink.koplugin/plugin_version.lua)
+          echo "current=$V" >> "$GITHUB_OUTPUT"
+          echo "Version: $V"
 
-          if git tag -l "$VERSION" | grep -q .; then
-            echo "⚠️  Tag $VERSION already exists — no new release needed"
-            echo "new_version=false" >> "$GITHUB_OUTPUT"
+      - name: Check tag
+        id: tag
+        run: |
+          V=${{ steps.ver.outputs.current }}
+          if git tag -l "$V" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "✅ New version $VERSION detected — creating tag"
-            echo "new_version=true" >> "$GITHUB_OUTPUT"
-            echo "new_version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check merge
+        id: merge
+        run: |
+          N=$(git rev-list --parents -1 HEAD | wc -w)
+          if [ "$N" -gt 2 ]; then
+            echo "detected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "detected=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check source branch
+        id: source
+        if: steps.merge.outputs.detected == 'true'
+        run: |
+          MSG=$(git log -1 --format=%s)
+          if echo "$MSG" | grep -qiE "(merge.*develop|develop.*merge)"; then
+            echo "is_develop=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_develop=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.tag.outputs.exists == 'true' && steps.merge.outputs.detected == 'true' && steps.source.outputs.is_develop == 'true'
+        with:
+          python-version: '3.12'
+
+      - name: Bump version on merge Develop > Main
+        id: bump
+        if: steps.tag.outputs.exists == 'true' && steps.merge.outputs.detected == 'true' && steps.source.outputs.is_develop == 'true'
+        run: |
+          OLD=${{ steps.ver.outputs.current }}
+          NEW=$(python3 -c "import re;m=re.match(r'^v?(\d+)\.(\d+)\.(\d+)','$OLD');print(f'v{m.group(1)}.{m.group(2)}.{int(m.group(3))+1}')")
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+
+          sed -i "s/version = \"$OLD\"/version = \"$NEW\"/" grimmlink.koplugin/plugin_version.lua
+          sed -i 's/version_type = "[^"]*"/version_type = "release"/' grimmlink.koplugin/plugin_version.lua
+          sed -i "s/git_commit = \"[^\"]*\"/git_commit = \"$(git rev-parse --short HEAD)\"/" grimmlink.koplugin/plugin_version.lua
+          sed -i "s/build_date = \"[^\"]*\"/build_date = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"/" grimmlink.koplugin/plugin_version.lua
+
+          if [ -f grimmlink.koplugin/_meta.lua ]; then
+            sed -i "s/version = \"$OLD\"/version = \"$NEW\"/" grimmlink.koplugin/_meta.lua
+          fi
+          echo "Bumped $OLD -> $NEW"
+
+      - name: Commit bump
+        if: steps.bump.outputs.new != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add grimmlink.koplugin/plugin_version.lua grimmlink.koplugin/_meta.lua
+          git commit -m "chore(release): bump to ${{ steps.bump.outputs.new }} [skip ci]"
+          git push origin Main
+
       - name: Create tag
-        if: steps.check.outputs.new_version == 'true'
+        if: steps.tag.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${{ steps.check.outputs.new_version }}"
+          V=${{ steps.ver.outputs.current }}
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "Release $VERSION"
-          git push origin "$VERSION"
-          echo "✅ Tag $VERSION created and pushed"
+          git tag -a "$V" -m "Release $V"
+          git push origin "$V"
