@@ -125,6 +125,7 @@ function Grimmlink:extractMetadataForContext(context)
     local ok, extracted = pcall(MetadataExtractor.extract, {
         file_path = context.file_path,
         doc_settings = self.ui and self.ui.doc_settings or nil,
+        annotations = self.ui and self.ui.annotation and self.ui.annotation.annotations or nil,
     })
     if not ok or type(extracted) ~= "table" then
         return empty
