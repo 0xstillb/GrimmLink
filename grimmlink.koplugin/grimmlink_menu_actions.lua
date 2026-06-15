@@ -145,8 +145,33 @@ function M:applyReaderBookTopLevelOverrides(plugin, sub_items, options)
         return
     end
     options = options or {}
+
+    -- Save original sync_pending_now before removal, so we can reposition it
+    -- Fallback to a default item if the original has no callback (e.g. in tests)
+    local sync_pending_now_item
+    local sync_pending_now_fallback = {
+        id = "sync_pending_now",
+        text = _("Sync Pending Now"),
+        callback = function()
+            if plugin and type(plugin.syncPendingNow) == "function" then
+                plugin:syncPendingNow(false)
+            end
+        end,
+    }
+    for _, item in ipairs(sub_items) do
+        if item.id == "sync_pending_now" then
+            if type(item.callback) == "function" then
+                sync_pending_now_item = item
+            end
+            break
+        end
+    end
+
     local remove_ids = options.remove_ids or {
+        enable_grimmlink = true,
         connection = true,
+        sync_pending_now = true,
+        force_metadata_reupload = true,
         sync_shelf_now = true,
         advanced_setting = true,
         status_about = true,
@@ -167,79 +192,90 @@ function M:applyReaderBookTopLevelOverrides(plugin, sub_items, options)
 
     local injected = {
         {
-            id = "reading_completion",
-            text = _("Reading Completion"),
-            callback = function()
-                plugin:showReadingCompletionMenu()
-            end,
-        },
-        {
-            id = "pull_remote_progress",
-            text = _("Pull Remote Progress"),
+            id = "sync_reading_progress",
+            text = _("Sync Reading Progress"),
             callback = function()
                 plugin:manualPullProgress()
             end,
         },
-        {
-            id = "preview_metadata",
-            text = _("Preview Metadata"),
+        sync_pending_now_item or {
+            id = "sync_pending_now",
+            text = _("Sync Pending Now"),
             callback = function()
-                plugin:showMetadataPreview()
+                if plugin and type(plugin.syncPendingNow) == "function" then
+                    plugin:syncPendingNow(false)
+                end
             end,
         },
         {
-            id = "sync_metadata_now",
-            text = _("Sync Metadata Now"),
-            callback = function()
-                plugin:syncMetadataNow()
-            end,
-        },
-        {
-            id = "force_metadata_reupload",
-            text = _("Force Metadata Re-upload"),
-            callback = function()
-                plugin:forceMetadataResyncForCurrentBook()
-            end,
-        },
-        {
-            id = "pull_remote_metadata",
-            text = _("Pull Remote Metadata Now"),
-            callback = function()
-                plugin:pullRemoteMetadataNow(false, 100)
-            end,
-        },
-        {
-            id = "pull_remote_bookmarks",
-            text = _("Pull Bookmarks Now"),
+            id = "pull_web_bookmarks",
+            text = _("Pull Web Bookmarks"),
             callback = function()
                 plugin:pullRemoteMetadataNow(false, 100, "bookmark")
             end,
         },
         {
-            id = "reset_metadata_pull_cursor",
-            text = _("Reset Metadata Pull Cursor"),
-            callback = function()
-                plugin:resetMetadataPullCursorForCurrentBook()
-            end,
+            id = "status_menu",
+            text = _("Status"),
+            sub_item_table = {
+                {
+                    id = "sync_summary",
+                    text = _("Sync Summary"),
+                    callback = sync_summary_callback,
+                },
+                {
+                    id = "set_reading_status",
+                    text = _("Set Reading Status"),
+                    sub_item_table = {
+                        {
+                            id = "reading_completion",
+                            text = _("Reading Completion"),
+                            callback = function() plugin:showReadingCompletionMenu() end,
+                        },
+                        {
+                            id = "manual_status",
+                            text = _("Manual Status"),
+                            callback = function() plugin:showManualReadStatusMenu() end,
+                        },
+                    },
+                },
+            },
         },
         {
-            id = "manual_reading_status",
-            text = _("Manual Reading Status"),
-            callback = function()
-                plugin:showManualReadStatusMenu()
-            end,
-        },
-        {
-            id = "sync_summary",
-            text = _("Sync Summary"),
-            callback = sync_summary_callback,
+            id = "advanced_sync",
+            text = _("Advanced Sync"),
+            sub_item_table = {
+                {
+                    id = "sync_metadata_now",
+                    text = _("Push All Metadata"),
+                    callback = function() plugin:syncMetadataNow() end,
+                },
+                {
+                    id = "pull_remote_metadata",
+                    text = _("Pull All Remote Metadata"),
+                    callback = function() plugin:pullRemoteMetadataNow(false, 100) end,
+                },
+                {
+                    id = "preview_metadata",
+                    text = _("Preview Metadata"),
+                    callback = function() plugin:showMetadataPreview() end,
+                },
+                {
+                    id = "force_metadata_reupload",
+                    text = _("Force Re-upload"),
+                    callback = function() plugin:forceMetadataResyncForCurrentBook() end,
+                },
+                {
+                    id = "reset_metadata_pull_cursor",
+                    text = _("Reset Pull Cursor"),
+                    callback = function() plugin:resetMetadataPullCursorForCurrentBook() end,
+                },
+            },
         },
     }
-
-    local pos = tonumber(options.insert_pos) or 3
+    -- Inject items after removals; all remaining (if any) come before injected
     for _, item in ipairs(injected) do
-        table.insert(sub_items, pos, item)
-        pos = pos + 1
+        table.insert(sub_items, item)
     end
 end
 
