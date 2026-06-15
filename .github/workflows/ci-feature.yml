@@ -1,0 +1,63 @@
+name: Feature CI
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+  pull_request:
+    branches:
+      - 'feature/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Lua 5.1
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.1"
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Install luacheck
+        run: luarocks install luacheck && luarocks install lua-term 0.7-1 || true
+
+      - name: Luacheck lint
+        run: luacheck grimmlink.koplugin/ || true
+
+      - name: Syntax check
+        run: |
+          LUA_COMPILER="$(command -v luac5.1 || command -v luac)"
+          find grimmlink.koplugin -type f -name '*.lua' -print0 | xargs -0 -n1 "$LUA_COMPILER" -p
+
+  test:
+    name: Quick Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Lua 5.1
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.1"
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Install test dependencies
+        run: |
+          luarocks install lua-term 0.7-1 || true
+          luarocks install busted
+
+      - name: Run unit tests only (no integration)
+        run: |
+          cd grimmlink.koplugin
+          busted --exclude-tags=integration test/

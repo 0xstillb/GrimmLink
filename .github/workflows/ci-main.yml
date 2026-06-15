@@ -1,0 +1,138 @@
+name: Main CI
+
+on:
+  push:
+    branches:
+      - Main
+  pull_request:
+    branches:
+      - Main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Lua 5.1
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.1"
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Install luacheck
+        run: luarocks install luacheck
+
+      - name: Luacheck lint
+        run: luacheck grimmlink.koplugin/ || true
+
+      - name: Syntax check
+        run: |
+          LUA_COMPILER="$(command -v luac5.1 || command -v luac)"
+          find grimmlink.koplugin -type f -name '*.lua' -not -path '*/test/*' -print0 | xargs -0 -n1 "$LUA_COMPILER" -p
+
+  test:
+    name: Tests (Lua ${{ matrix.lua }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lua: ["5.1"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Lua ${{ matrix.lua }}
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: ${{ matrix.lua }}
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Install test dependencies
+        run: |
+          luarocks install lua-term 0.7-1 || true
+          luarocks install busted
+          luarocks install luacov
+          luarocks install luacov-cobertura
+
+      - name: Run tests with coverage
+        run: |
+          cd grimmlink.koplugin
+          busted --coverage test/
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: grimmlink.koplugin/luacov.cobertura.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  guards:
+    name: Guard Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Guard legacy fork references
+        run: |
+          if git grep -nE 'WorldTeacher/BookLoreSync-plugin' -- grimmlink.koplugin; then
+            echo "Forbidden updater reference found in active GrimmLink code"
+            exit 1
+          fi
+
+      - name: Guard forbidden legacy endpoints
+        run: |
+          if git grep -nE '/api/v1/books/personal-rating|/api/v1/annotations|/api/v2/book-notes|/api/v1/book-notes|/api/v1/bookmarks' -- grimmlink.koplugin '*.lua'; then
+            echo "Forbidden legacy endpoint usage found in GrimmLink plugin code"
+            exit 1
+          fi
+
+      - name: Guard accidental BookLoreSync naming
+        run: |
+          if git grep -nE 'BookLoreSync|bookloresync|BookloreSync' -- grimmlink.koplugin '*.lua'; then
+            echo "Legacy BookLoreSync naming found in plugin code"
+            exit 1
+          fi
+
+      - name: Guard risky secret logging
+        run: |
+          if git grep -nE 'logger\.(dbg|info|warn|err).*(password|x-auth-key|Authorization|token|payload_json)' -- grimmlink.koplugin '*.lua'; then
+            echo "Potential secret logging found"
+            exit 1
+          fi
+
+      - name: Verify plugin structure
+        run: |
+          test -d grimmlink.koplugin
+          test -f grimmlink.koplugin/main.lua
+          test -f grimmlink.koplugin/_meta.lua
+          test -f grimmlink.koplugin/plugin_version.lua
+          test -f grimmlink.koplugin/grimmlink_updater.lua
+          grep -q 'GITHUB_REPO = "0xstillb/grimmlink"' grimmlink.koplugin/grimmlink_updater.lua
+
+  package:
+    name: Package Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate ZIP packaging
+        run: |
+          zip -r grimmlink.koplugin.zip grimmlink.koplugin/
+          test -f grimmlink.koplugin.zip
+
+      - name: Guard accidental ZIP commits
+        run: |
+          if git ls-files | grep -E '(^|/)grimmlink\.koplugin\.zip$|(^|/)grimmlink-v[0-9].*\.zip$'; then
+            echo "Release ZIP artifacts must not be committed"
+            exit 1
+          fi

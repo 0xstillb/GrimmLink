@@ -1,0 +1,164 @@
+name: Develop CI
+
+on:
+  push:
+    branches:
+      - Develop
+  pull_request:
+    branches:
+      - Develop
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Lua 5.1
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.1"
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Install luacheck
+        run: luarocks install luacheck
+
+      - name: Luacheck lint
+        run: luacheck grimmlink.koplugin/ || true
+
+      - name: Syntax check
+        run: |
+          LUA_COMPILER="$(command -v luac5.1 || command -v luac)"
+          find grimmlink.koplugin -type f -name '*.lua' -not -path '*/test/*' -print0 | xargs -0 -n1 "$LUA_COMPILER" -p
+
+  test:
+    name: Tests (Lua ${{ matrix.lua }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lua: ["5.1", "5.2"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Lua ${{ matrix.lua }}
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: ${{ matrix.lua }}
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Install test dependencies
+        run: |
+          luarocks install lua-term 0.7-1 || true
+          luarocks install busted
+          luarocks install luacov
+
+      - name: Run tests
+        run: |
+          cd grimmlink.koplugin
+          busted test/
+
+  guards:
+    name: Guard Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Guard legacy fork references
+        run: |
+          if git grep -nE 'WorldTeacher/BookLoreSync-plugin' -- grimmlink.koplugin; then
+            echo "Forbidden updater reference found"
+            exit 1
+          fi
+
+      - name: Guard forbidden legacy endpoints
+        run: |
+          if git grep -nE '/api/v1/books/personal-rating|/api/v1/annotations|/api/v2/book-notes|/api/v1/book-notes|/api/v1/bookmarks' -- grimmlink.koplugin '*.lua'; then
+            echo "Forbidden legacy endpoint usage found"
+            exit 1
+          fi
+
+      - name: Guard accidental BookLoreSync naming
+        run: |
+          if git grep -nE 'BookLoreSync|bookloresync|BookloreSync' -- grimmlink.koplugin '*.lua'; then
+            echo "Legacy BookLoreSync naming found"
+            exit 1
+          fi
+
+  integration:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: [test, guards]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/Develop'
+    services:
+      grimmory:
+        image: ghcr.io/0xstillb/grimmory:latest
+        ports:
+          - 8080:8080
+        env:
+          SPRING_PROFILES_ACTIVE: dev
+          BOOKLORE_DATASOURCE_URL: jdbc:h2:mem:testdb
+          BOOKLORE_DATASOURCE_USERNAME: sa
+          BOOKLORE_DATASOURCE_PASSWORD:
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Lua 5.1
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.1"
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Install test dependencies
+        run: |
+          luarocks install lua-term 0.7-1 || true
+          luarocks install busted
+
+      - name: Wait for grimmory to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8080/actuator/health > /dev/null 2>&1; then
+              echo "Grimmory is ready!"
+              break
+            fi
+            echo "Waiting for grimmory... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run integration tests
+        run: |
+          # Set environment for integration tests
+          export GRIMMORY_BASE_URL=http://localhost:8080
+          cd grimmlink.koplugin
+          busted --tags=integration test/
+
+  package:
+    name: Package & Notarize
+    runs-on: ubuntu-latest
+    needs: [test, guards]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate ZIP packaging
+        run: |
+          zip -r grimmlink.koplugin.zip grimmlink.koplugin/
+          test -f grimmlink.koplugin.zip
+
+      - name: Guard accidental ZIP commits
+        run: |
+          if git ls-files | grep -E '(^|/)grimmlink\.koplugin\.zip$|(^|/)grimmlink-v[0-9].*\.zip$'; then
+            echo "Release ZIP artifacts must not be committed"
+            exit 1
+          fi
