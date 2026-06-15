@@ -42,6 +42,34 @@ function M.install(Grimmlink, deps)
         return out
     end
 
+    local function isBlankMetadataValue(value)
+        return value == nil or tostring(value) == ""
+    end
+
+    local function firstMetadataValue(...)
+        for i = 1, select("#", ...) do
+            local value = select(i, ...)
+            if not isBlankMetadataValue(value) then
+                return value
+            end
+        end
+        return nil
+    end
+
+    local function mergeMetadataContextMissing(target, source)
+        if type(target) ~= "table" then
+            return target
+        end
+        source = type(source) == "table" and source or {}
+        target.file_path = firstMetadataValue(target.file_path, target.filePath, target.path, target.file, source.file_path, source.filePath, source.path, source.file)
+        target.file_hash = firstMetadataValue(target.file_hash, target.fileHash, target.book_hash, target.bookHash, target.current_hash, target.currentHash, source.file_hash, source.fileHash, source.book_hash, source.bookHash, source.current_hash, source.currentHash)
+        target.initial_hash = firstMetadataValue(target.initial_hash, target.initialHash, source.initial_hash, source.initialHash)
+        target.book_id = firstMetadataValue(target.book_id, target.bookId, source.book_id, source.bookId)
+        target.book_file_id = firstMetadataValue(target.book_file_id, target.bookFileId, source.book_file_id, source.bookFileId)
+        target.file_format = firstMetadataValue(target.file_format, target.fileFormat, target.book_type, target.bookType, source.file_format, source.fileFormat, source.book_type, source.bookType)
+        return target
+    end
+
 function Grimmlink:getMetadataExtractionContext()
     local file_path = nil
     local file_hash = nil
@@ -125,6 +153,7 @@ function Grimmlink:extractMetadataForContext(context)
     local ok, extracted = pcall(MetadataExtractor.extract, {
         file_path = context.file_path,
         doc_settings = self.ui and self.ui.doc_settings or nil,
+        annotations = self.ui and self.ui.annotation and self.ui.annotation.annotations or nil,
     })
     if not ok or type(extracted) ~= "table" then
         return empty
@@ -251,11 +280,47 @@ function Grimmlink:queueMetadataFromContext(context, extracted, reason)
     return result
 end
 
+function Grimmlink:resolveMetadataQueueContext(context_override)
+    local context = type(context_override) == "table" and cloneForMetadata(context_override) or nil
+    local fallback = self:getMetadataExtractionContext()
+
+    if context then
+        mergeMetadataContextMissing(context, fallback)
+    else
+        context = fallback
+    end
+    if type(context) ~= "table" then
+        return nil
+    end
+
+    if (isBlankMetadataValue(context.file_hash) or isBlankMetadataValue(context.book_id) or isBlankMetadataValue(context.book_file_id))
+        and not isBlankMetadataValue(context.file_path)
+        and type(self.resolveBookByFilePath) == "function" then
+        local ok_cached, cached = pcall(self.resolveBookByFilePath, self, context.file_path)
+        if ok_cached and type(cached) == "table" then
+            mergeMetadataContextMissing(context, cached)
+        end
+    end
+
+    if isBlankMetadataValue(context.file_hash) and not isBlankMetadataValue(context.file_path)
+        and type(self.calculateBookHash) == "function" then
+        local ok_hash, computed_hash = pcall(self.calculateBookHash, self, context.file_path)
+        if ok_hash and not isBlankMetadataValue(computed_hash) then
+            context.file_hash = computed_hash
+        end
+    end
+    if isBlankMetadataValue(context.file_hash) and not isBlankMetadataValue(context.initial_hash) then
+        context.file_hash = context.initial_hash
+    end
+
+    return context
+end
+
 function Grimmlink:extractAndQueueCurrentMetadata(reason, context_override)
     if not self.enabled or not self.db then
         return nil
     end
-    local context = context_override or self:getMetadataExtractionContext()
+    local context = self:resolveMetadataQueueContext(context_override)
     if not context then
         return nil
     end
@@ -520,7 +585,11 @@ local function remoteItemDeviceId(item)
     if type(item) ~= "table" then
         return nil
     end
-    return safeToString(item.deviceId or item.device_id or item.sourceDeviceId or item.source_device_id)
+    local raw = item.deviceId or item.device_id or item.sourceDeviceId or item.source_device_id
+    if type(raw) ~= "string" then
+        return nil
+    end
+    return safeToString(raw)
 end
 
 local function firstNonEmpty(...)
@@ -536,7 +605,8 @@ end
 
 local function firstNumber(...)
     for i = 1, select("#", ...) do
-        local value = tonumber(select(i, ...))
+        local candidate = select(i, ...)
+        local value = tonumber(candidate)
         if value then
             return value
         end
@@ -552,6 +622,52 @@ local function payloadLocation(payload)
         return payload.location
     end
     return {}
+end
+
+local function pdfBookmarkPage(payload)
+    local location = payloadLocation(payload)
+    local page = firstNumber(payload and payload.page, payload and payload.pageno, location.pageno)
+    if not page or page < 1 then
+        return nil
+    end
+    return math.floor(page)
+end
+
+local function isPdfMetadataContext(context)
+    if type(context) ~= "table" then
+        return false
+    end
+    local format = safeToString(context.file_format or context.fileFormat or context.book_type or context.bookType):lower()
+    if format == "pdf" then
+        return true
+    end
+    local file_path = safeToString(context.file_path or context.filePath):lower()
+    return file_path:match("%.pdf$") ~= nil
+end
+
+local function isGrimmoryWebBookmark(item, payload)
+    if type(item) ~= "table" then
+        return false
+    end
+    local device_id = safeToString(remoteItemDeviceId(item))
+    local device = safeToString(item.device or item.sourceDevice or item.source_device):lower()
+    local source = safeToString(payload and payload.source):lower()
+    return device_id == "" and (device == "grimmory web" or source == "grimmory-web")
+end
+
+local function addUniquePage(pages, page_index, page)
+    if page == nil or page_index[page] then
+        return
+    end
+    page_index[page] = true
+    pages[#pages + 1] = page
+end
+
+local function sortPages(pages)
+    table.sort(pages, function(a, b)
+        return tonumber(a) < tonumber(b)
+    end)
+    return pages
 end
 
 local function normalizeRemoteRatingPayload(payload)
@@ -619,6 +735,29 @@ local function annotationListHasRemoteDedupe(annotations, dedupe_key)
         if type(entry) == "table" then
             local existing = entry.grimmlink_dedupe_key or entry.dedupeKey or entry.dedupe_key
             if existing ~= nil and safeToString(existing) == dedupe_key then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function annotationListHasBookmarkLocation(annotations, payload)
+    if type(annotations) ~= "table" or type(payload) ~= "table" then
+        return false
+    end
+    local location = payloadLocation(payload)
+    local page = firstNumber(payload.page, payload.pageno, location.pageno)
+    local anchor = firstNonEmpty(payload.pos0, location.pos0, location.cfi, payload.location, location.raw)
+    for _, entry in pairs(annotations) do
+        if type(entry) == "table" and firstNonEmpty(entry.pos1) == nil then
+            local existing_page = firstNumber(entry.page, entry.pageno)
+            local existing_anchor = firstNonEmpty(entry.pos0, entry.location)
+            if page ~= nil and existing_page == page then
+                return true
+            end
+            if anchor ~= nil and existing_anchor ~= nil
+                and safeToString(existing_anchor) == safeToString(anchor) then
                 return true
             end
         end
@@ -700,6 +839,95 @@ function Grimmlink:buildRemoteBookmarkEntry(item, payload, as_annotation_note)
     }
 end
 
+function Grimmlink:getVisiblePdfBookmarkPageIndex(context)
+    local page_index = {}
+    local pages = {}
+    if not isPdfMetadataContext(context) or not self.ui then
+        return page_index, pages, false
+    end
+
+    local active_file = self.ui.document and safeToString(self.ui.document.file) or ""
+    local context_file = safeToString(context and (context.file_path or context.filePath))
+    if active_file ~= "" and context_file ~= "" and active_file ~= context_file then
+        return page_index, pages, false
+    end
+
+    local used_bookmark_api = false
+    local bookmark = self.ui.bookmark
+    if bookmark and type(bookmark.getBookmarkedPages) == "function" then
+        local ok, bookmarked_pages = pcall(bookmark.getBookmarkedPages, bookmark)
+        if ok and type(bookmarked_pages) == "table" then
+            used_bookmark_api = true
+            for page, types in pairs(bookmarked_pages) do
+                if type(types) == "table" and types.bookmark == true then
+                    addUniquePage(pages, page_index, firstNumber(page))
+                end
+            end
+        end
+    end
+
+    if not used_bookmark_api and self.ui.annotation and type(self.ui.annotation.annotations) == "table" then
+        pcall(function()
+            for _, entry in pairs(self.ui.annotation.annotations) do
+                if type(entry) == "table" and not entry.drawer then
+                    addUniquePage(pages, page_index, firstNumber(entry.page, entry.pageno))
+                end
+            end
+        end)
+        used_bookmark_api = true
+    end
+
+    return page_index, sortPages(pages), used_bookmark_api
+end
+
+function Grimmlink:applyPulledPdfWebBookmark(context, doc_settings, item, payload, page)
+    local entry = {
+        page = page,
+        pageno = page,
+        text = firstNonEmpty(payload.title, payload.text, payload.highlight),
+        note = firstNonEmpty(payload.notes, payload.note),
+        chapter = firstNonEmpty(payload.chapter),
+        datetime = firstNonEmpty(payload.createdAt, payload.created_at, payload.datetime, payload.updatedAt, payload.updated_at,
+            item.clientUpdatedAt, item.updatedAt, item.syncedAt, nowUtc()),
+        grimmlink_remote_id = safeToString(item.id),
+        grimmlink_dedupe_key = remoteItemDedupeKey(item),
+        grimmlink_source = "remote",
+        grimmlink_remote_type = "bookmark",
+    }
+
+    local annotation = self.ui and self.ui.annotation or nil
+    local active_doc_settings = self.ui and self.ui.doc_settings or nil
+    local active_file = self.ui and self.ui.document and safeToString(self.ui.document.file) or ""
+    local context_file = safeToString(context and (context.file_path or context.filePath))
+    local can_apply_live = doc_settings == active_doc_settings
+        and (active_file == "" or context_file == "" or active_file == context_file)
+    if can_apply_live and annotation and type(annotation.annotations) == "table"
+        and type(annotation.addItem) == "function" then
+        local ok_add, index = pcall(annotation.addItem, annotation, entry)
+        if not ok_add or not index then
+            return false, "bookmark_add_failed"
+        end
+        doc_settings.annotations = annotation.annotations
+        if type(tryWriteSetting) == "function" then
+            tryWriteSetting(doc_settings, "annotations", annotation.annotations)
+        end
+        return true, "bookmark_applied"
+    end
+
+    local annotations = type(tryReadSetting) == "function" and tryReadSetting(doc_settings, "annotations") or nil
+    if type(annotations) ~= "table" then
+        annotations = type(doc_settings.annotations) == "table" and cloneForMetadata(doc_settings.annotations) or {}
+    else
+        annotations = cloneForMetadata(annotations)
+    end
+    table.insert(annotations, entry)
+    doc_settings.annotations = annotations
+    if type(tryWriteSetting) == "function" then
+        tryWriteSetting(doc_settings, "annotations", annotations)
+    end
+    return true, "bookmark_applied"
+end
+
 function Grimmlink:buildRemoteAnnotationEntry(item, payload)
     local location = payloadLocation(payload)
     local pos0 = firstNonEmpty(payload.pos0, location.pos0)
@@ -742,6 +970,9 @@ function Grimmlink:appendPulledAnnotationLikeItem(doc_settings, item, payload)
 
     local entry, status
     local item_type = normalizeRemoteMetadataType(item.type)
+    if item_type == "bookmark" and annotationListHasBookmarkLocation(annotations, payload) then
+        return true, "already_at_location"
+    end
     if item_type == "annotation" then
         entry, status = self:buildRemoteAnnotationEntry(item, payload)
     else
@@ -813,6 +1044,15 @@ local function addMetadataSkipReason(result, reason)
     result.skipped_reasons[normalized] = (result.skipped_reasons[normalized] or 0) + 1
 end
 
+local function addMetadataFailureReason(result, reason)
+    local normalized = safeToString(reason)
+    if normalized == "" then
+        normalized = "unspecified"
+    end
+    result.failed_reasons = result.failed_reasons or {}
+    result.failed_reasons[normalized] = (result.failed_reasons[normalized] or 0) + 1
+end
+
 function Grimmlink:applyPulledMetadataItems(context, items)
     local result = {
         applied = 0,
@@ -820,6 +1060,13 @@ function Grimmlink:applyPulledMetadataItems(context, items)
         failed = 0,
         changed = false,
         skipped_reasons = {},
+        failed_reasons = {},
+        remote_web_pages = {},
+        visible_local_pages = {},
+        missing_web_pages = {},
+        applied_pages = {},
+        skipped_duplicate_pages = {},
+        failed_pages = {},
     }
     if type(items) ~= "table" or #items == 0 then
         return result
@@ -827,6 +1074,7 @@ function Grimmlink:applyPulledMetadataItems(context, items)
     if not context or not context.file_hash or context.file_hash == "" then
         result.failed = #items
         result.reason = "missing_file_hash"
+        addMetadataFailureReason(result, result.reason)
         return result
     end
 
@@ -834,11 +1082,34 @@ function Grimmlink:applyPulledMetadataItems(context, items)
     local doc_settings = nil
     local should_close = false
     local doc_settings_loaded = false
+    local pdf_context = isPdfMetadataContext(context)
+    local visible_pdf_pages = {}
+    local visible_pdf_source_available = false
+    if pdf_context then
+        visible_pdf_pages, result.visible_local_pages, visible_pdf_source_available =
+            self:getVisiblePdfBookmarkPageIndex(context)
+    end
+    local remote_web_page_index = {}
+    local missing_web_page_index = {}
+    local applied_page_index = {}
+    local skipped_duplicate_page_index = {}
+    local failed_page_index = {}
 
     for _, item in ipairs(items) do
         local item_type = normalizeRemoteMetadataType(item and item.type)
         local dedupe_key = remoteItemDedupeKey(item)
         local payload = remoteItemPayload(item)
+        local is_pdf_bookmark = pdf_context and item_type == "bookmark" and type(payload) == "table"
+        local pdf_page = is_pdf_bookmark and pdfBookmarkPage(payload) or nil
+        local is_web_pdf_bookmark = is_pdf_bookmark and isGrimmoryWebBookmark(item, payload)
+        local repair_missing_web_bookmark = is_web_pdf_bookmark and visible_pdf_source_available
+            and pdf_page ~= nil and not visible_pdf_pages[pdf_page]
+        if is_web_pdf_bookmark and pdf_page then
+            addUniquePage(result.remote_web_pages, remote_web_page_index, pdf_page)
+            if repair_missing_web_bookmark then
+                addUniquePage(result.missing_web_pages, missing_web_page_index, pdf_page)
+            end
+        end
         if not item_type then
             result.skipped = result.skipped + 1
             addMetadataSkipReason(result, "unsupported_type:" .. safeToString(item and item.type))
@@ -861,11 +1132,20 @@ function Grimmlink:applyPulledMetadataItems(context, items)
             self:markRemoteMetadataItemApplied(context, item, "bookmark_disabled")
             result.skipped = result.skipped + 1
             addMetadataSkipReason(result, "bookmark_disabled")
+        elseif is_pdf_bookmark and not pdf_page then
+            result.failed = result.failed + 1
+            addMetadataFailureReason(result, "invalid_pdf_bookmark_page")
+        elseif is_pdf_bookmark and visible_pdf_source_available and visible_pdf_pages[pdf_page] then
+            self:markRemoteMetadataItemApplied(context, item, "already_visible_page")
+            result.skipped = result.skipped + 1
+            addMetadataSkipReason(result, "already_visible_page")
+            addUniquePage(result.skipped_duplicate_pages, skipped_duplicate_page_index, pdf_page)
         elseif remoteItemDeviceId(item) and self.device_id and remoteItemDeviceId(item) == safeToString(self.device_id) then
             self:markRemoteMetadataItemApplied(context, item, "skipped_same_device")
             result.skipped = result.skipped + 1
             addMetadataSkipReason(result, "same_device")
-        elseif safeDbBoolCall(self.db, "isRemoteMetadataItemApplied", context.file_hash, item_type, dedupe_key) then
+        elseif not repair_missing_web_bookmark
+            and safeDbBoolCall(self.db, "isRemoteMetadataItemApplied", context.file_hash, item_type, dedupe_key) then
             result.skipped = result.skipped + 1
             addMetadataSkipReason(result, "already_applied")
         else
@@ -879,13 +1159,31 @@ function Grimmlink:applyPulledMetadataItems(context, items)
                 result.failed = result.failed + 1
                 result.reason = context.file_path and context.file_path ~= ""
                     and "doc_settings_unavailable" or "missing_file_path"
+                if is_pdf_bookmark and pdf_page then
+                    addUniquePage(result.failed_pages, failed_page_index, pdf_page)
+                end
+                addMetadataFailureReason(result, result.reason)
                 self:logWarn("GrimmLink metadata pull cannot apply:", result.reason)
             else
-                local ok_apply, applied, status = pcall(self.applyPulledMetadataItem, self, doc_settings, item)
+                local ok_apply, applied, status
+                if repair_missing_web_bookmark then
+                    ok_apply, applied, status = pcall(
+                        self.applyPulledPdfWebBookmark,
+                        self,
+                        context,
+                        doc_settings,
+                        item,
+                        payload,
+                        pdf_page
+                    )
+                else
+                    ok_apply, applied, status = pcall(self.applyPulledMetadataItem, self, doc_settings, item)
+                end
                 if ok_apply and applied == true then
                     self:markRemoteMetadataItemApplied(context, item, status or "applied")
                     local normalized_status = safeToString(status)
                     if normalized_status == "already_in_docsettings"
+                        or normalized_status == "already_at_location"
                         or normalized_status:find("disabled", 1, true)
                         or normalized_status:find("skipped_", 1, true) then
                         result.skipped = result.skipped + 1
@@ -893,9 +1191,17 @@ function Grimmlink:applyPulledMetadataItems(context, items)
                     else
                         result.applied = result.applied + 1
                         result.changed = true
+                        if is_pdf_bookmark and pdf_page then
+                            visible_pdf_pages[pdf_page] = true
+                            addUniquePage(result.applied_pages, applied_page_index, pdf_page)
+                        end
                     end
                 else
                     result.failed = result.failed + 1
+                    if is_pdf_bookmark and pdf_page then
+                        addUniquePage(result.failed_pages, failed_page_index, pdf_page)
+                    end
+                    addMetadataFailureReason(result, status or applied or (not ok_apply and "apply_exception") or "apply_failed")
                     self:logWarn("GrimmLink metadata pull apply failed type=", item_type,
                         " dedupe=", shortPrefix(dedupe_key, 16), " reason=", safeToString(status or applied or ok_apply))
                 end
@@ -909,6 +1215,11 @@ function Grimmlink:applyPulledMetadataItems(context, items)
     if doc_settings and should_close and type(tryCloseDocSettings) == "function" then
         tryCloseDocSettings(doc_settings)
     end
+    sortPages(result.remote_web_pages)
+    sortPages(result.missing_web_pages)
+    sortPages(result.applied_pages)
+    sortPages(result.skipped_duplicate_pages)
+    sortPages(result.failed_pages)
     return result
 end
 
@@ -972,7 +1283,9 @@ local function formatMetadataSkipReasons(reasons)
     end
     local labels = {
         already_applied = _("already applied"),
+        already_at_location = _("already present at this location"),
         already_in_docsettings = _("already present locally"),
+        already_visible_page = _("already visible on this page"),
         annotation_disabled = _("annotation sync disabled"),
         bookmark_disabled = _("bookmark sync disabled"),
         malformed_payload = _("malformed item"),
@@ -995,6 +1308,32 @@ local function formatMetadataSkipReasons(reasons)
     return table.concat(parts, ", ")
 end
 
+local function formatMetadataFailureReasons(reasons)
+    if type(reasons) ~= "table" then
+        return ""
+    end
+    local labels = {
+        apply_exception = _("apply exception"),
+        apply_failed = _("apply failed"),
+        doc_settings_unavailable = _("book settings unavailable"),
+        invalid_annotation = _("invalid annotation or bookmark"),
+        invalid_item = _("invalid item"),
+        invalid_pdf_bookmark_page = _("invalid PDF bookmark page"),
+        invalid_rating = _("invalid rating"),
+        missing_file_hash = _("missing book hash"),
+        missing_file_path = _("missing book path"),
+        unsupported_item_type = _("unsupported item type"),
+        unspecified = _("unspecified"),
+    }
+    local parts = {}
+    for reason, count in pairs(reasons) do
+        local label = labels[reason] or reason
+        parts[#parts + 1] = T(_("%1 (%2)"), label, count)
+    end
+    table.sort(parts)
+    return table.concat(parts, ", ")
+end
+
 local function newMetadataPullResult()
     return {
         pulled = 0,
@@ -1002,7 +1341,25 @@ local function newMetadataPullResult()
         skipped = 0,
         failed = 0,
         cursor_saved = false,
+        failed_reasons = {},
+        remote_web_pages = {},
+        visible_local_pages = {},
+        missing_web_pages = {},
+        applied_pages = {},
+        skipped_duplicate_pages = {},
+        failed_pages = {},
     }
+end
+
+local function formatMetadataPageList(pages)
+    if type(pages) ~= "table" or #pages == 0 then
+        return "[]"
+    end
+    local values = {}
+    for _, page in ipairs(pages) do
+        values[#values + 1] = tostring(page)
+    end
+    return "[" .. table.concat(values, ", ") .. "]"
 end
 
 function Grimmlink:closeMetadataPullProgress()
@@ -1027,6 +1384,28 @@ function Grimmlink:showMetadataPullProgress(stage, detail)
     }
     local widget = InfoMessage:new{
         text = table.concat(lines, "\n"),
+        timeout = 90,
+    }
+    self._metadata_pull_progress_widget = widget
+    UIManager:show(widget)
+    if type(UIManager.forceRePaint) == "function" then
+        pcall(UIManager.forceRePaint, UIManager)
+    end
+end
+
+function Grimmlink:showMetadataPullCompatibilityProgress()
+    if not UIManager or not InfoMessage then
+        return
+    end
+    self:closeMetadataPullProgress()
+    local widget = InfoMessage:new{
+        text = table.concat({
+            _("Pulling remote metadata"),
+            "",
+            _("Please wait..."),
+            _("Background HTTP tools are unavailable."),
+            _("Using KOReader's built-in HTTP client; the UI may pause briefly."),
+        }, "\n"),
         timeout = 90,
     }
     self._metadata_pull_progress_widget = widget
@@ -1070,7 +1449,15 @@ function Grimmlink:processMetadataPullResponse(context, pull, code, silent, item
     result.skipped = apply_result.skipped or 0
     result.failed = apply_result.failed or 0
     result.skipped_reasons = apply_result.skipped_reasons or {}
+    result.failed_reasons = apply_result.failed_reasons or {}
+    result.remote_web_pages = apply_result.remote_web_pages or {}
+    result.visible_local_pages = apply_result.visible_local_pages or {}
+    result.missing_web_pages = apply_result.missing_web_pages or {}
+    result.applied_pages = apply_result.applied_pages or {}
+    result.skipped_duplicate_pages = apply_result.skipped_duplicate_pages or {}
+    result.failed_pages = apply_result.failed_pages or {}
     result.reason = apply_result.reason
+    self._last_metadata_pull_result = result
 
     if result.failed == 0 and pull.nextCursor ~= nil and pull.nextCursor ~= "" then
         result.cursor_saved = self:saveMetadataCursor(
@@ -1095,6 +1482,20 @@ function Grimmlink:processMetadataPullResponse(context, pull, code, silent, item
             local skip_reasons = formatMetadataSkipReasons(result.skipped_reasons)
             if skip_reasons ~= "" then
                 message = message .. "\n" .. T(_("Skipped reasons: %1"), skip_reasons)
+            end
+            local failed_reasons = formatMetadataFailureReasons(result.failed_reasons)
+            if failed_reasons ~= "" then
+                message = message .. "\n" .. T(_("Failed reasons: %1"), failed_reasons)
+            end
+            if isPdfMetadataContext(context)
+                and (normalizeRemoteMetadataType(item_type) == "bookmark" or #result.remote_web_pages > 0) then
+                message = message
+                    .. "\nremote_web_pages: " .. formatMetadataPageList(result.remote_web_pages)
+                    .. "\nvisible_local_pages: " .. formatMetadataPageList(result.visible_local_pages)
+                    .. "\nmissing_web_pages: " .. formatMetadataPageList(result.missing_web_pages)
+                    .. "\napplied_pages: " .. formatMetadataPageList(result.applied_pages)
+                    .. "\nskipped_duplicate_pages: " .. formatMetadataPageList(result.skipped_duplicate_pages)
+                    .. "\nfailed_pages: " .. formatMetadataPageList(result.failed_pages)
             end
             self:showMessage(message, 5)
         end
@@ -1440,6 +1841,31 @@ function Grimmlink:startRemoteMetadataPullAsync(context, limit, item_type, silen
     local pending_result = newMetadataPullResult()
     pending_result.pending = true
 
+    local function startCompatibilityFallback()
+        pending_result.reason = "compatibility_fallback"
+        self._metadata_pull_running = true
+        self._metadata_pull_handle = nil
+        self:showMetadataPullCompatibilityProgress()
+        UIManager:scheduleIn(0.1, function()
+            local pull_ok, pull_result = pcall(
+                self.pullRemoteMetadataForContext,
+                self,
+                context,
+                false,
+                limit,
+                item_type
+            )
+            self._metadata_pull_running = false
+            self._metadata_pull_handle = nil
+            self:closeMetadataPullProgress()
+            if not pull_ok then
+                self:logWarn("GrimmLink compatibility metadata pull failed:", safeToString(pull_result))
+                self:showMessage(_("Remote metadata pull failed safely. Please try again."), 5)
+            end
+        end)
+        return pending_result
+    end
+
     if self._metadata_pull_running then
         pending_result.reason = "already_running"
         if not silent then
@@ -1486,6 +1912,12 @@ function Grimmlink:startRemoteMetadataPullAsync(context, limit, item_type, silen
         pending_result.reason = "api_unavailable"
         return pending_result
     end
+    if not silent and type(self.api.isAsyncDownloadAvailable) == "function" then
+        local available_ok, background_available = pcall(self.api.isAsyncDownloadAvailable, self.api)
+        if available_ok and not background_available then
+            return startCompatibilityFallback()
+        end
+    end
 
     local pull_since = self:getMetadataCursor(context.file_hash, context.book_id, context.book_file_id, item_type)
     local start_ok, handle, start_error = pcall(
@@ -1500,16 +1932,15 @@ function Grimmlink:startRemoteMetadataPullAsync(context, limit, item_type, silen
         { timeout = 25 }
     )
     if not start_ok or not handle then
+        local failure_reason = start_ok and start_error or handle
+        local failure_text = safeToString(failure_reason) or ""
+        self:logWarn("GrimmLink background metadata pull could not start:", failure_text)
+        if not silent then
+            return startCompatibilityFallback()
+        end
         pending_result.pending = false
         pending_result.failed = 1
         pending_result.reason = "background_start_failed"
-        self:logWarn("GrimmLink background metadata pull could not start:", safeToString(start_error or handle))
-        if not silent then
-            self:showMessage(
-                _("Could not start a safe background metadata pull. Check that curl or wget is available."),
-                5
-            )
-        end
         return pending_result
     end
 
@@ -1883,7 +2314,18 @@ function Grimmlink:syncMetadataNow()
 
     local pending_after_queue = safeDbValueCall(self.db, "getPendingMetadataCount", 0)
     if (tonumber(pending_after_queue) or 0) <= 0 then
-        self:showMessage(T(_("No metadata to sync\nQueue failed: %1"), queue_failed_count), 3)
+        local skipped_synced_count = 0
+        if queued_result and type(queued_result.queued) == "table" then
+            skipped_synced_count = tonumber(queued_result.queued.skipped_synced) or 0
+        end
+        if skipped_synced_count > 0 then
+            self:showMessage(T(
+                _("No new metadata queued\nAlready marked synced: %1\nUse Force Metadata Re-upload if Grimmory/Web Reader is missing it."),
+                skipped_synced_count
+            ), 6)
+        else
+            self:showMessage(T(_("No metadata to sync\nQueue failed: %1"), queue_failed_count), 3)
+        end
         return
     end
 

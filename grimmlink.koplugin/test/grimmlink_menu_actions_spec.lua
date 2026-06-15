@@ -94,6 +94,18 @@ describe("grimmlink_menu_actions", function()
         local plugin = {
             showReadingCompletionMenu = function() called.completion = true end,
             manualPullProgress = function() called.pull = true end,
+            syncPendingNow = function() called.sync_pending = true end,
+            showMetadataPreview = function() called.preview = true end,
+            syncMetadataNow = function() called.sync_metadata = true end,
+            forceMetadataResyncForCurrentBook = function() called.force_metadata = true end,
+            pullRemoteMetadataNow = function(_, silent, limit, item_type)
+                if item_type == "bookmark" then
+                    called.bookmarks = silent == false and limit == 100
+                else
+                    called.metadata = silent == false and limit == 100
+                end
+            end,
+            resetMetadataPullCursorForCurrentBook = function() called.reset_cursor = true end,
             showManualReadStatusMenu = function() called.status = true end,
             showMessage = function() called.summary = true end,
             db = {
@@ -105,7 +117,8 @@ describe("grimmlink_menu_actions", function()
         local sub_items = {
             { id = "enable_grimmlink", text = "Enable" },
             { id = "connection", text = "Connection" },
-            { id = "sync_pending_now", text = "Sync Pending" },
+            { id = "sync_pending_now", text = "Sync Pending Now" },
+            { id = "force_metadata_reupload", text = "Force Re-upload" },
             { id = "sync_shelf_now", text = "Sync Shelf" },
             { id = "advanced_setting", text = "Advanced" },
             { id = "status_about", text = "Status" },
@@ -113,27 +126,70 @@ describe("grimmlink_menu_actions", function()
 
         menu_actions:applyReaderBookTopLevelOverrides(plugin, sub_items, {})
 
+        -- Verify top-level structure: removed 7 items, inserted 5
         local ids = {}
         for _, item in ipairs(sub_items) do
             ids[#ids + 1] = item.id
         end
         assert.are.same({
-            "enable_grimmlink",
+            "sync_reading_progress",
             "sync_pending_now",
-            "reading_completion",
-            "pull_remote_progress",
-            "manual_reading_status",
-            "sync_summary",
+            "pull_web_bookmarks",
+            "status_menu",
+            "advanced_sync",
         }, ids)
 
-        sub_items[3].callback()
-        sub_items[4].callback()
-        sub_items[5].callback()
-        sub_items[6].callback()
-        assert.is_true(called.completion == true)
+        -- Top-level items 1-3: direct callbacks
+        sub_items[1].callback() -- sync_reading_progress
         assert.is_true(called.pull == true)
-        assert.is_true(called.status == true)
+
+        sub_items[2].callback() -- sync_pending_now
+        assert.is_true(called.sync_pending == true)
+
+        sub_items[3].callback() -- pull_web_bookmarks
+        assert.is_true(called.bookmarks == true)
+
+        -- Status submenu (item 4)
+        local status_items = sub_items[4].sub_item_table
+        assert.are.equal("Status", sub_items[4].text)
+        assert.are.equal(2, #status_items)
+        assert.are.equal("sync_summary", status_items[1].id)
+        assert.are.equal("set_reading_status", status_items[2].id)
+
+        status_items[1].callback() -- Sync Summary
         assert.is_true(called.summary == true)
+
+        -- Set Reading Status sub-submenu
+        local reading_status_items = status_items[2].sub_item_table
+        assert.are.equal(2, #reading_status_items)
+        assert.are.equal("reading_completion", reading_status_items[1].id)
+        assert.are.equal("manual_status", reading_status_items[2].id)
+
+        reading_status_items[1].callback() -- Reading Completion
+        assert.is_true(called.completion == true)
+
+        reading_status_items[2].callback() -- Manual Status
+        assert.is_true(called.status == true)
+
+        -- Advanced Sync submenu (item 5)
+        local advanced_items = sub_items[5].sub_item_table
+        assert.are.equal("Advanced Sync", sub_items[5].text)
+        assert.are.equal(5, #advanced_items)
+
+        advanced_items[1].callback() -- Push All Metadata
+        assert.is_true(called.sync_metadata == true)
+
+        advanced_items[2].callback() -- Pull All Remote Metadata
+        assert.is_true(called.metadata == true)
+
+        advanced_items[3].callback() -- Preview Metadata
+        assert.is_true(called.preview == true)
+
+        advanced_items[4].callback() -- Force Re-upload
+        assert.is_true(called.force_metadata == true)
+
+        advanced_items[5].callback() -- Reset Pull Cursor
+        assert.is_true(called.reset_cursor == true)
     end)
 
     it("builds Maintenance menu sections", function()

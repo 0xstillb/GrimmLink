@@ -261,6 +261,11 @@ function Grimmlink:addToMainMenu(menu_items)
                 callback = function() self:syncPendingNow(false) end,
             },
             {
+                id = "force_metadata_reupload",
+                text = _("Force Metadata Re-upload"),
+                callback = function() self:forceMetadataResyncForCurrentBook() end,
+            },
+            {
                 id = "sync_shelf_now",
                 text = _("Sync Shelf Now"),
                 callback = function() self:syncShelfNow(false) end,
@@ -698,6 +703,14 @@ function Grimmlink:addToMainMenu(menu_items)
                                 callback = function() self:showMetadataPreview() end,
                             },
                             {
+                                text = _("Sync Metadata Now"),
+                                callback = function() self:syncMetadataNow() end,
+                            },
+                            {
+                                text = _("Force Metadata Re-upload"),
+                                callback = function() self:forceMetadataResyncForCurrentBook() end,
+                            },
+                            {
                                 text = _("Pull Remote Metadata Now"),
                                 callback = function() self:pullRemoteMetadataNow(false, 100) end,
                             },
@@ -803,7 +816,10 @@ function Grimmlink:addToMainMenu(menu_items)
             for i = #sub_items, 1, -1 do
                 local item = sub_items[i]
                 if item and (
-                    item.id == "connection"
+                    item.id == "enable_grimmlink"
+                    or item.id == "connection"
+                    or item.id == "sync_pending_now"
+                    or item.id == "force_metadata_reupload"
                     or item.id == "sync_shelf_now"
                     or item.id == "advanced_setting"
                     or item.id == "status_about"
@@ -811,25 +827,78 @@ function Grimmlink:addToMainMenu(menu_items)
                     table.remove(sub_items, i)
                 end
             end
-            table.insert(sub_items, 3, {
-                id = "reading_completion",
-                text = _("Reading Completion"),
-                callback = function() self:showReadingCompletionMenu() end,
+            table.insert(sub_items, {
+                id = "sync_reading_progress",
+                text = _("Sync Reading Progress"),
+                callback = function() plugin:manualPullProgress() end,
             })
-            table.insert(sub_items, 4, {
-                id = "pull_remote_progress",
-                text = _("Pull Remote Progress"),
-                callback = function() self:manualPullProgress() end,
+            table.insert(sub_items, {
+                id = "sync_pending_now",
+                text = _("Sync Pending Now"),
+                callback = function() plugin:syncPendingNow(false) end,
             })
-            table.insert(sub_items, 5, {
-                id = "manual_reading_status",
-                text = _("Manual Reading Status"),
-                callback = function() self:showManualReadStatusMenu() end,
+            table.insert(sub_items, {
+                id = "pull_web_bookmarks",
+                text = _("Pull Web Bookmarks"),
+                callback = function() plugin:pullRemoteMetadataNow(false, 100, "bookmark") end,
             })
-            table.insert(sub_items, 6, {
-                id = "sync_summary",
-                text = _("Sync Summary"),
-                callback = showSyncSummary,
+            table.insert(sub_items, {
+                id = "status_menu",
+                text = _("Status"),
+                sub_item_table = {
+                    {
+                        id = "sync_summary",
+                        text = _("Sync Summary"),
+                        callback = showSyncSummary,
+                    },
+                    {
+                        id = "set_reading_status",
+                        text = _("Set Reading Status"),
+                        sub_item_table = {
+                            {
+                                id = "reading_completion",
+                                text = _("Reading Completion"),
+                                callback = function() self:showReadingCompletionMenu() end,
+                            },
+                            {
+                                id = "manual_status",
+                                text = _("Manual Status"),
+                                callback = function() self:showManualReadStatusMenu() end,
+                            },
+                        },
+                    },
+                },
+            })
+            table.insert(sub_items, {
+                id = "advanced_sync",
+                text = _("Advanced Sync"),
+                sub_item_table = {
+                    {
+                        id = "sync_metadata_now",
+                        text = _("Push All Metadata"),
+                        callback = function() self:syncMetadataNow() end,
+                    },
+                    {
+                        id = "pull_remote_metadata",
+                        text = _("Pull All Remote Metadata"),
+                        callback = function() self:pullRemoteMetadataNow(false, 100) end,
+                    },
+                    {
+                        id = "preview_metadata",
+                        text = _("Preview Metadata"),
+                        callback = function() self:showMetadataPreview() end,
+                    },
+                    {
+                        id = "force_metadata_reupload",
+                        text = _("Force Re-upload"),
+                        callback = function() self:forceMetadataResyncForCurrentBook() end,
+                    },
+                    {
+                        id = "reset_metadata_pull_cursor",
+                        text = _("Reset Pull Cursor"),
+                        callback = function() self:resetMetadataPullCursorForCurrentBook() end,
+                    },
+                },
             })
         end
     end

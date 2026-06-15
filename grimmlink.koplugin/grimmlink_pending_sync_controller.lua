@@ -36,7 +36,7 @@ function Grimmlink:syncPendingNow(silent, opts)
         if context and not self:isTrackingEnabledForContext(context) then
             self:showTrackingDisabledMessage()
         else
-            self:extractAndQueueCurrentMetadata("manual-sync", context)
+            self:extractAndQueueCurrentMetadata("manual-sync")
         end
         if not self:isOnline() then
             self:maybePromptEnableWifiForManualSync()
