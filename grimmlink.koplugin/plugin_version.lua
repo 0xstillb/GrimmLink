@@ -1,6 +1,6 @@
 return {
-    version = "v1.5.2-pullback.2-metadata-fix2",
+    version = "v2.0.0",
     version_type = "release",
-    git_commit = "local-metadata-fix2",
-    build_date = "2026-06-14T23:30:00+07:00",
+    git_commit = "99949d6",
+    build_date = "2026-06-15T23:45:00+07:00",
 }

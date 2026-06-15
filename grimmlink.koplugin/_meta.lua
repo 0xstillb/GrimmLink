@@ -2,5 +2,5 @@ local _ = require("gettext")
 return {
     fullname = _("GrimmLink"),
     description = _("KOReader Companion for Grimmory"),
-    version = "v1.5.2-pullback.2-metadata-fix2",
+    version = "v2.0.0",
 }
