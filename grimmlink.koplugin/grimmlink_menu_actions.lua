@@ -209,6 +209,20 @@ function M:applyReaderBookTopLevelOverrides(plugin, sub_items, options)
             end,
         },
         {
+            id = "pull_remote_bookmarks",
+            text = _("Pull Bookmarks Now"),
+            callback = function()
+                plugin:pullRemoteMetadataNow(false, 100, "bookmark")
+            end,
+        },
+        {
+            id = "reset_metadata_pull_cursor",
+            text = _("Reset Metadata Pull Cursor"),
+            callback = function()
+                plugin:resetMetadataPullCursorForCurrentBook()
+            end,
+        },
+        {
             id = "manual_reading_status",
             text = _("Manual Reading Status"),
             callback = function()

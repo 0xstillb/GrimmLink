@@ -754,6 +754,44 @@ local function newDocSettings(initial)
     }
 end
 
+local function installPdfBookmarkUi(plugin, pages)
+    local annotations = {}
+    for _, page in ipairs(pages or {}) do
+        annotations[#annotations + 1] = {
+            page = page,
+            pageno = page,
+            title = "Page " .. tostring(page),
+        }
+    end
+    plugin.ui.annotation = {
+        annotations = annotations,
+        addItem = function(self, item)
+            item.pageno = item.page
+            local index = #self.annotations + 1
+            for i, existing in ipairs(self.annotations) do
+                if tonumber(item.page) < tonumber(existing.page) then
+                    index = i
+                    break
+                end
+            end
+            table.insert(self.annotations, index, item)
+            return index
+        end,
+    }
+    plugin.ui.bookmark = {
+        getBookmarkedPages = function()
+            local bookmarked_pages = {}
+            for _, item in ipairs(plugin.ui.annotation.annotations) do
+                if not item.drawer then
+                    bookmarked_pages[item.page] = { bookmark = true }
+                end
+            end
+            return bookmarked_pages
+        end,
+    }
+    return annotations
+end
+
 describe("GrimmLink helper methods", function()
     before_each(function()
         if UIManager.reset then
@@ -2105,6 +2143,7 @@ describe("GrimmLink helper methods", function()
 
     it("does not duplicate a pulled bookmark already present at the same page", function()
         local plugin = newPlugin({ metadata_sync_enabled = true })
+        installPdfBookmarkUi(plugin, { 42 })
         plugin.ui.doc_settings = newDocSettings({
             annotations = {
                 {
@@ -2147,8 +2186,116 @@ describe("GrimmLink helper methods", function()
         assert.are.equal(0, result.applied)
         assert.are.equal(1, result.skipped)
         assert.are.equal(0, result.failed)
-        assert.are.equal(1, result.skipped_reasons.already_at_location)
+        assert.are.equal(1, result.skipped_reasons.already_visible_page)
+        assert.are.same({ 42 }, result.remote_web_pages)
+        assert.are.same({ 42 }, result.visible_local_pages)
+        assert.are.same({}, result.missing_web_pages)
+        assert.are.same({ 42 }, result.skipped_duplicate_pages)
         assert.are.equal(1, #plugin.ui.doc_settings._store.annotations)
+    end)
+
+    it("applies missing PDF web bookmark pages despite applied history and hidden doc settings", function()
+        local plugin = newPlugin({ metadata_sync_enabled = true })
+        local local_pages = { 60, 62, 64, 65, 66, 67, 70, 72, 74, 76 }
+        local web_pages = { 60, 62, 64, 65, 66, 67, 69, 70, 72, 74, 76, 78 }
+        local live_annotations = installPdfBookmarkUi(plugin, local_pages)
+        plugin.ui.document.file = "/books/demo.pdf"
+        plugin.ui.doc_settings = newDocSettings({
+            annotations = {
+                {
+                    page = 69,
+                    pageno = 69,
+                    grimmlink_dedupe_key = "grimmory-bookmark:69",
+                },
+                {
+                    page = 78,
+                    pageno = 78,
+                    grimmlink_dedupe_key = "grimmory-bookmark:78",
+                },
+            },
+        })
+
+        local items = {}
+        for _, page in ipairs(web_pages) do
+            items[#items + 1] = {
+                id = "grimmory-bookmark:" .. tostring(page),
+                type = "bookmark",
+                dedupeKey = "grimmory-bookmark:" .. tostring(page),
+                device = "Grimmory Web",
+                deviceId = nil,
+                payload = {
+                    title = "Page " .. tostring(page),
+                    page = page,
+                    location = { pageno = page },
+                    source = "grimmory-web",
+                },
+            }
+        end
+        for _, page in ipairs({ 69, 78 }) do
+            plugin.db:markRemoteMetadataItemApplied({
+                file_hash = "hash-pdf-web-bookmarks",
+                item_type = "bookmark",
+                dedupe_key = "grimmory-bookmark:" .. tostring(page),
+                remote_id = "grimmory-bookmark:" .. tostring(page),
+                status = "bookmark_applied",
+            })
+        end
+        plugin.api.next_metadata_pull = {
+            success = true,
+            response = {
+                ok = true,
+                nextCursor = "2026-06-15T00:00:57Z",
+                items = items,
+            },
+            code = 200,
+        }
+        local context = {
+            file_path = "/books/demo.pdf",
+            file_hash = "hash-pdf-web-bookmarks",
+            book_id = 1,
+            file_format = "PDF",
+        }
+
+        local first = plugin:pullRemoteMetadataForContext(context, true, 100, "bookmark")
+
+        assert.are.equal(2, first.applied)
+        assert.are.equal(10, first.skipped)
+        assert.are.equal(0, first.failed)
+        assert.are.same(web_pages, first.remote_web_pages)
+        assert.are.same(local_pages, first.visible_local_pages)
+        assert.are.same({ 69, 78 }, first.missing_web_pages)
+        assert.are.same({ 69, 78 }, first.applied_pages)
+        assert.are.same(local_pages, first.skipped_duplicate_pages)
+        assert.are.same({}, first.failed_pages)
+        assert.are.equal(12, #live_annotations)
+        assert.are.equal(live_annotations, plugin.ui.doc_settings._store.annotations)
+
+        local added_pages = {}
+        for _, item in ipairs(live_annotations) do
+            if item.page == 69 or item.page == 78 then
+                added_pages[item.page] = item
+            end
+        end
+        assert.are.equal("number", type(added_pages[69].page))
+        assert.are.equal(69, added_pages[69].pageno)
+        assert.is_nil(added_pages[69].pos0)
+        assert.is_nil(added_pages[69].pos1)
+        assert.is_nil(added_pages[69].location)
+        assert.is_nil(added_pages[69].drawer)
+        assert.are.equal("number", type(added_pages[78].page))
+        assert.are.equal(78, added_pages[78].pageno)
+
+        plugin.api.next_metadata_pull.response.nextCursor = "2026-06-15T00:01:57Z"
+        local second = plugin:pullRemoteMetadataForContext(context, true, 100, "bookmark")
+
+        assert.are.equal(0, second.applied)
+        assert.are.equal(12, second.skipped)
+        assert.are.equal(0, second.failed)
+        assert.are.same(web_pages, second.visible_local_pages)
+        assert.are.same({}, second.missing_web_pages)
+        assert.are.same({}, second.applied_pages)
+        assert.are.same(web_pages, second.skipped_duplicate_pages)
+        assert.are.equal(12, #live_annotations)
     end)
 
     it("applies good metadata items without advancing the cursor past a failed item", function()
