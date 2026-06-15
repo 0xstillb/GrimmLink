@@ -115,26 +115,37 @@ jobs:
           fi
 
       - name: Create plugin zip
+        id: zip
         run: |
           cd grimmlink.koplugin
-          zip -r /tmp/grimmlink-plugin.zip . -x "test/*"
-          echo "Zip created: $(ls -lh /tmp/grimmlink-plugin.zip | awk '{print $5}')"
+          ZIP_BASE="/tmp/grimmlink"
+          zip -r "${ZIP_BASE}.koplugin.zip" . -x "test/*"
+          VERSION="${{ steps.release_tag.outputs.tag }}"
+          VERSION_NO_V="${VERSION#v}"
+          cp "${ZIP_BASE}.koplugin.zip" "${ZIP_BASE}-${VERSION_NO_V}.zip"
+          echo "Zips created: $(ls -lh ${ZIP_BASE}.koplugin.zip ${ZIP_BASE}-${VERSION_NO_V}.zip)"
+          echo "version_no_v=${VERSION_NO_V}" >> "$GITHUB_OUTPUT"
 
       - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ steps.release_tag.outputs.tag }}"
-          ZIP_NAME="GrimmLink-${TAG}.zip"
-          cp /tmp/grimmlink-plugin.zip "/tmp/${ZIP_NAME}"
+          VER_NO_V="${{ steps.zip.outputs.version_no_v }}"
+          ZIP_NAMES=(
+            "/tmp/grimmlink.koplugin.zip#grimmlink.koplugin.zip"
+            "/tmp/grimmlink-${VER_NO_V}.zip#grimmlink-${VER_NO_V}.zip"
+          )
 
           if gh release view "$TAG" --json id &>/dev/null; then
-            echo "Release $TAG exists — uploading asset"
-            gh release upload "$TAG" "/tmp/${ZIP_NAME}#${ZIP_NAME}" --clobber
+            echo "Release $TAG exists — uploading assets"
+            for zip in "${ZIP_NAMES[@]}"; do
+              gh release upload "$TAG" "$zip" --clobber
+            done
           else
             echo "Creating release $TAG"
             gh release create "$TAG" \
               --title "GrimmLink $TAG" \
               --notes "See the [changelog](https://github.com/${{ github.repository }}/releases) for details." \
-              "/tmp/${ZIP_NAME}#${ZIP_NAME}"
+              "${ZIP_NAMES[@]}"
           fi
