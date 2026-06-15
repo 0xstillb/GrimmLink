@@ -117,9 +117,10 @@ jobs:
       - name: Create plugin zip
         id: zip
         run: |
-          cd grimmlink.koplugin
-          ZIP_BASE="/tmp/grimmlink.koplugin"
-          zip -r "${ZIP_BASE}.zip" .
+          PLUGIN_DIR="grimmlink.koplugin"
+          ZIP_BASE="/tmp/${PLUGIN_DIR}"
+          # Zip from repo root so paths include grimmlink.koplugin/ prefix
+          zip -r "${ZIP_BASE}.zip" "${PLUGIN_DIR}"
           VERSION="${{ steps.release_tag.outputs.tag }}"
           VERSION_NO_V="${VERSION#v}"
           cp "${ZIP_BASE}.zip" "${ZIP_BASE}-${VERSION_NO_V}.zip"
