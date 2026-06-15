@@ -96,9 +96,15 @@ describe("grimmlink_menu_actions", function()
             manualPullProgress = function() called.pull = true end,
             showMetadataPreview = function() called.preview = true end,
             syncMetadataNow = function() called.sync_metadata = true end,
-            pullRemoteMetadataNow = function(_, silent, limit)
-                called.metadata = silent == false and limit == 100
+            forceMetadataResyncForCurrentBook = function() called.force_metadata = true end,
+            pullRemoteMetadataNow = function(_, silent, limit, item_type)
+                if item_type == "bookmark" then
+                    called.bookmarks = silent == false and limit == 100
+                else
+                    called.metadata = silent == false and limit == 100
+                end
             end,
+            resetMetadataPullCursorForCurrentBook = function() called.reset_cursor = true end,
             showManualReadStatusMenu = function() called.status = true end,
             showMessage = function() called.summary = true end,
             db = {
@@ -129,23 +135,25 @@ describe("grimmlink_menu_actions", function()
             "pull_remote_progress",
             "preview_metadata",
             "sync_metadata_now",
+            "force_metadata_reupload",
             "pull_remote_metadata",
+            "pull_remote_bookmarks",
+            "reset_metadata_pull_cursor",
             "manual_reading_status",
             "sync_summary",
         }, ids)
 
-        sub_items[3].callback()
-        sub_items[4].callback()
-        sub_items[5].callback()
-        sub_items[6].callback()
-        sub_items[7].callback()
-        sub_items[8].callback()
-        sub_items[9].callback()
+        for i = 3, 12 do
+            sub_items[i].callback()
+        end
         assert.is_true(called.completion == true)
         assert.is_true(called.pull == true)
         assert.is_true(called.preview == true)
         assert.is_true(called.sync_metadata == true)
+        assert.is_true(called.force_metadata == true)
         assert.is_true(called.metadata == true)
+        assert.is_true(called.bookmarks == true)
+        assert.is_true(called.reset_cursor == true)
         assert.is_true(called.status == true)
         assert.is_true(called.summary == true)
     end)
