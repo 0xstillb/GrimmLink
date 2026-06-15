@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - Main
+    tags:
+      - 'v*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -39,12 +41,15 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check merge commit
+      - name: Check merge
         id: merge
         run: |
           N=$(git rev-list --parents -1 HEAD | wc -w)
-          [ "$N" -gt 2 ] && echo "detected=true" >> "$GITHUB_OUTPUT" \
-                        || echo "detected=false" >> "$GITHUB_OUTPUT"
+          if [ "$N" -gt 2 ]; then
+            echo "detected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "detected=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Check source branch
         id: source
@@ -74,29 +79,62 @@ jobs:
           sed -i 's/version_type = "[^"]*"/version_type = "release"/' grimmlink.koplugin/plugin_version.lua
           sed -i "s/git_commit = \"[^\"]*\"/git_commit = \"$(git rev-parse --short HEAD)\"/" grimmlink.koplugin/plugin_version.lua
           sed -i "s/build_date = \"[^\"]*\"/build_date = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"/" grimmlink.koplugin/plugin_version.lua
+
           if [ -f grimmlink.koplugin/_meta.lua ]; then
             sed -i "s/version = \"$OLD\"/version = \"$NEW\"/" grimmlink.koplugin/_meta.lua
           fi
           echo "Bumped $OLD -> $NEW"
 
-      - name: Push bump commit
+      - name: Commit bump
         if: steps.bump.outputs.new != ''
-        env:
-          GH_TOKEN: ${{ secrets.DEPLOY_TOKEN || github.token }}
         run: |
-          git config user.name "0xstillb"
-          git config user.email "0xstillb@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add grimmlink.koplugin/plugin_version.lua grimmlink.koplugin/_meta.lua
           git commit -m "chore(release): bump to ${{ steps.bump.outputs.new }} [skip ci]"
-          git push https://x-access-token:${GH_TOKEN}@github.com/0xstillb/GrimmLink.git Main
+          git push origin Main
 
       - name: Create tag
-        if: steps.tag.outputs.exists == 'false'
+        if: steps.tag.outputs.exists == 'false' && github.ref_type != 'tag'
         env:
-          GH_TOKEN: ${{ secrets.DEPLOY_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           V=${{ steps.ver.outputs.current }}
-          git config user.name "0xstillb"
-          git config user.email "0xstillb@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$V" -m "Release $V"
-          git push https://x-access-token:${GH_TOKEN}@github.com/0xstillb/GrimmLink.git "$V"
+          git push origin "$V"
+
+      - name: Determine release tag
+        id: release_tag
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ steps.ver.outputs.current }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create plugin zip
+        run: |
+          cd grimmlink.koplugin
+          zip -r /tmp/grimmlink-plugin.zip . -x "test/*"
+          echo "Zip created: $(ls -lh /tmp/grimmlink-plugin.zip | awk '{print $5}')"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.release_tag.outputs.tag }}"
+          ZIP_NAME="GrimmLink-${TAG}.zip"
+          cp /tmp/grimmlink-plugin.zip "/tmp/${ZIP_NAME}"
+
+          if gh release view "$TAG" --json id &>/dev/null; then
+            echo "Release $TAG exists — uploading asset"
+            gh release upload "$TAG" "/tmp/${ZIP_NAME}#${ZIP_NAME}" --clobber
+          else
+            echo "Creating release $TAG"
+            gh release create "$TAG" \
+              --title "GrimmLink $TAG" \
+              --notes "See the [changelog](https://github.com/${{ github.repository }}/releases) for details." \
+              "/tmp/${ZIP_NAME}#${ZIP_NAME}"
+          fi
