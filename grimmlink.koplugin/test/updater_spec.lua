@@ -157,13 +157,13 @@ describe("GrimmLink updater", function()
             tag_name = "v1.2.3",
             assets = {
                 releaseAsset("notes.txt"),
-                releaseAsset("grimmlink-v1.2.3.zip", 2048),
+                releaseAsset("grimmlink.koplugin-v1.2.3.zip", 2048),
             },
         }
 
         local selected = updater:selectReleaseAsset(release_info)
         assert.is_not_nil(selected)
-        assert.are.equal("grimmlink-v1.2.3.zip", selected.name)
+        assert.are.equal("grimmlink.koplugin-v1.2.3.zip", selected.name)
     end)
 
     it("uses the stable latest-release endpoint by default", function()
