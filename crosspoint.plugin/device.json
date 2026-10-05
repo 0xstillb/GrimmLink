@@ -6,7 +6,7 @@
   },
   "browse": {
     "format": "json",
-    "url": "{cfg.server}/api/grimmlink/v1/shelves/{cfg.shelf_type}/{cfg.shelf_id}/books",
+    "url": "{cfg.server}/api/grimmlink/v1/shelves/{cfg.shelf_type}/{cfg.shelf_id}/books?format=EPUB&page={page}&pageSize=16&limit={limit}",
     "method": "GET",
     "headers": {
       "x-auth-user": "{cfg.username}",
