@@ -5,11 +5,11 @@ Experimental CrossPoint SD-card client for the GrimmLink API.
 ## Current v0.1 scope
 
 - Runs on CrossPoint's SD-card plugin framework; no firmware rebuild is required.
-- Browses one configured Grimmory shelf directly on the reader.
+- Browses Regular and Magic Grimmory shelves directly on the reader.
 - Downloads EPUB files only by always saving the selected book as `.epub`.
 - Writes `<book>.meta.json` with `grimmory_id` for service identity and KOSync metadata forwarding.
 - Never deletes local books.
-- Does not yet perform bulk shelf reconciliation/automatic downloads.
+- Lets the reader navigate Regular Shelves and Magic Shelves, then download EPUBs one book at a time. It does not yet perform bulk shelf reconciliation/automatic downloads.
 
 ## Install
 
@@ -24,8 +24,6 @@ Required values:
 - `server`: Grimmory base URL, without a trailing slash.
 - `username`: Grimmory username.
 - `auth_key`: MD5 of the Grimmory password, matching GrimmLink v1 authentication.
-- `shelf_type`: `regular` or `magic` when supported by the server.
-- `shelf_id`: numeric Grimmory shelf id.
 - `dest_dir`: optional CrossPoint download directory. CrossPoint allows this config value to override the manifest default.
 
 Open **Settings -> System -> Plugins -> GrimmLink** on the reader.
