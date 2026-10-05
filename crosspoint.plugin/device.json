@@ -1,0 +1,39 @@
+{
+  "title": "GrimmLink",
+  "description": "Grimmory shelf for CrossPoint (EPUB only)",
+  "config": {
+    "file": "config.json"
+  },
+  "browse": {
+    "format": "json",
+    "url": "{cfg.server}/api/grimmlink/v1/shelves/{cfg.shelf_type}/{cfg.shelf_id}/books",
+    "method": "GET",
+    "headers": {
+      "x-auth-user": "{cfg.username}",
+      "x-auth-key": "{cfg.auth_key}",
+      "Accept": "application/json"
+    },
+    "items": "",
+    "fields": {
+      "title": "title",
+      "author": "author",
+      "id": "bookId"
+    },
+    "page_size": 16
+  },
+  "download": {
+    "url": "{cfg.server}/api/grimmlink/v1/books/{id}/download",
+    "method": "GET",
+    "headers": {
+      "x-auth-user": "{cfg.username}",
+      "x-auth-key": "{cfg.auth_key}",
+      "Accept": "application/octet-stream"
+    },
+    "dest_dir": "/GrimmLink",
+    "filename": "{title}.epub",
+    "sidecar": {
+      "path": "{dest}.meta.json",
+      "body": "{\"grimmory_id\":{id},\"source\":\"grimmlink\",\"format\":\"epub\"}"
+    }
+  }
+}
