@@ -2,7 +2,5 @@
   "server": "https://grimmory.example.com",
   "username": "your-username",
   "auth_key": "md5-of-your-password",
-  "shelf_type": "regular",
-  "shelf_id": "1",
   "dest_dir": "/GrimmLink"
 }
