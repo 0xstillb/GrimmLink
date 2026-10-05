@@ -1,33 +1,33 @@
 {
   "title": "GrimmLink",
-  "description": "Grimmory shelf for CrossPoint (EPUB only)",
+  "description": "Browse Grimmory Regular and Magic Shelves on CrossPoint (EPUB only)",
   "config": {
     "file": "config.json"
   },
   "browse": {
-    "format": "json",
-    "url": "{cfg.server}/api/grimmlink/v1/shelves/{cfg.shelf_type}/{cfg.shelf_id}/books?format=EPUB&page={page}&pageSize=16&limit={limit}",
+    "format": "xml",
+    "url": "{cfg.server}/api/grimmlink/v1/shelves/crosspoint.xml",
     "method": "GET",
     "headers": {
       "x-auth-user": "{cfg.username}",
       "x-auth-key": "{cfg.auth_key}",
-      "Accept": "application/json"
+      "Accept": "application/xml"
     },
-    "items": "",
+    "item": "entry",
+    "container_element": "collection",
+    "skip_self": true,
+    "resolve_urls": true,
     "fields": {
       "title": "title",
       "author": "author",
-      "id": "bookId"
-    },
-    "page_size": 16
+      "id": "id",
+      "url": "url"
+    }
   },
   "download": {
-    "url": "{cfg.server}/api/grimmlink/v1/books/{id}/download",
-    "method": "GET",
     "headers": {
       "x-auth-user": "{cfg.username}",
-      "x-auth-key": "{cfg.auth_key}",
-      "Accept": "application/octet-stream"
+      "x-auth-key": "{cfg.auth_key}"
     },
     "dest_dir": "/GrimmLink",
     "filename": "{title}.epub",
