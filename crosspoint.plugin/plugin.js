@@ -114,7 +114,7 @@
       try { return await r.json(); } catch (_) { return null; }
     }
 
-    async function managedLocal() {
+    async function managedLocal(selectedShelfId) {
       const cfg = state.cfg || await loadConfig();
       const files = await listLocal();
       const map = new Map();
@@ -122,7 +122,8 @@
         if (!f || f.isDirectory || !/\.meta\.json$/i.test(String(f.name || ''))) continue;
         const sidecarPath = cfg.dest_dir.replace(/\/$/, '') + '/' + f.name;
         const meta = await readJsonFile(sidecarPath);
-        if (!meta || meta.source !== 'grimmlink' || meta.grimmory_id == null) continue;
+        if (!meta || meta.source !== 'grimmlink' || meta.managed !== true || meta.grimmory_id == null) continue;
+        if (String(meta.shelf_type || '') !== state.type || String(meta.shelf_id || '') !== String(selectedShelfId)) continue;
         const bookPath = sidecarPath.replace(/\.meta\.json$/i, '');
         map.set(String(meta.grimmory_id), { bookPath, sidecarPath, meta });
       }
@@ -133,7 +134,7 @@
       await loadConfig();
       const remote = await remoteBooks();
       if (!Array.isArray(remote.books)) throw new Error('Remote shelf could not be verified.');
-      const local = await managedLocal();
+      const local = await managedLocal(remote.shelfId);
       const remoteIds = new Set(remote.books.map((b) => String(bookId(b))));
       const download = remote.books.filter((b) => !local.has(String(bookId(b))));
       const remove = [];
