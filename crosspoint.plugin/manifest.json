@@ -1,7 +1,7 @@
 {
   "id": "grimmlink",
   "title": "GrimmLink",
-  "description": "Browse a Grimmory shelf and download EPUB books on CrossPoint.",
-  "version": "0.1.0",
+  "description": "Browse on-device or sync a Grimmory EPUB shelf from the CrossPoint web UI.",
+  "version": "0.2.0",
   "mount": "settings"
 }
