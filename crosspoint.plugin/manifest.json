@@ -1,7 +1,7 @@
 {
   "id": "grimmlink",
   "title": "GrimmLink",
-  "description": "Browse on-device or sync a Grimmory EPUB shelf from the CrossPoint web UI.",
-  "version": "0.2.0",
+  "description": "Browse Grimmory on X4 Pro or manually sync EPUB shelves from mobile/PC (Light/Dark UI)",
+  "version": "0.3.0",
   "mount": "settings"
 }
