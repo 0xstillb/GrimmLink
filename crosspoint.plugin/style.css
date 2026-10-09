@@ -133,10 +133,10 @@
   #plugin-grimmlink .gl-search {width:100%}
   #plugin-grimmlink .gl-shelf-list .gl-shelf-card {border:0;border-bottom:1px solid var(--gl-line);border-radius:0}
   #plugin-grimmlink .gl-shelf-list {background:var(--gl-card);border:1px solid var(--gl-line);border-radius:15px;overflow:hidden;gap:0}
-  #plugin-grimmlink .gl-bottom-nav {position:sticky;bottom:0;display:flex;background:var(--gl-card);border-top:1px solid var(--gl-line);height:64px;align-items:center;justify-content:space-around;z-index:5}
+  #plugin-grimmlink .gl-bottom-nav {position:fixed;bottom:0;left:0;right:0;margin:0 auto;max-width:700px;display:flex;background:var(--gl-card);border-top:1px solid var(--gl-line);height:64px;align-items:center;justify-content:space-around;z-index:10;padding-bottom:env(safe-area-inset-bottom)}
   #plugin-grimmlink .gl-bottom-nav button {background:none;color:var(--gl-muted);border:0;padding:6px;font-size:10px;display:flex;align-items:center;flex-direction:column;gap:0;min-width:64px}
   #plugin-grimmlink .gl-bottom-nav button b {font-size:19px;font-weight:400}
   #plugin-grimmlink .gl-bottom-nav button.active {color:var(--gl-text);font-weight:700}
-  #plugin-grimmlink .gl-main .gl-action-panel {position:sticky;bottom:0;background:var(--gl-bg);padding:12px 0;z-index:3}
+  #plugin-grimmlink .gl-main .gl-action-panel {position:sticky;bottom:64px;background:var(--gl-bg);padding:12px 0;z-index:3}
 }
 @media (prefers-reduced-motion:reduce){#plugin-grimmlink .gl-progress span {transition:none}}
