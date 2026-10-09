@@ -228,9 +228,10 @@
         '<label class="gl-option"><span class="gl-grow"><strong>ลบหนังสือที่ไม่อยู่ใน Shelf</strong>' +
         '<div class="gl-micro">เฉพาะไฟล์ managed ของ Shelf นี้ • ค่าเริ่มต้นปิด</div></span>' +
         '<input type="checkbox" data-role="remove" ' + (state.deleteManaged ? 'checked' : '') +
-        (p.unsafeLocal ? ' disabled' : '') + '></label>' +
+        (p.unsafeLocal || p.unsafeRemote ? ' disabled' : '') + '></label>' +
         (p.unsafeLocal ? '<div class="gl-alert">พบ sidecar ที่ไม่สามารถยืนยันได้ ' + p.unsafeLocal +
         ' ไฟล์ — ปิดการลบเพื่อความปลอดภัย</div>' : '') +
+        (p.unsafeRemote ? '<div class="gl-alert">จำนวนหนังสือที่อ่านได้ไม่ตรงกับ Shelf count — ปิดการลบเพื่อความปลอดภัย</div>' : '') +
         (p.conflicts.length ? '<div class="gl-alert error">พบชื่อไฟล์ชนกับหนังสือที่ไม่ได้จัดการโดย GrimmLink จึงไม่สามารถ Sync จนกว่าจะแก้ชื่อไฟล์</div>' : '') +
         '<div class="gl-micro">' + h(p.download.length) + ' EPUB ต้องดาวน์โหลด' +
         (p.downloadBytes ? ' · ประมาณ ' + fmtSize(p.downloadBytes) : '') + '</div>' +
@@ -427,9 +428,9 @@
       const download = [], keep = [], skipped = [], conflicts = [], remove = [];
       let downloadBytes = 0;
       for (const b of remote) {
-        if (!supported(b)) { skipped.push(b); continue; }
         const bid = String(bookId(b));
-        wanted.add(bid);
+        wanted.add(bid); // Never treat a book still in the shelf as removed, even if its format changed.
+        if (!supported(b)) { skipped.push(b); continue; }
         if (local.managed.has(bid)) { keep.push(b); continue; }
         const filename = safeFile(b);
         if (local.names.has(filename) || local.names.has(filename + '.meta.json')) {
@@ -448,6 +449,7 @@
         type: type, id: String(id), remote: remote, local: local.managed,
         dir: local.dir, download: download, keep: keep, skipped: skipped,
         conflicts: conflicts, remove: remove, unsafeLocal: local.unsafe,
+        unsafeRemote: state.shelf.bookCount != null && Number.isFinite(Number(state.shelf.bookCount)) && Number(state.shelf.bookCount) !== remote.length,
         downloadBytes: downloadBytes
       };
     }
@@ -543,7 +545,7 @@
           state.result = { downloaded: downloaded, removed: 0, kept: p.keep.length,
             skipped: p.skipped.length, cancelled: true };
         } else {
-          if (state.deleteManaged && p.remove.length && p.unsafeLocal === 0) {
+          if (state.deleteManaged && p.remove.length && p.unsafeLocal === 0 && !p.unsafeRemote) {
             // Remote content may have changed while downloads were running.
             // Reconcile again; never delete using a stale snapshot.
             const now = await loadBooks(intendedType, intendedId);
