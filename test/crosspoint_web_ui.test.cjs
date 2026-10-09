@@ -112,7 +112,7 @@ async function setup(options = {}) {
     });
   }
   return {
-    click, dir, files, downloads, deletions, getHtml: () => root.innerHTML,
+    click, dir, files, downloads, deletions, getHtml: () => root.innerHTML, getTheme: () => root.dataset.theme,
     setRemove(checked) {
       root.listeners.change({
         target: { checked, getAttribute(key) { return key === 'data-role' ? 'remove' : null; } }
@@ -132,7 +132,7 @@ test('mobile-first pages load and theme switches', async () => {
   const ctx = await setup();
   assert.match(ctx.getHtml(), /GrimmLink/);
   await ctx.click('theme');
-  assert.match(ctx.getHtml(), /data-theme="dark"/);
+  assert.equal(ctx.getTheme(), 'dark');
   await reachPreview(ctx);
   assert.match(ctx.getHtml(), /Sync Preview/);
 });
