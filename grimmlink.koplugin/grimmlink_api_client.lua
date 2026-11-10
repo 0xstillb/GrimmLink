@@ -15,7 +15,7 @@ local APIClient = {
     timeout = 25,
     secure_logs = false,
     debug_logging = false,
-    api_prefix = "/api/grimmlink/v1",
+    api_prefix = "/api/grimmlink/v2",
 }
 
 local function redact_urls(message)
@@ -25,16 +25,12 @@ local function redact_urls(message)
     return message:gsub("https?://[^%s]+", "[URL REDACTED]")
 end
 
-local function is_md5(value)
-    return type(value) == "string" and #value == 32 and value:match("^[a-fA-F0-9]+$") ~= nil
-end
-
 local function md5(value)
     local ok, sha2 = pcall(require, "ffi/sha2")
     if ok and sha2 and type(sha2.md5) == "function" then
         return sha2.md5(value or "")
     end
-    return tostring(value or "")
+    return nil
 end
 
 local function normalizeNumericId(value)
@@ -58,6 +54,7 @@ function APIClient:new(o)
 end
 
 function APIClient:init(server_url, username, password, debug_logging)
+    local old_url, old_user, old_password = self.server_url, self.username, self.password
     self.server_url = tostring(server_url or "")
     self.fallback_url = nil
     self.username = tostring(username or "")
@@ -67,6 +64,10 @@ function APIClient:init(server_url, username, password, debug_logging)
 
     if self.server_url:sub(-1) == "/" then
         self.server_url = self.server_url:sub(1, -2)
+    end
+    if old_url ~= self.server_url or old_user ~= self.username or old_password ~= self.password then
+        self.session_token = nil
+        self.session_expires_at = nil
     end
 end
 
@@ -85,9 +86,6 @@ end
 function APIClient:_resolveAuthKey()
     if self.password == "" then
         return ""
-    end
-    if is_md5(self.password) then
-        return self.password:lower()
     end
     return md5(self.password)
 end
@@ -209,9 +207,11 @@ function APIClient:_performRequest(base_url, method, path, body, extra_headers, 
     local headers = cloneHeaders(extra_headers)
     headers["Accept"] = headers["Accept"] or "application/json"
 
-    if self.username ~= "" and self.password ~= "" then
+    if tostring(path):find("/auth/session", 1, true) and self.username ~= "" and self.password ~= "" then
         headers["x-auth-user"] = self.username
         headers["x-auth-key"] = self:_resolveAuthKey()
+    elseif self.session_token then
+        headers["Authorization"] = "Bearer " .. self.session_token
     end
 
     local request_body = nil
@@ -278,6 +278,21 @@ function APIClient:_performRequest(base_url, method, path, body, extra_headers, 
     }
 end
 
+local function parseUtcTimestamp(value)
+    if type(value) ~= "string" then return tonumber(value) end
+    local y, m, d, h, min, sec = value:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)")
+    if not y then return nil end
+    local local_time = os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(d),
+        hour = tonumber(h), min = tonumber(min), sec = tonumber(sec), isdst = false })
+    local offset = os.difftime(os.time(), os.time(os.date("!*t")))
+    return local_time + offset
+end
+
+function APIClient:hasActiveSession()
+    return self.session_token ~= nil
+        and (not self.session_expires_at or os.time() < self.session_expires_at - 60)
+end
+
 function APIClient:request(method, path, body, extra_headers, timeout_sec)
     if not self.server_url or self.server_url == "" then
         return false, nil, "Server URL not configured", nil, {
@@ -289,7 +304,24 @@ function APIClient:request(method, path, body, extra_headers, timeout_sec)
         }
     end
 
+    local session_path = self:_apiPath("/auth/session")
+    if path ~= session_path and not self:hasActiveSession() then
+        local authenticated, message, auth_code = self:testAuth(timeout_sec)
+        if not authenticated then
+            return false, auth_code, message
+        end
+    end
+
     local primary = self:_performRequest(self.server_url, method, path, body, extra_headers, timeout_sec)
+    if path ~= session_path and primary.code == 401 then
+        self.session_token = nil
+        self.session_expires_at = nil
+        local authenticated, message, auth_code = self:testAuth(timeout_sec)
+        if not authenticated then
+            return false, auth_code, message
+        end
+        primary = self:_performRequest(self.server_url, method, path, body, extra_headers, timeout_sec)
+    end
     local now_ts = os.time()
     local details = {
         primary_url = self.server_url .. path,
@@ -340,16 +372,24 @@ function APIClient:testAuth(timeout_sec)
     if self.password == "" then
         return false, "Password not configured"
     end
+    if not self:_resolveAuthKey() then
+        return false, "MD5 support is unavailable on this KOReader installation"
+    end
 
     local success, code, response, _headers, details = self:request(
-        "GET",
-        self:_apiPath("/auth"),
+        "POST",
+        self:_apiPath("/auth/session"),
         nil,
         nil,
         timeout_sec
     )
-    if success then
+    if success and type(response) == "table" and type(response.accessToken) == "string" then
+        self.session_token = response.accessToken
+        self.session_expires_at = parseUtcTimestamp(response.expiresAt)
         return true, response, code, details
+    end
+    if success then
+        return false, "Adapter session response has no access token", code, details
     end
     return false, response or ("HTTP " .. tostring(code or "?")), code, details
 end
@@ -357,33 +397,87 @@ end
 function APIClient:getBookByHash(book_hash)
     local success, code, response = self:request(
         "GET",
-        self:_apiPath("/books/by-hash/" .. self:_urlEncode(book_hash))
+        self:_apiPath("/books/resolve?hash=" .. self:_urlEncode(book_hash))
     )
     if success and type(response) == "table" then
         return true, response, code
     end
     return false, response or ("HTTP " .. tostring(code or "?")), code
+end
+
+local function progressOperationId(payload)
+    if payload.operationId then return payload.operationId end
+    local ok, sha2 = pcall(require, "ffi/sha2")
+    if not ok or type(sha2.md5) ~= "function" then return nil end
+    local seed = table.concat({ tostring(payload.bookHash or payload.document or ""),
+        tostring(payload.timestamp or ""), tostring(payload.progress or payload.location or ""),
+        tostring(payload.deviceId or "") }, "|")
+    local digest = tostring(sha2.md5(seed) or ""):lower()
+    if not digest:match("^[0-9a-f]+$") or #digest ~= 32 then return nil end
+    return table.concat({ digest:sub(1, 8), digest:sub(9, 12), digest:sub(13, 16),
+        digest:sub(17, 20), digest:sub(21, 32) }, "-")
 end
 
 function APIClient:getProgress(book_hash, timeout_sec)
     local success, code, response = self:request(
         "GET",
-        self:_apiPath("/syncs/progress/" .. self:_urlEncode(book_hash)),
+        self:_apiPath("/progress/" .. self:_urlEncode(book_hash) .. "?reader=koreader"),
         nil,
         nil,
         timeout_sec
     )
     if success and type(response) == "table" then
-        return true, response, code
+        local position = response.position or {}
+        local format = tostring(position.format or ""):upper()
+        local page = tonumber(position.page)
+        local location = format == "EPUB" and position.xpointer or (page and tostring(page) or nil)
+        if not location then return false, "Adapter returned no KOReader position", code end
+        return true, {
+            bookHash = book_hash, document = book_hash,
+            fileFormat = format, bookType = format,
+            progress = location, location = location,
+            percentage = (tonumber(response.fraction) or 0) * 100,
+            percentageIsPercent = true,
+            currentPage = page, totalPages = tonumber(position.totalPages),
+            timestamp = parseUtcTimestamp(response.updatedAt),
+            updatedAt = response.updatedAt, source = response.source,
+        }, code
     end
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
 function APIClient:updateProgress(progress_payload)
-    local success, code, response = self:request("PUT", self:_apiPath("/syncs/progress"), progress_payload)
-    if success then
+    local book_hash = progress_payload.bookHash or progress_payload.document
+    local format = tostring(progress_payload.fileFormat or progress_payload.bookType or ""):upper()
+    if format == "CBX" then format = "CBZ" end
+    local operation_id = progressOperationId(progress_payload)
+    if not book_hash or not operation_id or format == "" then
+        return false, "Book hash, format, and stable operation ID are required", 422
+    end
+    local fixed = format == "PDF" or format == "CBZ" or format == "CBR" or format == "DJVU"
+    local location = progress_payload.location or progress_payload.progress
+    local page = fixed and tonumber(progress_payload.currentPage or location) or nil
+    if fixed and (not page or page < 1) then
+        return false, "A valid page is required for this format", 422
+    end
+    if not fixed and (not location or tostring(location) == "") then
+        return false, "An XPointer is required for EPUB progress", 422
+    end
+    local payload = {
+        operationId = operation_id,
+        source = "koreader",
+        device = { id = progress_payload.deviceId or "koreader", name = progress_payload.device or "KOReader" },
+        updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ", tonumber(progress_payload.timestamp) or os.time()),
+        fraction = math.max(0, math.min(1, (tonumber(progress_payload.percentage) or 0) / 100)),
+        position = { format = format, xpointer = not fixed and tostring(location) or nil,
+            page = page, totalPages = fixed and tonumber(progress_payload.totalPages) or nil },
+    }
+    local success, code, response = self:request("PUT", self:_apiPath("/progress/" .. self:_urlEncode(book_hash)), payload)
+    if success and type(response) == "table" and type(response.nativeSync) == "table"
+        and response.nativeSync.status == "synced" then
         return true, response, code
     end
+    if success then return false, "Native KOReader position was not synced", code end
     return false, response or ("HTTP " .. tostring(code or "?")), code
 end
 
@@ -735,9 +829,7 @@ end
 function APIClient:getShelves(shelf_type)
     local path = self:_apiPath("/shelves")
     local normalized_type = normalizeShelfType(shelf_type)
-    if shelf_type ~= nil and shelf_type ~= "" then
-        path = path .. "?type=" .. self:_urlEncode(normalized_type)
-    end
+    if normalized_type == "magic" then return false, "Magic shelves are not supported by Adapter V2", 501 end
 
     local success, code, response = self:request("GET", path)
     if success and type(response) == "table" then
@@ -764,19 +856,12 @@ end
 
 function APIClient:getShelfBooks(shelf_id, shelf_type)
     local normalized_type = normalizeShelfType(shelf_type)
-    local primary_path = self:_apiPath("/shelves/" .. normalized_type .. "/" .. tostring(shelf_id) .. "/books")
+    if normalized_type == "magic" then return false, "Magic shelves are not supported by Adapter V2", 501 end
+    local primary_path = self:_apiPath("/shelves/" .. tostring(shelf_id) .. "/items")
     local success, code, response = self:request(
         "GET",
         primary_path
     )
-
-    -- Backward compatibility for older backends without typed shelf route.
-    if not success and normalized_type == "regular" and tonumber(code) == 404 then
-        success, code, response = self:request(
-            "GET",
-            self:_apiPath("/shelves/" .. tostring(shelf_id) .. "/books")
-        )
-    end
 
     if success and type(response) == "table" then
         local raw_list = response
@@ -804,6 +889,19 @@ function APIClient:getBooksInShelf(shelf_id, shelf_type)
     return self:getShelfBooks(shelf_id, shelf_type)
 end
 
+function APIClient:resolveDownloadHash(book_id, hinted_hash)
+    if hinted_hash and hinted_hash ~= "" then return tostring(hinted_hash) end
+    local success, code, response = self:request(
+        "GET", self:_apiPath("/books/" .. normalizeNumericId(book_id) .. "/hash")
+    )
+    if not success then return nil, response or ("HTTP " .. tostring(code or "?")) end
+    if type(response) ~= "table" or tonumber(response.bookId) ~= tonumber(book_id)
+        or type(response.bookHash) ~= "string" or response.bookHash == "" then
+        return nil, "Adapter did not return a verified hash for this book"
+    end
+    return response.bookHash
+end
+
 --- Download a book file with progress reporting.
 -- opts (optional table):
 --   timeout         number   total HTTP timeout in seconds (default: auto-scaled)
@@ -822,6 +920,12 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec_or_opts)
     if not self.server_url or self.server_url == "" then
         return false, "Server URL not configured"
     end
+    local book_hash, hash_error = self:resolveDownloadHash(book_id, opts.book_hash)
+    if not book_hash then return false, hash_error end
+    if not self:hasActiveSession() then
+        local authenticated, message = self:testAuth()
+        if not authenticated then return false, message end
+    end
 
     local tmp_path = dest_path .. ".tmp"
     local expected_format = inferExpectedFormat(opts.expected_format, dest_path)
@@ -830,7 +934,8 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec_or_opts)
         return false, "Cannot open temp file: " .. tostring(err)
     end
 
-    local url = self.server_url .. self:_apiPath("/books/" .. tostring(book_id) .. "/download")
+    local url = self.server_url .. self:_apiPath("/books/" .. tostring(book_id)
+        .. "/content?hash=" .. self:_urlEncode(book_hash))
     self:log("info", "GrimmLink API: GET (binary)", url)
 
     -- Auto-scale timeout based on expected file size.
@@ -899,8 +1004,7 @@ function APIClient:downloadBookToFile(book_id, dest_path, timeout_sec_or_opts)
         url = url,
         method = "GET",
         headers = {
-            ["x-auth-user"] = self.username,
-            ["x-auth-key"] = self:_resolveAuthKey(),
+            ["Authorization"] = "Bearer " .. self.session_token,
             ["Accept"] = "application/octet-stream",
         },
         sink = progress_sink,
@@ -1015,6 +1119,10 @@ function APIClient:startAsyncMetadataPull(book_id, book_hash, book_file_id, curs
     if not self.server_url or self.server_url == "" then
         return nil, "Server URL not configured"
     end
+    if not self:hasActiveSession() then
+        local authenticated, message = self:testAuth()
+        if not authenticated then return nil, message end
+    end
     if not self:isAsyncDownloadAvailable() then
         return nil, "Background HTTP tools are unavailable"
     end
@@ -1048,12 +1156,10 @@ function APIClient:startAsyncMetadataPull(book_id, book_hash, book_file_id, curs
     if self.fallback_url and self.fallback_url ~= "" and self.fallback_url ~= self.server_url then
         fallback_url = self.fallback_url .. path
     end
-    local auth_user = self.username or ""
-    local auth_key = self:_resolveAuthKey() or ""
+    local auth_token = self.session_token
 
     local script = string.format([[#!/bin/sh
-export GL_USER=%s
-export GL_KEY=%s
+export GL_TOKEN=%s
 REQ_TIMEOUT=%d
 REQ_PRIMARY=%s
 REQ_FALLBACK=%s
@@ -1065,8 +1171,7 @@ REQ_PID=%s
 run_curl() {
   REQ_URL="$1"
   curl -s -S --max-time "$REQ_TIMEOUT" \
-    -H "x-auth-user: $GL_USER" \
-    -H "x-auth-key: $GL_KEY" \
+    -H "Authorization: Bearer $GL_TOKEN" \
     -H "Accept: application/json" \
     -o "$REQ_BODY" \
     -w "%%{http_code}" \
@@ -1080,8 +1185,7 @@ run_wget() {
   REQ_URL="$1"
   REQ_HEADERS="${REQ_HTTP}.headers"
   wget -q --timeout="$REQ_TIMEOUT" --server-response \
-    --header="x-auth-user: $GL_USER" \
-    --header="x-auth-key: $GL_KEY" \
+    --header="Authorization: Bearer $GL_TOKEN" \
     --header="Accept: application/json" \
     -O "$REQ_BODY" \
     "$REQ_URL" 2> "$REQ_HEADERS" &
@@ -1116,8 +1220,7 @@ if [ "$REQ_STATUS" -ne 0 ] && { [ -z "$REQ_HTTP_CODE" ] || [ "$REQ_HTTP_CODE" = 
 fi
 echo "$REQ_STATUS" > "$REQ_EXIT"
 ]],
-        shquote(auth_user),
-        shquote(auth_key),
+        shquote(auth_token),
         timeout,
         shquote(primary_url),
         shquote(fallback_url),
@@ -1255,6 +1358,12 @@ function APIClient:startAsyncDownload(book_id, dest_path, opts)
     if not self.server_url or self.server_url == "" then
         return nil, "Server URL not configured"
     end
+    local book_hash, hash_error = self:resolveDownloadHash(book_id, opts.book_hash)
+    if not book_hash then return nil, hash_error end
+    if not self:hasActiveSession() then
+        local authenticated, message = self:testAuth()
+        if not authenticated then return nil, message end
+    end
 
     local tmp_path    = dest_path .. ".tmp"
     local pid_path    = dest_path .. ".pid"
@@ -1268,7 +1377,8 @@ function APIClient:startAsyncDownload(book_id, dest_path, opts)
     os.remove(code_path)
     os.remove(script_path)
 
-    local url = self.server_url .. self:_apiPath("/books/" .. tostring(book_id) .. "/download")
+    local url = self.server_url .. self:_apiPath("/books/" .. tostring(book_id)
+        .. "/content?hash=" .. self:_urlEncode(book_hash))
     self:log("info", "GrimmLink API: async GET (curl)", url)
 
     -- Auto-scale timeout: 180s base + 1s per MB, cap at 45 minutes.
@@ -1285,14 +1395,12 @@ function APIClient:startAsyncDownload(book_id, dest_path, opts)
     -- propagate to the curl child process).
     -- Auth credentials are passed via environment variables to avoid
     -- shell interpretation of special characters ($, `, \) in passwords.
-    local auth_user = self.username or ""
-    local auth_key  = self:_resolveAuthKey() or ""
+    local auth_token = self.session_token
 
     -- Build a shell script that tries curl first, then wget as fallback.
     -- Both are backgrounded and their PID is captured via $! for cancel support.
     local script = string.format([[#!/bin/sh
-export GL_USER=%s
-export GL_KEY=%s
+export GL_TOKEN=%s
 DL_TIMEOUT=%d
 DL_OUT=%s
 DL_URL=%s
@@ -1301,8 +1409,7 @@ DL_CODE=%s
 
 if command -v curl >/dev/null 2>&1; then
   curl -s -S --fail --max-time "$DL_TIMEOUT" \
-    -H "x-auth-user: $GL_USER" \
-    -H "x-auth-key: $GL_KEY" \
+    -H "Authorization: Bearer $GL_TOKEN" \
     -H "Accept: application/octet-stream" \
     -o "$DL_OUT" \
     "$DL_URL" &
@@ -1311,8 +1418,7 @@ if command -v curl >/dev/null 2>&1; then
   echo $? > "$DL_CODE"
 elif command -v wget >/dev/null 2>&1; then
   wget -q --timeout="$DL_TIMEOUT" \
-    --header="x-auth-user: $GL_USER" \
-    --header="x-auth-key: $GL_KEY" \
+    --header="Authorization: Bearer $GL_TOKEN" \
     --header="Accept: application/octet-stream" \
     -O "$DL_OUT" \
     "$DL_URL" &
@@ -1323,8 +1429,7 @@ else
   echo 127 > "$DL_CODE"
 fi
 ]],
-        shquote(auth_user),
-        shquote(auth_key),
+        shquote(auth_token),
         timeout,
         shquote(tmp_path),
         shquote(url),
@@ -1332,8 +1437,13 @@ fi
         shquote(code_path)
     )
 
+    local prepare_status = ffi.C.system("umask 077; : > " .. shquote(script_path) .. " && chmod 700 " .. shquote(script_path))
+    if prepare_status ~= 0 then
+        return nil, "Cannot prepare download script"
+    end
     local sf = io.open(script_path, "w")
     if not sf then
+        os.remove(script_path)
         return nil, "Cannot create download script"
     end
     sf:write(script)
@@ -1345,7 +1455,6 @@ fi
     -- shell & operator has no effect.  We bypass that by calling the C
     -- system() function directly via FFI.  system("cmd &") forks a
     -- background shell and returns immediately.
-    ffi.C.system("chmod +x " .. shquote(script_path))
     ffi.C.system("sh " .. shquote(script_path) .. " </dev/null >/dev/null 2>&1 &")
     self:log("info", "GrimmLink: async download launched via ffi.C.system, script=" .. script_path)
 
@@ -1504,16 +1613,9 @@ end
 
 function APIClient:removeBookFromShelf(shelf_id, book_id, shelf_type)
     local normalized_type = normalizeShelfType(shelf_type)
-    local typed_path = self:_apiPath("/shelves/" .. normalized_type .. "/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove")
-
-    local success, code, response = self:request("POST", typed_path)
-
-    if not success and normalized_type == "regular" and tonumber(code) == 404 then
-        success, code, response = self:request(
-            "POST",
-            self:_apiPath("/shelves/" .. tostring(shelf_id) .. "/books/" .. tostring(book_id) .. "/remove")
-        )
-    end
+    if normalized_type == "magic" then return false, "Magic shelves are not supported by Adapter V2", 501 end
+    local path = self:_apiPath("/shelves/" .. tostring(shelf_id) .. "/items/" .. tostring(book_id))
+    local success, code, response = self:request("DELETE", path)
 
     if success then
         return true, response, code

@@ -2,6 +2,16 @@
 
 # [Unreleased]
 
+### Adapter V2 migration
+- Switched KOReader requests to Adapter V2 sessions, bearer authentication, verified book resolution, native progress payloads, regular shelves, and hash-checked downloads.
+- Clarified that the password field takes the plain KOSync password and always hashes it locally, including when the password looks like a 32-character hex string.
+- Added a primary-file hash lookup and read-status routes to the Adapter V2 worktree for shelf downloads and completion actions.
+- Kept the native XPointer/page position in offline retries and reject a success response when V2 did not actually sync the KOReader position.
+- Marked Magic Shelf sync unsupported until Adapter V2 exposes it.
+
+### Tests
+- Covered V2 session authentication, progress conversion, skipped native writes, and the small-percentage PDF case; ran the complete KOReader test suite.
+
 ### Improvements
 - Cut normal GrimmLink sync traffic over to the backend v1 API island at `/api/grimmlink/v1`, including auth, progress, sessions, metadata, shelves, downloads, and read status.
 - Moved metadata queue flushes to the GrimmLink v1 push-pull batch endpoint while preserving existing per-item queue result handling.

@@ -7,6 +7,7 @@ package.path = table.concat({
 }, ";")
 
 local captured_request
+local encoded_value
 local next_http_response
 local next_http_responses
 
@@ -51,7 +52,9 @@ package.preload["socket.http"] = function()
         request = function(arguments)
             captured_request = arguments
             local response = nil
-            if type(next_http_responses) == "table" and #next_http_responses > 0 then
+            if arguments.url:find("/auth/session", 1, true) and not next_http_response then
+                response = { body = '{"accessToken":"test-token"}', code = 200 }
+            elseif type(next_http_responses) == "table" and #next_http_responses > 0 then
                 response = table.remove(next_http_responses, 1)
             else
                 response = next_http_response or {
@@ -74,7 +77,9 @@ package.preload["ssl.https"] = function()
         request = function(arguments)
             captured_request = arguments
             local response = nil
-            if type(next_http_responses) == "table" and #next_http_responses > 0 then
+            if arguments.url:find("/auth/session", 1, true) and not next_http_response then
+                response = { body = '{"accessToken":"test-token"}', code = 200 }
+            elseif type(next_http_responses) == "table" and #next_http_responses > 0 then
                 response = table.remove(next_http_responses, 1)
             else
                 response = next_http_response or {
@@ -95,6 +100,7 @@ end
 package.preload["json"] = function()
     return {
         encode = function(value)
+            encoded_value = value
             if type(value) == "table" and value.message then
                 return '{"message":"' .. value.message .. '"}'
             end
@@ -104,6 +110,23 @@ package.preload["json"] = function()
             return "{}"
         end,
         decode = function(value)
+            if value == '{"accessToken":"test-token"}' then
+                return { accessToken = "test-token", username = "reader" }
+            end
+            if value == '{"nativeSync":{"status":"synced"}}' then
+                return { nativeSync = { status = "synced" } }
+            end
+            if value == '{"nativeSync":{"status":"skipped"}}' then
+                return { nativeSync = { status = "skipped" } }
+            end
+            if value == '{"bookId":12,"bookFileId":34,"bookHash":"verified-hash"}' then
+                return { bookId = 12, bookFileId = 34, bookHash = "verified-hash" }
+            end
+            if value == '{"status":"ok","fraction":0.0033,"position":{"format":"PDF","page":55,"totalPages":16653},"updatedAt":"2026-11-09T12:00:00Z"}' then
+                return { status = "ok", fraction = 0.0033,
+                    position = { format = "PDF", page = 55, totalPages = 16653 },
+                    updatedAt = "2026-11-09T12:00:00Z" }
+            end
             if value == '{"status":"ok"}' then
                 return { status = "ok" }
             end
@@ -133,9 +156,7 @@ end
 
 package.preload["ffi/sha2"] = function()
     return {
-        md5 = function(value)
-            return "md5:" .. tostring(value)
-        end,
+        md5 = function() return "0123456789abcdef0123456789abcdef" end,
     }
 end
 
@@ -148,27 +169,27 @@ describe("GrimmLink API client", function()
         captured_request = nil
         next_http_response = nil
         next_http_responses = nil
+        encoded_value = nil
         client = APIClient:new()
         client:init("http://example.com", "reader", "secret-password", false)
+        client.session_token = "test-token"
     end)
 
     it("hashes plain-text passwords into x-auth-key headers", function()
-        local success, code, payload = client:request("GET", client:_apiPath("/auth"))
+        local success = client:testAuth()
         assert.is_true(success)
-        assert.are.equal(200, code)
-        assert.are.equal("ok", payload.status)
+        assert.are.equal("POST", captured_request.method)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/auth/session", 1, true) ~= nil)
         assert.are.equal("reader", captured_request.headers["x-auth-user"])
-        assert.are.equal("md5:secret-password", captured_request.headers["x-auth-key"])
+        assert.are.equal("0123456789abcdef0123456789abcdef", captured_request.headers["x-auth-key"])
     end)
 
-    it("keeps legacy md5 values unchanged", function()
+    it("hashes 32-character plain passwords instead of treating them as stored MD5 keys", function()
         client:init("http://example.com", "reader", "5f4dcc3b5aa765d61d8327deb882cf99", false)
 
-        local success, code, payload = client:request("GET", client:_apiPath("/auth"))
+        local success = client:testAuth()
         assert.is_true(success)
-        assert.are.equal(200, code)
-        assert.are.equal("ok", payload.status)
-        assert.are.equal("5f4dcc3b5aa765d61d8327deb882cf99", captured_request.headers["x-auth-key"])
+        assert.are.equal("0123456789abcdef0123456789abcdef", captured_request.headers["x-auth-key"])
     end)
 
     it("returns useful auth errors", function()
@@ -197,10 +218,10 @@ describe("GrimmLink API client", function()
             endTime = "2026-05-07T00:01:00Z",
             durationSeconds = 60,
         })
-        assert.are.equal("/api/grimmlink/v1/reading-sessions", captured_request.url:match("/api/grimmlink/v1/reading%-sessions$") and "/api/grimmlink/v1/reading-sessions" or nil)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/reading-sessions", 1, true) ~= nil)
 
         client:submitSessionBatch(99, "hash-1", "PDF", "KOReader", "device-1", {})
-        assert.are.equal("/api/grimmlink/v1/reading-sessions/batch", captured_request.url:match("/api/grimmlink/v1/reading%-sessions/batch$") and "/api/grimmlink/v1/reading-sessions/batch" or nil)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/reading-sessions/batch", 1, true) ~= nil)
     end)
 
     it("builds metadata batch payloads", function()
@@ -281,7 +302,7 @@ describe("GrimmLink API client", function()
             bookmarks = {},
         })
         assert.is_true(success)
-        assert.are.equal("/api/grimmlink/v1/syncs/metadata/batch", captured_request.url:match("/api/grimmlink/v1/syncs/metadata/batch$") and "/api/grimmlink/v1/syncs/metadata/batch" or nil)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/syncs/metadata/batch", 1, true) ~= nil)
     end)
 
     it("pulls metadata from the existing GET endpoint with hash priority", function()
@@ -303,7 +324,7 @@ describe("GrimmLink API client", function()
 
         assert.is_true(success)
         assert.are.equal("GET", captured_request.method)
-        assert.is_true(captured_request.url:find("/api/grimmlink/v1/syncs/metadata?", 1, true) ~= nil)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/syncs/metadata?", 1, true) ~= nil)
         assert.is_true(captured_request.url:find("bookHash=hash+meta", 1, true) ~= nil)
         assert.is_true(captured_request.url:find("bookId=", 1, true) == nil)
         assert.is_true(captured_request.url:find("bookFileId=", 1, true) == nil)
@@ -416,7 +437,7 @@ describe("GrimmLink API client", function()
         local success, statuses = client:getSupportedReadStatuses()
         assert.is_true(success)
         assert.are.same({ "UNREAD", "READING", "READ", "PAUSED", "ABANDONED", "RE_READING" }, statuses)
-        assert.are.equal("/api/grimmlink/v1/books/read-statuses", captured_request.url:match("/api/grimmlink/v1/books/read%-statuses$") and "/api/grimmlink/v1/books/read-statuses" or nil)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/books/read-statuses", 1, true) ~= nil)
     end)
 
     it("updates read status through GrimmLink endpoint", function()
@@ -430,7 +451,7 @@ describe("GrimmLink API client", function()
         local success, response = client:updateBookReadStatus(123, "read")
         assert.is_true(success)
         assert.are.equal("READ", response.readStatus)
-        assert.are.equal("/api/grimmlink/v1/books/123/status", captured_request.url:match("/api/grimmlink/v1/books/123/status$") and "/api/grimmlink/v1/books/123/status" or nil)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/books/123/status", 1, true) ~= nil)
         local request_payload = type(captured_request.source) == "function" and captured_request.source() or nil
         assert.is_true(type(request_payload) == "string")
         assert.is_true(request_payload:find('"status":"READ"', 1, true) ~= nil)
@@ -488,13 +509,13 @@ describe("GrimmLink API client", function()
             },
         }
 
-        local success, code, payload, _headers, details = client:request("GET", client:_apiPath("/auth"))
+        local success, code, payload, _headers, details = client:request("GET", client:_apiPath("/capabilities"))
         assert.is_true(success)
         assert.are.equal(200, code)
         assert.are.equal("ok", payload.status)
         assert.are.equal("http://example.com", client.server_url)
         assert.is_true(details.used_fallback)
-        assert.are.equal("https://backup.example.com/api/grimmlink/v1/auth", details.used_url)
+        assert.are.equal("https://backup.example.com/api/grimmlink/v2/capabilities", details.used_url)
         local last_failure = client:getLastPrimaryFailure()
         assert.is_true(type(last_failure) == "table")
         assert.are.equal("http://example.com", last_failure.url)
@@ -516,7 +537,7 @@ describe("GrimmLink API client", function()
                 ok = 1,
             },
         }
-        local ok_first = select(1, client:request("GET", client:_apiPath("/auth")))
+        local ok_first = select(1, client:request("GET", client:_apiPath("/capabilities")))
         assert.is_true(ok_first)
         assert.is_not_nil(client:getLastPrimaryFailure())
 
@@ -526,7 +547,7 @@ describe("GrimmLink API client", function()
             headers = {},
             ok = 1,
         }
-        local ok_second = select(1, client:request("GET", client:_apiPath("/auth")))
+        local ok_second = select(1, client:request("GET", client:_apiPath("/capabilities")))
         assert.is_true(ok_second)
         assert.is_nil(client:getLastPrimaryFailure())
     end)
@@ -550,7 +571,7 @@ describe("GrimmLink API client", function()
             },
         }
 
-        local ok, code, message, _headers, details = client:request("GET", client:_apiPath("/auth"))
+        local ok, code, message, _headers, details = client:request("GET", client:_apiPath("/capabilities"))
         assert.is_false(ok)
         assert.is_nil(code)
         assert.is_true(type(message) == "string")
@@ -560,7 +581,64 @@ describe("GrimmLink API client", function()
     end)
 
     it("centralizes the API prefix", function()
-        assert.are.equal("/api/grimmlink/v1", client.api_prefix)
-        assert.are.equal("/api/grimmlink/v1/syncs/progress", client:_apiPath("/syncs/progress"))
+        assert.are.equal("/api/grimmlink/v2", client.api_prefix)
+        assert.are.equal("/api/grimmlink/v2/progress/hash", client:_apiPath("/progress/hash"))
+    end)
+
+    it("opens a V2 session before a protected request and sends the bearer", function()
+        client.session_token = nil
+        local success = client:request("GET", client:_apiPath("/capabilities"))
+        assert.is_true(success)
+        assert.are.equal("Bearer test-token", captured_request.headers.Authorization)
+        assert.is_nil(captured_request.headers["x-auth-key"])
+    end)
+
+    it("converts native PDF progress to the V2 position and fraction contract", function()
+        next_http_response = { body = '{"nativeSync":{"status":"synced"}}', code = 200 }
+        local success = client:updateProgress({
+            bookHash = "book-hash", fileFormat = "PDF", progress = "55",
+            currentPage = 55, totalPages = 16653, percentage = 0.33,
+            timestamp = 1794225600, device = "KOReader", deviceId = "device-1",
+        })
+        assert.is_true(success)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/progress/book%-hash") ~= nil)
+        assert.are.equal("PUT", captured_request.method)
+        assert.are.equal(0.0033, encoded_value.fraction)
+        assert.are.equal(55, encoded_value.position.page)
+        assert.are.equal(16653, encoded_value.position.totalPages)
+        assert.are.equal("koreader", encoded_value.source)
+        assert.is_true(encoded_value.operationId:match("^[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+$") ~= nil)
+    end)
+
+    it("does not acknowledge a skipped native position as synced", function()
+        next_http_response = { body = '{"nativeSync":{"status":"skipped"}}', code = 200 }
+        local success = client:updateProgress({
+            bookHash = "book-hash", fileFormat = "EPUB", progress = "/body/DocFragment[1]",
+            timestamp = 1794225600,
+        })
+        assert.is_false(success)
+    end)
+
+    it("maps a V2 page pull without turning 0.33 percent into 33 percent", function()
+        next_http_response = { body = '{"status":"ok","fraction":0.0033,"position":{"format":"PDF","page":55,"totalPages":16653},"updatedAt":"2026-11-09T12:00:00Z"}', code = 200 }
+        local success, progress = client:getProgress("book-hash")
+        assert.is_true(success)
+        assert.are.equal(0.33, progress.percentage)
+        assert.is_true(progress.percentageIsPercent)
+        assert.are.equal("55", progress.location)
+        assert.are.equal(55, progress.currentPage)
+    end)
+
+    it("rejects magic shelves because V2 exposes regular shelves only", function()
+        local success, _, code = client:getShelves("magic")
+        assert.is_false(success)
+        assert.are.equal(501, code)
+    end)
+
+    it("resolves a shelf download's current hash by verified book ID", function()
+        next_http_response = { body = '{"bookId":12,"bookFileId":34,"bookHash":"verified-hash"}', code = 200 }
+        local hash = client:resolveDownloadHash(12)
+        assert.are.equal("verified-hash", hash)
+        assert.is_true(captured_request.url:find("/api/grimmlink/v2/books/12/hash", 1, true) ~= nil)
     end)
 end)

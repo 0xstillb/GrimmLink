@@ -129,13 +129,13 @@ function Grimmlink:showConnectionMenu(touchmenu_instance)
                         end,
                     },
                     {
-                        text = _("Username"),
+                        text = _("KOSync username"),
                         callback = function()
                             self:configureUsername()
                         end,
                     },
                     {
-                        text = _("Password"),
+                        text = _("KOSync password"),
                         callback = function()
                             self:configurePassword()
                         end,
@@ -249,8 +249,8 @@ function Grimmlink:addToMainMenu(menu_items)
                     { text = _("Setup Connection"), callback = function() self:configureConnection() end },
                     { text = _("Local URL"), callback = function() self:configureServerUrl() end },
                     { text = _("Remote URL"), callback = function() self:configureRemoteUrl() end },
-                    { text = _("Username"), callback = function() self:configureUsername() end },
-                    { text = _("Password"), callback = function() self:configurePassword() end },
+                    { text = _("KOSync username"), callback = function() self:configureUsername() end },
+                    { text = _("KOSync password"), callback = function() self:configurePassword() end },
                     { text = _("Test Connection"), keep_menu_open = true, callback = function() self:testConnection(false) end },
                     { text = _("Test Connection with Diagnostics"), keep_menu_open = true, callback = function() self:testConnection(true) end },
                 },

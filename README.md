@@ -1,15 +1,15 @@
 <h1 align="center">📚 GrimmLink</h1>
 
-<h3 align="center">✨ KOReader Companion for the 0xstillb Grimmory Fork</h3>
+<h3 align="center">✨ KOReader companion for GrimmLink Adapter V2</h3>
 
 <p align="center">
-  <strong>🔄 Sync reading progress, ⏱️ sessions, 🗂️ shelves, 📝 metadata, and 📥 downloaded books between KOReader and <a href="https://github.com/0xstillb/grimmory">0xstillb/grimmory</a> — without breaking your reading flow.</strong>
+  <strong>🔄 Sync reading progress, ⏱️ sessions, 🗂️ regular shelves, 📝 metadata, and 📥 downloaded books through <a href="https://github.com/0xstillb/grimmlink-adapter">GrimmLink Adapter V2</a>.</strong>
 </p>
 
 <p align="center">
   <img alt="Version" src="https://img.shields.io/badge/version-v2.0.0-111111?style=for-the-badge" />
   <img alt="KOReader" src="https://img.shields.io/badge/KOReader-plugin-3A3A3A?style=for-the-badge" />
-  <img alt="Grimmory Fork" src="https://img.shields.io/badge/Grimmory-0xstillb%20fork-6B46C1?style=for-the-badge" />
+  <img alt="GrimmLink Adapter V2" src="https://img.shields.io/badge/Adapter-V2-6B46C1?style=for-the-badge" />
   <img alt="Status" src="https://img.shields.io/badge/status-active%20development-0E9F6E?style=for-the-badge" />
 </p>
 
@@ -24,8 +24,7 @@
 
 <p align="center">
   <strong>📍 Progress Sync</strong> ·
-  <strong>🗂️ Shelf Sync</strong> ·
-  <strong>🪄 Magic Shelf</strong> ·
+  <strong>🗂️ Regular Shelf Sync</strong> ·
   <strong>📦 Offline Queue</strong> ·
   <strong>🧰 Diagnostics</strong>
 </p>
@@ -36,7 +35,7 @@
 
 ## 👋 What is GrimmLink?
 
-**GrimmLink** is a KOReader plugin built for readers who use the **[`0xstillb/grimmory`](https://github.com/0xstillb/grimmory) fork** as their personal library server.
+**GrimmLink** is a KOReader plugin for **[GrimmLink Adapter V2](https://github.com/0xstillb/grimmlink-adapter)** and stock Grimmory. Configure the plugin with the Adapter URL; the Adapter handles Grimmory authentication and API mapping.
 
 It connects your e-reader to Grimmory so your reading progress, reading sessions, shelves, downloaded books, and selected metadata can move with you across devices.
 
@@ -55,9 +54,9 @@ GrimmLink aims to become the full KOReader companion layer for Grimmory:
 - 📍 **Progress sync** for KOReader-native reading positions
 - ⏱️ **Reading session sync** for reading history and stats
 - 🗂️ **Shelf sync** for selected Grimmory shelves
-- 🪄 **Magic Shelf support** for dynamic server-side collections
+- 🪄 **Magic Shelf support** is planned for an Adapter capability that provides these collections
 - 📦 **Offline queue** for unreliable network conditions
-- 📥 **Local book downloads** directly from Grimmory
+- 📥 **Local book downloads** through the Adapter's verified hash route
 - 📝 **Metadata sync** for ratings, annotations, and bookmarks
 - 🧰 **Diagnostics and backup tools** for real-world debugging
 
@@ -116,13 +115,13 @@ This allows Grimmory to understand not only **where** you are in a book, but als
 
 Bring selected Grimmory shelves into KOReader.
 
-GrimmLink supports both regular shelves and Magic Shelves:
+Adapter V2 currently supports regular shelves. The Magic Shelf menu remains visible but its sync call returns an explicit unsupported result.
 
 | Shelf Feature | Status |
 |---|---:|
 | Regular shelf sync | ✅ |
-| Magic shelf sync | ✅ |
-| Regular + Magic sync | ✅ |
+| Magic shelf sync | Not available in Adapter V2 |
+| Regular + Magic sync | Not available in Adapter V2 |
 | Download books from Grimmory | ✅ |
 | Reuse existing downloaded files | ✅ |
 | Fast sync cache | ✅ |
@@ -191,16 +190,16 @@ not block the KOReader interface.
 
 ### 🌐 Local + Remote Server URLs
 
-GrimmLink supports both a local Grimmory URL and a remote Grimmory URL.
+GrimmLink supports both a local Adapter V2 URL and a remote Adapter V2 URL.
 
 Typical setup:
 
 ```text
-Local URL  → http://192.168.x.x:6060
+Local URL  → http://192.168.x.x:8085
 Remote URL → https://your-domain.example.com
 ```
 
-This is useful when Grimmory is hosted at home but also exposed through a remote tunnel, reverse proxy, or public endpoint.
+This is useful when the Adapter is hosted at home and also available through a reverse proxy or tunnel.
 
 > 📡 Note: KOReader does not reliably expose Wi-Fi SSID information across all devices. `home_ssid` should be treated as an optional note / diagnostic hint, not as a reliable automatic routing mechanism.
 
@@ -279,17 +278,17 @@ KOReader → Tools / Plugins → GrimmLink
 
 ## ⚙️ Configuration
 
-Open the GrimmLink settings menu and configure the connection to your Grimmory server.
+Open the GrimmLink settings menu and configure the connection to your GrimmLink Adapter V2 server.
 
-> 🔗 GrimmLink targets the **[`0xstillb/grimmory`](https://github.com/0xstillb/grimmory) fork** and its KOReader companion endpoints.
+> 🔗 Deploy Adapter V2 and link the KOSync account to a Grimmory account before connecting the plugin.
 
 ### 🔐 Required settings
 
 | Setting | Description |
 |---|---|
-| Server URL / Local URL | Your `0xstillb/grimmory` server URL |
-| Username | Grimmory / KOReader companion username |
-| Password / Auth key | Grimmory / KOReader companion password or key |
+| Server URL / Local URL | Your Adapter V2 base URL, such as `http://grimmlink.local:8085` |
+| Username | KOSync username configured in Grimmory |
+| KOSync password | Plain KOSync password configured in Grimmory; the plugin computes its MD5 key. Re-enter it if an older setup stored a digest. |
 | Device name | Display name for this KOReader device |
 
 ### ✅ Recommended settings
@@ -308,8 +307,8 @@ Open the GrimmLink settings menu and configure the connection to your Grimmory s
 | Setting | Description |
 |---|---|
 | Regular shelf sync | Sync one selected Grimmory shelf |
-| Magic shelf sync | Sync one selected Magic Shelf |
-| Separate Magic download directory | Store Magic Shelf downloads separately |
+| Magic shelf sync | Unavailable with Adapter V2 |
+| Separate Magic download directory | Reserved for future Magic Shelf support |
 | Use original filename | Keep server-provided filenames when possible |
 | Two-way shelf delete sync | Experimental / implementation-dependent; do not rely on local-delete → server shelf removal unless verified on device |
 
@@ -325,7 +324,7 @@ Open the GrimmLink settings menu and configure the connection to your Grimmory s
 sequenceDiagram
     participant K as KOReader
     participant G as GrimmLink
-    participant S as Grimmory
+    participant S as GrimmLink Adapter V2
 
     K->>G: Open book
     G->>S: Find book by hash
@@ -343,7 +342,7 @@ sequenceDiagram
     participant K as KOReader
     participant G as GrimmLink
     participant Q as Offline Queue
-    participant S as Grimmory
+    participant S as GrimmLink Adapter V2
 
     K->>G: Close book offline
     G->>Q: Save pending progress/session
@@ -359,18 +358,18 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant G as GrimmLink
-    participant S as Grimmory
+    participant S as GrimmLink Adapter V2
     participant D as Device Storage
     participant U as KOReader UI
 
-    G->>S: Fetch selected shelf / Magic Shelf books
+    G->>S: Fetch selected regular-shelf books
     S-->>G: Return current shelf membership
     G->>D: Compare server shelf with local shelf map
 
     alt Book already exists locally
         G->>D: Reuse existing GrimmLink-managed file
     else Book is missing locally
-        G->>S: Download book file
+        G->>S: Resolve primary hash, then download book file
         G->>D: Save as GrimmLink-managed file
     end
 
@@ -389,36 +388,33 @@ Shelf deletion is scoped to **shelf membership** and **GrimmLink-managed local f
 
 ---
 
-## 🧩 Grimmory API Usage
+## 🧩 Adapter V2 API Usage
 
-GrimmLink communicates with the **[`0xstillb/grimmory`](https://github.com/0xstillb/grimmory) fork** through the GrimmLink v1 API island.
+GrimmLink communicates with **[GrimmLink Adapter V2](https://github.com/0xstillb/grimmlink-adapter)**. The Adapter communicates with stock Grimmory.
 
 Core endpoint groups include:
 
 ```text
-/api/grimmlink/v1/auth
-/api/grimmlink/v1/books/by-hash/{hash}
-/api/grimmlink/v1/syncs/progress
-/api/grimmlink/v1/syncs/progress/{hash}
-/api/grimmlink/v1/reading-sessions
-/api/grimmlink/v1/reading-sessions/batch
-/api/grimmlink/v1/syncs/metadata
-/api/grimmlink/v1/syncs/metadata/batch
-/api/grimmlink/v1/shelves
-/api/grimmlink/v1/shelves/{type}/{shelfId}/books
-/api/grimmlink/v1/shelves/{shelfId}/books
-/api/grimmlink/v1/books/{bookId}/download
-/api/grimmlink/v1/shelves/{type}/{shelfId}/books/{bookId}/remove
-/api/grimmlink/v1/shelves/{shelfId}/books/{bookId}/remove
-/api/grimmlink/v1/books/read-statuses
-/api/grimmlink/v1/books/{bookId}/status
+/api/grimmlink/v2/auth/session
+/api/grimmlink/v2/books/resolve?hash={hash}
+/api/grimmlink/v2/progress/{hash}?reader=koreader
+/api/grimmlink/v2/progress/{hash}
+/api/grimmlink/v2/reading-sessions[/batch]
+/api/grimmlink/v2/syncs/metadata[/batch]
+/api/grimmlink/v2/shelves
+/api/grimmlink/v2/shelves/{shelfId}/items
+/api/grimmlink/v2/shelves/{shelfId}/items/{bookId}
+/api/grimmlink/v2/books/{bookId}/hash
+/api/grimmlink/v2/books/{bookId}/content?hash={hash}
+/api/grimmlink/v2/books/read-statuses
+/api/grimmlink/v2/books/{bookId}/status
 ```
 
-Authentication for the GrimmLink v1 API uses KOReader companion-style headers:
+The plugin sends the KOSync username and MD5 key only to `POST /auth/session`. It uses the returned bearer token for subsequent V2 requests. An expired session is renewed after a 401 response. Shelf downloads first resolve a verified primary-file hash when the shelf item does not include one.
 
 ```text
-x-auth-user
-x-auth-key
+x-auth-user: <KOSync username>
+x-auth-key: <MD5 of KOSync password>
 ```
 
 ---
@@ -485,7 +481,7 @@ test/updater_spec.lua
 Before tagging a stable release, test on at least one real KOReader device:
 
 - ✅ install plugin from a clean KOReader profile
-- ✅ connect to the `0xstillb/grimmory` server
+- ✅ connect to GrimmLink Adapter V2 backed by stock Grimmory
 - ✅ authenticate successfully
 - ✅ open a matched book
 - ✅ pull remote progress
@@ -533,10 +529,10 @@ Recently completed stability work:
 ## 🏷️ Version
 
 ```text
-Version: v1.5.1
+Version: v2.0.0
 Type: release
-Commit: e795840
-Build: 2026-06-04T22:13:27+07:00
+Commit: 99949d6
+Build: 2026-06-15T23:45:00+07:00
 ```
 
 ---

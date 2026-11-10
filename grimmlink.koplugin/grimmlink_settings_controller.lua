@@ -464,7 +464,7 @@ function Grimmlink:runFirstRunSetupWizard(options)
     end
 
     local function askPassword()
-        self:showTextInput(_("Password"), pending.password, _("Enter Grimmory password"), true, function(password)
+        self:showTextInput(_("KOSync password"), pending.password, _("Enter the plain KOSync password from Grimmory"), true, function(password)
             local normalized = safeToString(password)
             if normalized == "" then
                 self:showMessage(_("Password is required"), 2)
@@ -477,7 +477,7 @@ function Grimmlink:runFirstRunSetupWizard(options)
     end
 
     local function askUsername()
-        self:showTextInput(_("KOReader Username"), pending.username, _("Enter username"), false, function(username)
+        self:showTextInput(_("KOSync username"), pending.username, _("Enter the KOSync username from Grimmory"), false, function(username)
             local normalized = safeToString(username)
             if normalized == "" then
                 self:showMessage(_("Username is required"), 2)
