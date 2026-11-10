@@ -1607,6 +1607,7 @@ function ShelfSync:executeDownload(item, shelf_id, sync_start, download_opts)
     if book and book.fileSizeKb then
         dl_opts.expected_size_kb = book.fileSizeKb
     end
+    dl_opts.book_hash = book and (book.bookHash or book.hash) or nil
     local resolved_format = resolveBookFormat(book)
     if resolved_format then
         dl_opts.expected_format = resolved_format
@@ -1658,6 +1659,7 @@ function ShelfSync:startAsyncDownload(item)
     if book and book.fileSizeKb then
         opts.expected_size_kb = book.fileSizeKb
     end
+    opts.book_hash = book and (book.bookHash or book.hash) or nil
     local resolved_format = resolveBookFormat(book)
     if resolved_format then
         opts.expected_format = resolved_format

@@ -2777,8 +2777,8 @@ describe("GrimmLink helper methods", function()
         })
         local prompts = {
             ["Local URL (home network)"] = "http://192.168.1.20:6060",
-            ["KOReader Username"] = "reader-one",
-            ["Password"] = "secret-one",
+            ["KOSync username"] = "reader-one",
+            ["KOSync password"] = "secret-one",
             ["Device Name"] = "Bedroom Kindle",
         }
         local tested_connection = false
@@ -3502,7 +3502,7 @@ describe("GrimmLink helper methods", function()
         assert.is_not_nil(test_item)
         local test_diag_item = findMenuItem(connection_menu.sub_item_table, "Test Connection with Diagnostics")
         assert.is_not_nil(test_diag_item)
-        local password_item = findMenuItem(connection_menu.sub_item_table, "Password")
+        local password_item = findMenuItem(connection_menu.sub_item_table, "KOSync password")
         assert.is_not_nil(password_item)
         local advanced_menu = findMenuItem(top, "Advanced Setting")
         assert.is_not_nil(advanced_menu)

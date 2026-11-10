@@ -242,7 +242,8 @@ function Grimmlink:normalizeRemoteProgress(remote_progress)
     normalized.bookHash = normalized.bookHash or normalized.document
     normalized.bookId = maybeNumber(normalized.bookId)
     normalized.bookFileId = maybeNumber(normalized.bookFileId or normalized.book_file_id)
-    normalized.percentage = normalizePercent(normalized.percentage)
+    normalized.percentage = remote_progress.percentageIsPercent
+        and tonumber(normalized.percentage) or normalizePercent(normalized.percentage)
     normalized.currentPage = maybeNumber(normalized.currentPage)
     normalized.totalPages = maybeNumber(normalized.totalPages)
     normalized.timestamp = maybeNumber(normalized.timestamp or normalized.updatedAt)
@@ -887,7 +888,7 @@ function Grimmlink:syncPendingProgress(silent, limit)
                             bookType = payload.bookType or payload.fileFormat,
                             progress = payload.progress,
                             location = payload.location,
-                            percentage = normalizePercent(payload.percentage),
+                            percentage = tonumber(payload.percentage),
                             currentPage = payload.currentPage,
                             totalPages = payload.totalPages,
                             timestamp = payload.timestamp or nowUtc(),
@@ -898,7 +899,7 @@ function Grimmlink:syncPendingProgress(silent, limit)
                             bookType = payload.bookType or payload.fileFormat,
                             progress = payload.progress,
                             location = payload.location,
-                            percentage = normalizePercent(payload.percentage),
+                            percentage = tonumber(payload.percentage),
                             currentPage = payload.currentPage,
                             totalPages = payload.totalPages,
                             device = payload.device,

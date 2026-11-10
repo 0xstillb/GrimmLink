@@ -208,14 +208,14 @@ function Grimmlink:configureRemoteUrl()
 end
 
 function Grimmlink:configureUsername()
-    self:showTextInput(_("KOReader Username"), self.username, _("Enter username"), false, function(value)
+    self:showTextInput(_("KOSync username"), self.username, _("Enter the KOSync username from Grimmory"), false, function(value)
         self:saveSetting("username", safeToString(value))
         self:showMessage(_("Username saved"), 2)
     end)
 end
 
 function Grimmlink:configurePassword()
-    self:showTextInput(_("Password"), self.password, _("Enter Grimmory password"), true, function(value)
+    self:showTextInput(_("KOSync password"), self.password, _("Enter the plain KOSync password from Grimmory"), true, function(value)
         self:saveSetting("password", safeToString(value))
         self:showMessage(_("Password saved"), 2)
     end)
@@ -301,9 +301,9 @@ function Grimmlink:configureConnection()
                 pending.remote_url = safeToString(remote_url)
                 self:showTextInput(_("Remote URL Nickname (optional)"), pending.remote_url_nickname, _("Example: Public API"), false, function(remote_nickname)
                     pending.remote_url_nickname = normalizeNickname(remote_nickname)
-                    self:showTextInput(_("KOReader Username"), pending.username, _("Enter username"), false, function(username)
+                    self:showTextInput(_("KOSync username"), pending.username, _("Enter the KOSync username from Grimmory"), false, function(username)
                         pending.username = safeToString(username)
-                        self:showTextInput(_("Password"), pending.password, _("Enter Grimmory password"), true, function(password)
+                        self:showTextInput(_("KOSync password"), pending.password, _("Enter the plain KOSync password from Grimmory"), true, function(password)
                             pending.password = safeToString(password)
                             self:saveConnectionSettings(pending.server_url, pending.username, pending.password, pending.remote_url, {
                                 local_url_nickname = pending.local_url_nickname,
