@@ -35,9 +35,15 @@
 
 ## 👋 What is GrimmLink?
 
-**GrimmLink** is a KOReader plugin for **[GrimmLink Adapter V2](https://github.com/0xstillb/grimmlink-adapter)** and stock Grimmory. Configure the plugin with the Adapter URL; the Adapter handles Grimmory authentication and API mapping.
+**GrimmLink** is a KOReader plugin that connects to [GrimmLink Adapter V2](https://github.com/0xstillb/grimmlink-adapter), which works with the official upstream [Grimmory project](https://github.com/grimmory-tools/grimmory). The plugin does not require the former `0xstillb/grimmory` fork or its custom GrimmLink API endpoints.
 
-It connects your e-reader to Grimmory so your reading progress, reading sessions, shelves, downloaded books, and selected metadata can move with you across devices.
+The Adapter is the bridge between KOReader and Grimmory: it authenticates the linked KOSync account, translates the plugin's Adapter V2 requests to Grimmory's supported APIs, and returns the data in the format the plugin expects. Configure GrimmLink with the Adapter URL; configure the Adapter with your Grimmory server and linked KOSync account.
+
+```text
+KOReader + GrimmLink  ⇄  GrimmLink Adapter V2  ⇄  Official Grimmory upstream
+```
+
+Reading progress, sessions, supported shelves, downloaded books, and selected metadata can then move between your e-reader and Grimmory.
 
 Open a book in KOReader. Read offline. Close the book. Reconnect later. GrimmLink quietly handles the sync work in the background.
 
@@ -148,7 +154,7 @@ GrimmLink is intentionally conservative with deletion.
 | 🚫 Delete arbitrary user files | Not performed by GrimmLink |
 | ⚠️ User manually deletes/removes a local KOReader file | Not documented as guaranteed server-side shelf removal unless the device hook is implemented and tested |
 
-> ⚠️ Code review note for **v1.4.11**: the plugin includes a `pending_shelf_removals` table, `removeBookFromShelf()` API call, and pending-removal retry processor. However, this review did **not** confirm an active KOReader file-manager delete hook that automatically converts a user-initiated local delete into a queued Grimmory shelf removal. Do not document local-delete → Grimmory shelf removal as guaranteed until that hook is implemented and tested.
+> ⚠️ Local-delete → Grimmory shelf removal is not guaranteed. The plugin does not delete books from the Grimmory library.
 
 ---
 
@@ -378,7 +384,7 @@ sequenceDiagram
         G->>D: Clean up local copy if managed by GrimmLink
     else User manually deletes local KOReader file
         G->>D: Local file is gone
-        Note over G,S: Server-side shelf removal is not documented as guaranteed in v1.4.11
+        Note over G,S: Local file removal does not delete the book from Grimmory
     end
 
     G->>U: Refresh local library / SimpleUI cache
